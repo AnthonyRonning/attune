@@ -1,6 +1,10 @@
 use std::net::SocketAddr;
 
-use axum::{extract::State, routing::post, Json, Router};
+use axum::{
+    extract::State,
+    routing::{get, post},
+    Json, Router,
+};
 use model_correction_proxy::openai::{
     ChatChoice, ChatCompletionRequest, ChatCompletionResponse, ChatMessage,
 };
@@ -26,11 +30,26 @@ async fn main() -> anyhow::Result<()> {
     let state = MockState { response, content };
 
     let router = Router::new()
+        .route("/v1/models", get(models))
         .route("/v1/chat/completions", post(chat))
         .with_state(state);
     let listener = tokio::net::TcpListener::bind(bind).await?;
     axum::serve(listener, router).await?;
     Ok(())
+}
+
+async fn models() -> Json<Value> {
+    Json(json!({
+        "object": "list",
+        "data": [
+            {
+                "id": "mock-model",
+                "object": "model",
+                "created": 0,
+                "owned_by": "model-correction-proxy"
+            }
+        ]
+    }))
 }
 
 async fn chat(

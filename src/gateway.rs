@@ -62,6 +62,7 @@ impl Gateway {
     pub fn router(&self) -> Router {
         Router::new()
             .route("/health", get(health))
+            .route("/v1/models", get(models))
             .route("/v1/chat/completions", post(chat_completions))
             .layer(CorsLayer::permissive())
             .layer(TraceLayer::new_for_http())
@@ -78,6 +79,17 @@ impl Gateway {
 
 async fn health() -> Json<serde_json::Value> {
     Json(json!({"status":"ok"}))
+}
+
+async fn models(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    let auth = headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok());
+
+    match state.upstream.models(auth).await {
+        Ok(response) => json_response(StatusCode::OK, response, None),
+        Err(error) => openai_error(StatusCode::BAD_GATEWAY, &error.to_string(), None),
+    }
 }
 
 async fn chat_completions(
