@@ -1,0 +1,5 @@
+/target/
+/traces/
+/datasets/
+/eval/*.local.jsonl
+*.log

@@ -1,0 +1,42 @@
+[package]
+name = "model-correction-proxy"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[lib]
+name = "model_correction_proxy"
+path = "src/lib.rs"
+
+[[bin]]
+name = "model-correction-proxy"
+path = "src/bin/proxy.rs"
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+axum = { version = "0.8", features = ["macros"] }
+bon = "3"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive", "env"] }
+dspy-rs = "0.7.3"
+futures = "0.3"
+json5 = "0.4"
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+schemars = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+strsim = "0.11"
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["fs", "macros", "net", "rt-multi-thread", "signal", "time"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[dev-dependencies]
+httpmock = "0.7"
+insta = { version = "1", features = ["json"] }
+serde_path_to_error = "0.1"
