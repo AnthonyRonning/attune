@@ -436,8 +436,10 @@ mod tests {
 
     #[test]
     fn maps_reasoning_text_into_content() {
-        let mut msg = ChatMessage::default();
-        msg.role = "assistant".to_string();
+        let mut msg = ChatMessage {
+            role: "assistant".to_string(),
+            ..ChatMessage::default()
+        };
         msg.extra
             .insert("reasoning".to_string(), json!("visible text"));
         let response = ChatCompletionResponse {

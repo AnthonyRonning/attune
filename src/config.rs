@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{model_profile::ModelProfile, policy::PolicyConfig};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProxyConfig {
     pub upstream: UpstreamConfig,
     pub correction: CorrectionConfig,
@@ -12,18 +12,6 @@ pub struct ProxyConfig {
     pub policy: PolicyConfig,
     #[serde(default)]
     pub model_profiles: Vec<ModelProfile>,
-}
-
-impl Default for ProxyConfig {
-    fn default() -> Self {
-        Self {
-            upstream: UpstreamConfig::default(),
-            correction: CorrectionConfig::default(),
-            trace: TraceConfig::default(),
-            policy: PolicyConfig::default(),
-            model_profiles: Vec::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

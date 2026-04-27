@@ -2644,6 +2644,7 @@ dependencies = [
  "dspy-rs",
  "futures",
  "httpmock",
+ "indexmap",
  "insta",
  "json5",
  "regex",

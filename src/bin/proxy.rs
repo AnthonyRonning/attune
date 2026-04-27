@@ -7,6 +7,7 @@ use model_correction_proxy::{
     dataset::{export_dataset, DatasetExportConfig},
     eval::{run_regression_suite, RegressionConfig},
     gateway::Gateway,
+    optimization::{optimize_correction_prompt, GepaOptimizationConfig},
     replay::{replay_traces, ReplayConfig},
 };
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
@@ -55,6 +56,24 @@ enum Command {
         #[arg(long, default_value = "eval/regressions.jsonl")]
         suite_path: String,
     },
+    OptimizePrompts {
+        #[arg(long, default_value = "datasets/corrections.jsonl")]
+        dataset_path: String,
+        #[arg(long, default_value = "datasets/gepa-correction-prompt.json")]
+        output_path: String,
+        #[arg(
+            long,
+            env = "MCP_UPSTREAM_BASE_URL",
+            default_value = "https://openrouter.ai/api/v1"
+        )]
+        base_url: String,
+        #[arg(long, env = "MCP_OPTIMIZATION_MODEL", default_value = "qwen/qwen3-8b")]
+        model: String,
+        #[arg(long, default_value_t = 3)]
+        iterations: usize,
+        #[arg(long, default_value_t = 12)]
+        max_examples: usize,
+    },
 }
 
 #[tokio::main]
@@ -69,9 +88,10 @@ async fn main() -> anyhow::Result<()> {
         Command::Serve => {
             let mut config = ProxyConfig::default();
             config.upstream.base_url = cli.upstream_base_url;
-            config.upstream.api_key = cli
-                .upstream_api_key
-                .or_else(|| std::env::var("OPENROUTER_API_KEY").ok());
+            config.upstream.api_key = first_non_empty([
+                cli.upstream_api_key,
+                std::env::var("OPENROUTER_API_KEY").ok(),
+            ]);
             config.trace.path = cli.trace_path.into();
             let gateway = Gateway::new(config)?;
             gateway.serve(cli.bind).await.context("proxy server failed")
@@ -100,5 +120,33 @@ async fn main() -> anyhow::Result<()> {
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(())
         }
+        Command::OptimizePrompts {
+            dataset_path,
+            output_path,
+            base_url,
+            model,
+            iterations,
+            max_examples,
+        } => {
+            let report = optimize_correction_prompt(GepaOptimizationConfig {
+                dataset_path: dataset_path.into(),
+                output_path: output_path.into(),
+                base_url,
+                api_key: std::env::var("OPENROUTER_API_KEY").ok(),
+                model,
+                iterations,
+                max_examples,
+            })
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(())
+        }
     }
+}
+
+fn first_non_empty(values: impl IntoIterator<Item = Option<String>>) -> Option<String> {
+    values
+        .into_iter()
+        .flatten()
+        .find(|value| !value.trim().is_empty())
 }

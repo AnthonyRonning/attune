@@ -53,7 +53,12 @@ impl UpstreamClient {
             .header("X-Title", "model-correction-proxy")
             .json(request);
 
-        if let Some(api_key) = &self.config.api_key {
+        if let Some(api_key) = self
+            .config
+            .api_key
+            .as_ref()
+            .filter(|key| !key.trim().is_empty())
+        {
             builder = builder.bearer_auth(api_key);
         } else if let Some(auth) = inbound_authorization {
             builder = builder.header(AUTHORIZATION, auth);

@@ -61,9 +61,7 @@ pub async fn replay_trace_file(config: ReplayConfig) -> Result<ReplayReport> {
         {
             Ok(outcome) => {
                 report.traces_replayed += 1;
-                if serde_json::to_value(&outcome.final_response)?
-                    != serde_json::to_value(&expected)?
-                {
+                if !responses_semantically_equal(&outcome.final_response, &expected) {
                     report.mismatches += 1;
                     report.failures.push(format!(
                         "{} replay final response differed from recorded final response",
@@ -78,4 +76,83 @@ pub async fn replay_trace_file(config: ReplayConfig) -> Result<ReplayReport> {
     }
 
     Ok(report)
+}
+
+fn responses_semantically_equal(
+    left: &crate::openai::ChatCompletionResponse,
+    right: &crate::openai::ChatCompletionResponse,
+) -> bool {
+    if left.model != right.model || left.choices.len() != right.choices.len() {
+        return false;
+    }
+
+    left.choices
+        .iter()
+        .zip(&right.choices)
+        .all(|(left, right)| {
+            left.finish_reason == right.finish_reason
+                && left.message.role == right.message.role
+                && left.message.content_text() == right.message.content_text()
+                && normalize_tool_calls(left.message.tool_calls.as_deref())
+                    == normalize_tool_calls(right.message.tool_calls.as_deref())
+        })
+}
+
+fn normalize_tool_calls(calls: Option<&[crate::openai::OpenAiToolCall]>) -> Vec<serde_json::Value> {
+    calls
+        .unwrap_or_default()
+        .iter()
+        .map(|call| {
+            serde_json::json!({
+                "type": call.call_type,
+                "name": call.function.name,
+                "arguments": serde_json::from_str::<serde_json::Value>(&call.function.arguments)
+                    .unwrap_or_else(|_| serde_json::Value::String(call.function.arguments.clone()))
+            })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{json, Map};
+
+    use super::*;
+    use crate::openai::{
+        ChatChoice, ChatCompletionResponse, ChatMessage, OpenAiFunctionCall, OpenAiToolCall,
+    };
+
+    #[test]
+    fn replay_normalization_ignores_generated_ids() {
+        let mut left = ChatCompletionResponse::empty_for_model("m");
+        let mut right = ChatCompletionResponse::empty_for_model("m");
+        left.choices.push(choice("call_a"));
+        right.choices.push(choice("call_b"));
+
+        assert!(responses_semantically_equal(&left, &right));
+    }
+
+    fn choice(id: &str) -> ChatChoice {
+        ChatChoice {
+            index: 0,
+            message: ChatMessage {
+                role: "assistant".to_string(),
+                content: Some(json!(null)),
+                name: None,
+                tool_call_id: None,
+                tool_calls: Some(vec![OpenAiToolCall {
+                    id: id.to_string(),
+                    call_type: "function".to_string(),
+                    function: OpenAiFunctionCall {
+                        name: "read_file".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                }]),
+                extra: Map::new(),
+            },
+            finish_reason: Some("tool_calls".to_string()),
+            logprobs: None,
+            extra: Map::new(),
+        }
+    }
 }

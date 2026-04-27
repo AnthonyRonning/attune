@@ -6,6 +6,7 @@ pub mod gateway;
 pub mod model_profile;
 pub mod normalizer;
 pub mod openai;
+pub mod optimization;
 pub mod policy;
 pub mod prompt_adapter;
 pub mod repair;
