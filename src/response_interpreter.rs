@@ -119,6 +119,7 @@ pub fn extract_tool_intents_from_content(
 ) -> Vec<ToolIntent> {
     let mut intents = Vec::new();
     extract_named_xml(content, parse_events, &mut intents);
+    extract_nested_xml(content, parse_events, &mut intents);
     extract_wrapped_json_xml(content, parse_events, &mut intents);
     extract_markdown_json(content, parse_events, &mut intents);
     extract_direct_json(
@@ -161,6 +162,43 @@ fn extract_named_xml(content: &str, parse_events: &mut Vec<String>, intents: &mu
                 confidence: 0.95,
             });
         }
+    }
+}
+
+fn extract_nested_xml(
+    content: &str,
+    parse_events: &mut Vec<String>,
+    intents: &mut Vec<ToolIntent>,
+) {
+    let Ok(regex) = Regex::new(
+        r#"(?s)<tool_call>\s*<name>\s*([^<]+?)\s*</name>\s*<(?:arguments|args)>\s*(.*?)\s*</(?:arguments|args)>\s*</tool_call>"#,
+    ) else {
+        return;
+    };
+    for capture in regex.captures_iter(content) {
+        let name = capture
+            .get(1)
+            .map(|m| m.as_str())
+            .unwrap_or_default()
+            .trim();
+        let body = capture
+            .get(2)
+            .map(|m| m.as_str())
+            .unwrap_or_default()
+            .trim();
+        let arguments = parse_jsonish(body);
+        if arguments.is_none() {
+            parse_events.push(format!(
+                "nested XML tool call {name} had malformed JSON body"
+            ));
+        }
+        intents.push(ToolIntent {
+            name: name.to_string(),
+            arguments,
+            raw_arguments: body.to_string(),
+            source: ToolIntentSource::Xml,
+            confidence: 0.92,
+        });
     }
 }
 
@@ -367,6 +405,33 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "read_file");
         assert_eq!(calls[0].arguments.as_ref().unwrap()["path"], "Cargo.toml");
+    }
+
+    #[test]
+    fn extracts_nested_xml_tool_calls() {
+        let mut events = Vec::new();
+        let calls = extract_tool_intents_from_content(
+            r#"<tool_call><name>read_file</name><arguments>{path:"Cargo.toml"}</arguments></tool_call>"#,
+            &[tool("read_file")],
+            &mut events,
+        );
+
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "read_file");
+        assert_eq!(calls[0].arguments.as_ref().unwrap()["path"], "Cargo.toml");
+    }
+
+    #[test]
+    fn extracts_tagged_json_multiple_tool_calls() {
+        let mut events = Vec::new();
+        let calls = extract_tool_intents_from_content(
+            r#"<tool_calls_json>{"tool_calls":[{"name":"read_file","arguments":{"path":"a"}},{"name":"read_file","arguments":{"path":"b"}}]}</tool_calls_json>"#,
+            &[tool("read_file")],
+            &mut events,
+        );
+
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[1].arguments.as_ref().unwrap()["path"], "b");
     }
 
     #[test]

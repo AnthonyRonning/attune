@@ -148,6 +148,16 @@ fn repair_tool_intents(
     } else {
         config.policy.max_tool_calls_without_parallel.max(1)
     };
+    let attempted_count = intents.len();
+    if attempted_count > limit {
+        actions.push(RepairAction {
+            action: "parallel_tool_calls_truncated".to_string(),
+            confidence: 1.0,
+            reason: format!(
+                "client disabled or limited parallel tool calls; kept {limit} of {attempted_count}"
+            ),
+        });
+    }
 
     let mut out = Vec::new();
     for intent in intents.into_iter().take(limit) {
@@ -165,8 +175,9 @@ fn repair_tool_intents(
             });
         }
 
-        let arguments = match intent.arguments {
-            Some(value) => serialize_arguments(value),
+        let mut argument_actions = Vec::new();
+        let mut arguments_value = match intent.arguments {
+            Some(value) => Some(value),
             None if config.policy.deterministic_json_repair => {
                 if let Some(value) = parse_json_lenient(&intent.raw_arguments) {
                     actions.push(RepairAction {
@@ -174,26 +185,33 @@ fn repair_tool_intents(
                         confidence: 0.95,
                         reason: "parsed malformed JSON arguments with tolerant parser".to_string(),
                     });
-                    serialize_arguments(value)
+                    Some(value)
                 } else {
-                    intent.raw_arguments
+                    None
                 }
             }
-            None => intent.raw_arguments,
+            None => None,
         };
 
-        out.push(OpenAiToolCall::function(name, arguments));
-    }
-
-    if !normalized.parallel_tool_calls && out.len() < normalized.tools.len() {
-        let attempted_count = out.len();
-        if attempted_count > limit {
-            actions.push(RepairAction {
-                action: "parallel_tool_calls_truncated".to_string(),
-                confidence: 1.0,
-                reason: "client disabled parallel tool calls".to_string(),
-            });
+        if config.policy.schema_guided_repair {
+            if let Some(tool) = normalized
+                .tools
+                .iter()
+                .find(|tool| tool.function.name == name)
+            {
+                if let Some(value) = arguments_value.take() {
+                    let repaired = repair_arguments_for_schema(tool, value, &mut argument_actions);
+                    arguments_value = Some(repaired);
+                }
+            }
         }
+        actions.extend(argument_actions);
+
+        let arguments = arguments_value
+            .map(serialize_arguments)
+            .unwrap_or(intent.raw_arguments);
+
+        out.push(OpenAiToolCall::function(name, arguments));
     }
 
     out
@@ -216,6 +234,125 @@ fn repair_tool_name(name: &str, tools: &[OpenAiTool], threshold: f64) -> String 
             }
         })
         .unwrap_or_else(|| name.to_string())
+}
+
+fn repair_arguments_for_schema(
+    tool: &OpenAiTool,
+    value: Value,
+    actions: &mut Vec<RepairAction>,
+) -> Value {
+    let Some(properties) = tool
+        .function
+        .parameters
+        .get("properties")
+        .and_then(Value::as_object)
+    else {
+        return value;
+    };
+
+    match value {
+        Value::Object(mut object) => {
+            let property_names: Vec<String> = properties.keys().cloned().collect();
+            let keys: Vec<String> = object.keys().cloned().collect();
+            for key in keys {
+                if properties.contains_key(&key) {
+                    continue;
+                }
+                if let Some(replacement) = closest_property_name(&key, &property_names, 0.88) {
+                    if !object.contains_key(&replacement) {
+                        if let Some(value) = object.remove(&key) {
+                            object.insert(replacement.clone(), value);
+                            actions.push(RepairAction {
+                                action: "schema_key_repaired".to_string(),
+                                confidence: 0.88,
+                                reason: format!(
+                                    "mapped argument key {key:?} to schema property {replacement:?}"
+                                ),
+                            });
+                        }
+                    }
+                }
+            }
+
+            for (key, schema) in properties {
+                if let Some(value) = object.get_mut(key) {
+                    coerce_value_for_schema(key, value, schema, actions);
+                }
+            }
+            Value::Object(object)
+        }
+        other => {
+            if let Some(required) = single_required_property(&tool.function.parameters) {
+                let mut object = Map::new();
+                object.insert(required.clone(), other);
+                actions.push(RepairAction {
+                    action: "schema_value_wrapped".to_string(),
+                    confidence: 0.78,
+                    reason: format!(
+                        "wrapped non-object arguments into required schema property {required:?}"
+                    ),
+                });
+                Value::Object(object)
+            } else {
+                other
+            }
+        }
+    }
+}
+
+fn closest_property_name(key: &str, candidates: &[String], threshold: f64) -> Option<String> {
+    candidates
+        .iter()
+        .map(|candidate| (jaro_winkler(key, candidate), candidate))
+        .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
+        .and_then(|(score, candidate)| {
+            if score >= threshold {
+                Some(candidate.clone())
+            } else {
+                None
+            }
+        })
+}
+
+fn coerce_value_for_schema(
+    key: &str,
+    value: &mut Value,
+    schema: &Value,
+    actions: &mut Vec<RepairAction>,
+) {
+    match schema.get("type").and_then(Value::as_str) {
+        Some("string") if !value.is_string() && (value.is_number() || value.is_boolean()) => {
+            *value = Value::String(match value {
+                Value::Number(number) => number.to_string(),
+                Value::Bool(boolean) => boolean.to_string(),
+                _ => return,
+            });
+            actions.push(RepairAction {
+                action: "schema_scalar_coerced".to_string(),
+                confidence: 0.82,
+                reason: format!("coerced argument {key:?} into a string"),
+            });
+        }
+        Some("array") if !value.is_array() => {
+            let original = std::mem::replace(value, Value::Null);
+            *value = Value::Array(vec![original]);
+            actions.push(RepairAction {
+                action: "schema_array_wrapped".to_string(),
+                confidence: 0.8,
+                reason: format!("wrapped argument {key:?} into an array"),
+            });
+        }
+        _ => {}
+    }
+}
+
+fn single_required_property(schema: &Value) -> Option<String> {
+    let required = schema.get("required")?.as_array()?;
+    if required.len() == 1 {
+        required[0].as_str().map(str::to_owned)
+    } else {
+        None
+    }
 }
 
 pub fn parse_json_lenient(input: &str) -> Option<Value> {
@@ -347,7 +484,11 @@ mod tests {
                 function: OpenAiFunctionTool {
                     name: "read_file".to_string(),
                     description: None,
-                    parameters: json!({"type":"object"}),
+                    parameters: json!({
+                        "type":"object",
+                        "properties":{"path":{"type":"string"}},
+                        "required":["path"]
+                    }),
                 },
             }]),
             tool_choice: None,
@@ -396,5 +537,77 @@ mod tests {
             .unwrap();
         assert_eq!(calls[0].function.name, "read_file");
         assert_eq!(calls[0].function.arguments, r#"{"path":"Cargo.toml"}"#);
+    }
+
+    #[tokio::test]
+    async fn repairs_schema_argument_key_typos() {
+        let normalized = request_with_tool(false);
+        let upstream = synthetic_response(
+            "test",
+            r#"<tool_call name="read_file">{"pth":"Cargo.toml"}</tool_call>"#,
+        );
+        let interpreted =
+            crate::response_interpreter::interpret_response(&upstream, &normalized.tools);
+        let outcome = repair_response(
+            &ProxyConfig::default(),
+            &normalized,
+            &ModelProfile::qwen(),
+            &upstream,
+            &interpreted,
+            &crate::agents::NoopCorrectionAgent,
+        )
+        .await
+        .unwrap();
+
+        let args: Value = serde_json::from_str(
+            &outcome.final_response.choices[0]
+                .message
+                .tool_calls
+                .as_ref()
+                .unwrap()[0]
+                .function
+                .arguments,
+        )
+        .unwrap();
+        assert_eq!(args["path"], "Cargo.toml");
+        assert!(outcome
+            .actions
+            .iter()
+            .any(|action| action.action == "schema_key_repaired"));
+    }
+
+    #[tokio::test]
+    async fn enforces_single_tool_call_when_parallel_disabled() {
+        let normalized = request_with_tool(false);
+        let upstream = synthetic_response(
+            "test",
+            r#"<tool_call name="read_file">{"path":"a"}</tool_call><tool_call name="read_file">{"path":"b"}</tool_call>"#,
+        );
+        let interpreted =
+            crate::response_interpreter::interpret_response(&upstream, &normalized.tools);
+        let outcome = repair_response(
+            &ProxyConfig::default(),
+            &normalized,
+            &ModelProfile::qwen(),
+            &upstream,
+            &interpreted,
+            &crate::agents::NoopCorrectionAgent,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            outcome.final_response.choices[0]
+                .message
+                .tool_calls
+                .as_ref()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(outcome
+            .actions
+            .iter()
+            .any(|action| action.action == "parallel_tool_calls_truncated"));
     }
 }
