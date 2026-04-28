@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
+    dsrs_contract::format_tool_contract,
     model_profile::{ModelProfile, ToolFormat, ToolMode},
     normalizer::NormalizedRequest,
     openai::{ChatCompletionRequest, ChatMessage, OpenAiTool},
@@ -34,6 +35,11 @@ pub fn adapt_request(
     upstream_request.tool_choice = None;
     upstream_request.parallel_tool_calls = None;
     let instruction = match profile.tool_format {
+        ToolFormat::Dsrs => {
+            let formatted = format_tool_contract(normalized, profile)?;
+            upstream_request.messages = formatted.messages;
+            formatted.instruction
+        }
         ToolFormat::Xml => {
             render_xml_tool_instruction(profile, &normalized.tools, normalized.parallel_tool_calls)?
         }
@@ -43,7 +49,9 @@ pub fn adapt_request(
             normalized.parallel_tool_calls,
         )?,
     };
-    inject_system_instruction(&mut upstream_request.messages, &instruction);
+    if profile.tool_format != ToolFormat::Dsrs {
+        inject_system_instruction(&mut upstream_request.messages, &instruction);
+    }
 
     Ok(AdaptedRequest {
         upstream_request,
@@ -144,7 +152,7 @@ mod tests {
     use crate::openai::{OpenAiFunctionTool, OpenAiTool};
 
     #[test]
-    fn proxy_owned_mode_removes_native_tools_and_injects_xml() {
+    fn proxy_owned_mode_removes_native_tools_and_uses_dsrs_contract() {
         let tool = OpenAiTool {
             tool_type: "function".to_string(),
             function: OpenAiFunctionTool {
@@ -171,9 +179,14 @@ mod tests {
         let adapted = adapt_request(&normalized, &ModelProfile::qwen()).unwrap();
 
         assert!(adapted.upstream_request.tools.is_none());
+        assert_eq!(adapted.upstream_request.messages[0].role, "system");
         assert!(adapted.upstream_request.messages[0]
             .content_text()
             .unwrap()
-            .contains(r#"<tool name="read_file">"#));
+            .contains("[[ ## tool_calls ## ]]"));
+        assert!(adapted.upstream_request.messages[1]
+            .content_text()
+            .unwrap()
+            .contains("[[ ## available_tools ## ]]"));
     }
 }

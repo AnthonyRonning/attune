@@ -2,7 +2,10 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::openai::{ChatCompletionResponse, OpenAiTool};
+use crate::{
+    dsrs_contract::parse_tool_contract_response,
+    openai::{ChatCompletionResponse, OpenAiTool},
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InterpretedResponse {
@@ -27,6 +30,7 @@ pub struct ToolIntent {
 #[serde(rename_all = "snake_case")]
 pub enum ToolIntentSource {
     Native,
+    Dsrs,
     Xml,
     TaggedJson,
     MarkdownJson,
@@ -79,12 +83,26 @@ pub fn interpret_response(
         }
     }
 
-    if let Some(text) = content.as_deref() {
-        tool_intents.extend(extract_tool_intents_from_content(
-            text,
-            tools,
-            &mut parse_events,
-        ));
+    if let Some(text) = content.clone() {
+        let mut parsed_dsrs = false;
+        if let Some(parsed) = parse_tool_contract_response(&text) {
+            parsed_dsrs = true;
+            parse_events.extend(parsed.events);
+            if parsed.content.is_some() {
+                content = parsed.content;
+            } else if !parsed.tool_intents.is_empty() {
+                content = None;
+            }
+            tool_intents.extend(parsed.tool_intents);
+        }
+
+        if !parsed_dsrs || tool_intents.is_empty() {
+            tool_intents.extend(extract_tool_intents_from_content(
+                &text,
+                tools,
+                &mut parse_events,
+            ));
+        }
     }
 
     let suspicious_stop = tool_intents.is_empty()
@@ -92,13 +110,15 @@ pub fn interpret_response(
         && choice.finish_reason.as_deref().unwrap_or("stop") == "stop"
         && content
             .as_deref()
-            .map(looks_like_premature_tool_narration)
+            .map(|content| {
+                looks_like_premature_tool_narration(content)
+                    || looks_like_malformed_tool_output(content)
+            })
             .unwrap_or(false);
 
     if suspicious_stop {
         parse_events.push(
-            "assistant appears to narrate an imminent tool action but emitted no tool call"
-                .to_string(),
+            "assistant appears to contain tool intent but emitted no valid tool call".to_string(),
         );
     }
 
@@ -375,6 +395,20 @@ fn looks_like_premature_tool_narration(content: &str) -> bool {
     .any(|needle| lower.contains(needle))
 }
 
+fn looks_like_malformed_tool_output(content: &str) -> bool {
+    let lower = content.to_ascii_lowercase();
+    [
+        "<tool_call",
+        "<tool ",
+        "<function",
+        "function=",
+        "tool_calls",
+        "[[ ## tool_calls ## ]]",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::{json, Map};
@@ -432,6 +466,96 @@ mod tests {
 
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[1].arguments.as_ref().unwrap()["path"], "b");
+    }
+
+    #[test]
+    fn extracts_dsrs_contract_tool_call() {
+        let response = ChatCompletionResponse {
+            id: "1".to_string(),
+            object: "chat.completion".to_string(),
+            created: 0,
+            model: "m".to_string(),
+            choices: vec![ChatChoice {
+                index: 0,
+                message: ChatMessage::new(
+                    "assistant",
+                    r#"[[ ## content ## ]]
+
+[[ ## tool_calls ## ]]
+[{"name":"read_file","arguments":{"path":"Cargo.toml"}}]
+[[ ## completed ## ]]"#,
+                ),
+                finish_reason: Some("stop".to_string()),
+                logprobs: None,
+                extra: Map::new(),
+            }],
+            usage: None,
+            extra: Map::new(),
+        };
+
+        let interpreted = interpret_response(&response, &[tool("read_file")]);
+
+        assert_eq!(interpreted.content, None);
+        assert_eq!(interpreted.tool_intents.len(), 1);
+        assert_eq!(interpreted.tool_intents[0].source, ToolIntentSource::Dsrs);
+        assert_eq!(
+            interpreted.tool_intents[0].arguments.as_ref().unwrap()["path"],
+            "Cargo.toml"
+        );
+    }
+
+    #[test]
+    fn strips_dsrs_content_when_no_tool_call_is_needed() {
+        let response = ChatCompletionResponse {
+            id: "1".to_string(),
+            object: "chat.completion".to_string(),
+            created: 0,
+            model: "m".to_string(),
+            choices: vec![ChatChoice {
+                index: 0,
+                message: ChatMessage::new(
+                    "assistant",
+                    "[[ ## content ## ]]\nDone.\n[[ ## tool_calls ## ]]\n[]\n[[ ## completed ## ]]",
+                ),
+                finish_reason: Some("stop".to_string()),
+                logprobs: None,
+                extra: Map::new(),
+            }],
+            usage: None,
+            extra: Map::new(),
+        };
+
+        let interpreted = interpret_response(&response, &[tool("read_file")]);
+
+        assert_eq!(interpreted.content.as_deref(), Some("Done."));
+        assert!(interpreted.tool_intents.is_empty());
+    }
+
+    #[test]
+    fn malformed_structured_tool_output_is_suspicious() {
+        let response = ChatCompletionResponse {
+            id: "1".to_string(),
+            object: "chat.completion".to_string(),
+            created: 0,
+            model: "m".to_string(),
+            choices: vec![ChatChoice {
+                index: 0,
+                message: ChatMessage::new(
+                    "assistant",
+                    "<tool_call><function=bash><parameter=\"command\">ls</parameter></tool_call>",
+                ),
+                finish_reason: Some("stop".to_string()),
+                logprobs: None,
+                extra: Map::new(),
+            }],
+            usage: None,
+            extra: Map::new(),
+        };
+
+        let interpreted = interpret_response(&response, &[tool("bash")]);
+
+        assert!(interpreted.tool_intents.is_empty());
+        assert!(interpreted.suspicious_stop);
     }
 
     #[test]

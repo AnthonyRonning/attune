@@ -1,6 +1,7 @@
 pub mod agents;
 pub mod config;
 pub mod dataset;
+pub mod dsrs_contract;
 pub mod eval;
 pub mod gateway;
 pub mod model_profile;

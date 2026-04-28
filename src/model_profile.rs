@@ -10,6 +10,7 @@ pub enum ToolMode {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolFormat {
+    Dsrs,
     Xml,
     TaggedJson,
 }
@@ -34,87 +35,87 @@ impl ModelProfile {
             name: "balanced-default".to_string(),
             model_patterns: vec!["*".to_string()],
             tool_mode: ToolMode::ProxyOwned,
-            tool_format: ToolFormat::Xml,
+            tool_format: ToolFormat::Dsrs,
             correction_model: None,
             judge_model: None,
             max_correction_passes: 1,
             supports_parallel_tool_calls: true,
-            tool_instruction: default_xml_instruction(),
+            tool_instruction: default_dsrs_instruction(),
         }
     }
 
     pub fn qwen() -> Self {
         Self {
-            name: "qwen-xml".to_string(),
+            name: "qwen-dsrs".to_string(),
             model_patterns: vec!["qwen".to_string(), "qwq".to_string()],
             tool_mode: ToolMode::ProxyOwned,
-            tool_format: ToolFormat::Xml,
+            tool_format: ToolFormat::Dsrs,
             correction_model: None,
             judge_model: None,
             max_correction_passes: 1,
             supports_parallel_tool_calls: true,
-            tool_instruction: default_xml_instruction(),
+            tool_instruction: default_dsrs_instruction(),
         }
     }
 
     pub fn kimi() -> Self {
         Self {
-            name: "kimi-xml".to_string(),
+            name: "kimi-dsrs".to_string(),
             model_patterns: vec!["kimi".to_string(), "moonshot".to_string()],
             tool_mode: ToolMode::ProxyOwned,
-            tool_format: ToolFormat::Xml,
+            tool_format: ToolFormat::Dsrs,
             correction_model: None,
             judge_model: None,
             max_correction_passes: 1,
             supports_parallel_tool_calls: true,
             tool_instruction: format!(
-                "{}\nKeep tool calls compact and avoid prose before a tool_call block.",
-                default_xml_instruction()
+                "{}\nKeep DSRs output compact and avoid prose outside the DSRs fields.",
+                default_dsrs_instruction()
             ),
         }
     }
 
     pub fn glm() -> Self {
         Self {
-            name: "glm-xml".to_string(),
+            name: "glm-dsrs".to_string(),
             model_patterns: vec!["glm".to_string(), "z-ai".to_string()],
             tool_mode: ToolMode::ProxyOwned,
-            tool_format: ToolFormat::Xml,
+            tool_format: ToolFormat::Dsrs,
             correction_model: None,
             judge_model: None,
             max_correction_passes: 1,
             supports_parallel_tool_calls: true,
-            tool_instruction: default_xml_instruction(),
+            tool_instruction: default_dsrs_instruction(),
         }
     }
 
     pub fn llama() -> Self {
         Self {
-            name: "llama-tagged-json".to_string(),
+            name: "llama-dsrs".to_string(),
             model_patterns: vec!["llama".to_string()],
             tool_mode: ToolMode::ProxyOwned,
-            tool_format: ToolFormat::TaggedJson,
+            tool_format: ToolFormat::Dsrs,
             correction_model: None,
             judge_model: None,
             max_correction_passes: 1,
             supports_parallel_tool_calls: true,
-            tool_instruction: "When a tool is needed, emit a compact JSON tool_calls object inside <tool_calls_json> tags and no other text.".to_string(),
+            tool_instruction: default_dsrs_instruction(),
         }
     }
 
     pub fn gemma() -> Self {
         Self {
-            name: "gemma-xml-conservative".to_string(),
+            name: "gemma-dsrs-conservative".to_string(),
             model_patterns: vec!["gemma".to_string()],
             tool_mode: ToolMode::ProxyOwned,
-            tool_format: ToolFormat::Xml,
+            tool_format: ToolFormat::Dsrs,
             correction_model: None,
             judge_model: None,
             max_correction_passes: 1,
             supports_parallel_tool_calls: false,
             tool_instruction: format!(
-                "{}\nPrefer a single tool_call block. Do not emit multiple tool calls unless explicitly required.",
-                default_xml_instruction()
+                "{}\nPrefer a single item in the tool_calls field. Do not emit multiple tool calls unless explicitly required.",
+                default_dsrs_instruction()
             ),
         }
     }
@@ -161,14 +162,16 @@ fn profile_matches(lower_model: &str, profile: &ModelProfile) -> bool {
     })
 }
 
-fn default_xml_instruction() -> String {
+fn default_dsrs_instruction() -> String {
     [
         "Tool calls are an application contract. If a tool is needed, do not narrate the action.",
-        "Emit only XML tool calls using this exact shape:",
-        r#"<tool_call name="tool_name">"#,
-        r#"{"argument":"value"}"#,
-        "</tool_call>",
-        "The JSON body must match the selected tool parameters. You may emit multiple consecutive tool_call blocks only when the request allows parallel tool calls.",
+        "Respond only with DSRs fields generated by the tool-use contract:",
+        "[[ ## content ## ]]",
+        "assistant text, or empty when using tools",
+        "[[ ## tool_calls ## ]]",
+        r#"[{"name":"tool_name","arguments":{"argument":"value"}}]"#,
+        "[[ ## completed ## ]]",
+        "The tool_calls field must be valid JSON and every arguments object must match the selected tool parameters.",
     ]
     .join("\n")
 }
@@ -178,16 +181,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn qwen_models_resolve_to_xml_proxy_owned_profile() {
+    fn qwen_models_resolve_to_dsrs_proxy_owned_profile() {
         let profile = resolve_profile("qwen/qwen3-8b", &[]);
         assert_eq!(profile.tool_mode, ToolMode::ProxyOwned);
-        assert_eq!(profile.tool_format, ToolFormat::Xml);
+        assert_eq!(profile.tool_format, ToolFormat::Dsrs);
     }
 
     #[test]
-    fn llama_models_use_tagged_json_profile() {
+    fn llama_models_use_dsrs_profile() {
         let profile = resolve_profile("meta-llama/llama-3.2-3b-instruct", &[]);
-        assert_eq!(profile.name, "llama-tagged-json");
-        assert_eq!(profile.tool_format, ToolFormat::TaggedJson);
+        assert_eq!(profile.name, "llama-dsrs");
+        assert_eq!(profile.tool_format, ToolFormat::Dsrs);
     }
 }
