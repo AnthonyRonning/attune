@@ -21,6 +21,8 @@ pub struct CorrectionAgentInput {
     pub parser_events: Vec<String>,
     pub model: String,
     pub profile: ModelProfile,
+    #[serde(skip)]
+    pub api_key_override: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -117,7 +119,11 @@ struct CorrectionEnvelopeToolCall {
 #[async_trait]
 impl CorrectionAgent for DsrsCorrectionAgent {
     async fn correct(&self, input: CorrectionAgentInput) -> Result<Option<CorrectionAgentOutput>> {
-        let Some(api_key) = self.upstream.api_key.clone() else {
+        let Some(api_key) = input
+            .api_key_override
+            .clone()
+            .or_else(|| self.upstream.api_key.clone())
+        else {
             return Ok(None);
         };
 

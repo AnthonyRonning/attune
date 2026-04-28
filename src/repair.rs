@@ -32,6 +32,7 @@ pub async fn repair_response(
     upstream_response: &ChatCompletionResponse,
     interpreted: &InterpretedResponse,
     correction_agent: &dyn CorrectionAgent,
+    correction_api_key: Option<String>,
 ) -> Result<RepairOutcome> {
     if native_output_is_valid(normalized, interpreted) {
         let mut response = upstream_response.clone();
@@ -61,6 +62,7 @@ pub async fn repair_response(
             parser_events: interpreted.parse_events.clone(),
             model: normalized.model.clone(),
             profile: profile.clone(),
+            api_key_override: correction_api_key,
         };
 
         if let Some(output) = correction_agent.correct(input).await? {
@@ -526,6 +528,7 @@ mod tests {
             &upstream,
             &interpreted,
             &crate::agents::NoopCorrectionAgent,
+            None,
         )
         .await
         .unwrap();
@@ -555,6 +558,7 @@ mod tests {
             &upstream,
             &interpreted,
             &crate::agents::NoopCorrectionAgent,
+            None,
         )
         .await
         .unwrap();
@@ -592,6 +596,7 @@ mod tests {
             &upstream,
             &interpreted,
             &crate::agents::NoopCorrectionAgent,
+            None,
         )
         .await
         .unwrap();

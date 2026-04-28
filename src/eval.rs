@@ -99,6 +99,7 @@ pub async fn evaluate_cases(cases: Vec<RegressionCase>) -> Result<RegressionRepo
             &case.upstream_response,
             &interpreted,
             &correction_agent,
+            None,
         )
         .await?;
 

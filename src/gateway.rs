@@ -2,8 +2,12 @@ use std::{net::SocketAddr, sync::Arc};
 
 use anyhow::Result;
 use axum::{
+    body::Body,
     extract::State,
-    http::{header::AUTHORIZATION, HeaderMap, HeaderValue, StatusCode},
+    http::{
+        header::{CACHE_CONTROL, CONNECTION, CONTENT_TYPE},
+        HeaderMap, HeaderValue, StatusCode,
+    },
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -16,12 +20,15 @@ use crate::{
     config::ProxyConfig,
     model_profile::resolve_profile,
     normalizer::normalize_request,
-    openai::{redacted_headers_for_trace, ChatCompletionRequest, OpenAiError, OpenAiErrorResponse},
+    openai::{
+        chat_completion_response_to_sse, redacted_headers_for_trace, ChatCompletionRequest,
+        ChatCompletionResponse, OpenAiError, OpenAiErrorResponse,
+    },
     prompt_adapter::adapt_request,
     repair::repair_response,
     response_interpreter::interpret_response,
     trace::{TraceRecord, TraceStore},
-    upstream::UpstreamClient,
+    upstream::{InboundAuth, UpstreamClient},
 };
 
 #[derive(Clone)]
@@ -82,11 +89,9 @@ async fn health() -> Json<serde_json::Value> {
 }
 
 async fn models(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    let auth = headers
-        .get(AUTHORIZATION)
-        .and_then(|value| value.to_str().ok());
+    let auth = InboundAuth::from_headers(&headers);
 
-    match state.upstream.models(auth).await {
+    match state.upstream.models(&auth).await {
         Ok(response) => json_response(StatusCode::OK, response, None),
         Err(error) => openai_error(StatusCode::BAD_GATEWAY, &error.to_string(), None),
     }
@@ -97,18 +102,15 @@ async fn chat_completions(
     headers: HeaderMap,
     Json(request): Json<ChatCompletionRequest>,
 ) -> Response {
+    let client_requested_stream = request.stream.unwrap_or(false);
+    let stream_include_usage = request
+        .extra
+        .get("stream_options")
+        .and_then(|value| value.get("include_usage"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
     let metadata = json!({ "headers": redacted_headers_for_trace(&headers) });
     let mut trace = TraceRecord::new(request.clone(), metadata);
-
-    if request.stream.unwrap_or(false) {
-        trace.error = Some("streaming is not supported in this reliability mode".to_string());
-        let trace_id = append_trace(&state, trace).await;
-        return openai_error(
-            StatusCode::BAD_REQUEST,
-            "streaming is not supported by this non-streaming correction proxy yet",
-            Some(trace_id),
-        );
-    }
 
     let normalized = match normalize_request(request) {
         Ok(normalized) => normalized,
@@ -133,12 +135,10 @@ async fn chat_completions(
     };
     trace.adapted_request = Some(adapted.clone());
 
-    let auth = headers
-        .get(AUTHORIZATION)
-        .and_then(|value| value.to_str().ok());
+    let auth = InboundAuth::from_headers(&headers);
     let upstream_response = match state
         .upstream
-        .chat_completions(&adapted.upstream_request, auth)
+        .chat_completions(&adapted.upstream_request, &auth)
         .await
     {
         Ok(response) => response,
@@ -160,6 +160,7 @@ async fn chat_completions(
         &upstream_response,
         &interpreted,
         state.correction_agent.as_ref(),
+        auth.api_key_value(),
     )
     .await
     {
@@ -179,7 +180,11 @@ async fn chat_completions(
     trace.final_response = Some(repair.final_response.clone());
     let trace_id = append_trace(&state, trace).await;
 
-    json_response(StatusCode::OK, repair.final_response, Some(trace_id))
+    if client_requested_stream {
+        sse_response(&repair.final_response, stream_include_usage, Some(trace_id))
+    } else {
+        json_response(StatusCode::OK, repair.final_response, Some(trace_id))
+    }
 }
 
 async fn append_trace(state: &AppState, trace: TraceRecord) -> String {
@@ -214,6 +219,50 @@ fn json_response<T: serde::Serialize>(
     trace_id: Option<String>,
 ) -> Response {
     let mut response = (status, Json(body)).into_response();
+    if let Some(trace_id) = trace_id {
+        if let Ok(value) = HeaderValue::from_str(&trace_id) {
+            response
+                .headers_mut()
+                .insert("x-model-correction-trace-id", value);
+        }
+    }
+    response
+}
+
+fn sse_response(
+    body: &ChatCompletionResponse,
+    include_usage: bool,
+    trace_id: Option<String>,
+) -> Response {
+    let sse = match chat_completion_response_to_sse(body, include_usage) {
+        Ok(sse) => sse,
+        Err(error) => {
+            return openai_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("failed to serialize streaming response: {error}"),
+                trace_id,
+            )
+        }
+    };
+
+    let mut response = match Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "text/event-stream; charset=utf-8")
+        .header(CACHE_CONTROL, "no-cache")
+        .header(CONNECTION, "keep-alive")
+        .header("x-accel-buffering", "no")
+        .body(Body::from(sse))
+    {
+        Ok(response) => response,
+        Err(error) => {
+            return openai_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("failed to build streaming response: {error}"),
+                trace_id,
+            )
+        }
+    };
+
     if let Some(trace_id) = trace_id {
         if let Ok(value) = HeaderValue::from_str(&trace_id) {
             response

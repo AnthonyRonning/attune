@@ -56,6 +56,7 @@ pub async fn replay_trace_file(config: ReplayConfig) -> Result<ReplayReport> {
             &upstream,
             &interpreted,
             &correction_agent,
+            None,
         )
         .await
         {
