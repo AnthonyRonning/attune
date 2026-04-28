@@ -46,8 +46,7 @@ pub async fn repair_response(
     let mut actions = Vec::new();
     let mut intents = interpreted.tool_intents.clone();
 
-    if intents.is_empty()
-        && interpreted.suspicious_stop
+    if should_try_correction_agent(normalized, interpreted, &intents)
         && config.correction.enabled
         && config.policy.correction_agent
         && profile.max_correction_passes > 0
@@ -58,15 +57,15 @@ pub async fn repair_response(
                 &normalized.messages,
                 config.correction.max_context_messages,
             ),
-            malformed_response: interpreted.content.clone().unwrap_or_default(),
+            malformed_response: malformed_response_text(upstream_response, interpreted),
             parser_events: interpreted.parse_events.clone(),
             model: normalized.model.clone(),
             profile: profile.clone(),
             api_key_override: correction_api_key,
         };
 
-        if let Some(output) = correction_agent.correct(input).await? {
-            if !output.tool_calls.is_empty() {
+        match correction_agent.correct(input).await {
+            Ok(Some(output)) if !output.tool_calls.is_empty() => {
                 actions.push(RepairAction {
                     action: "correction_agent_tool_recovery".to_string(),
                     confidence: output.confidence,
@@ -74,6 +73,12 @@ pub async fn repair_response(
                 });
                 intents.extend(output.tool_calls);
             }
+            Ok(_) => {}
+            Err(error) => actions.push(RepairAction {
+                action: "correction_agent_failed".to_string(),
+                confidence: 0.0,
+                reason: error.to_string(),
+            }),
         }
     }
 
@@ -82,7 +87,11 @@ pub async fn repair_response(
     ensure_first_choice(&mut final_response, &normalized.model);
 
     if repaired_tool_calls.is_empty() {
-        map_reasoning_content_if_needed(&mut final_response, interpreted);
+        if should_suppress_unrecoverable_tool_output(interpreted) {
+            suppress_unrecoverable_tool_output(&mut final_response, &mut actions);
+        } else {
+            map_reasoning_content_if_needed(&mut final_response, interpreted);
+        }
         return Ok(RepairOutcome {
             final_response,
             actions,
@@ -131,12 +140,43 @@ fn native_output_is_valid(
         return false;
     }
     interpreted.tool_intents.iter().all(|intent| {
-        intent.arguments.is_some()
-            && normalized
-                .tools
-                .iter()
-                .any(|tool| tool.function.name == intent.name)
+        let Some(tool) = normalized
+            .tools
+            .iter()
+            .find(|tool| tool.function.name == intent.name)
+        else {
+            return false;
+        };
+        intent
+            .arguments
+            .as_ref()
+            .is_some_and(|arguments| arguments_have_required_properties(tool, arguments))
     })
+}
+
+fn should_try_correction_agent(
+    normalized: &NormalizedRequest,
+    interpreted: &InterpretedResponse,
+    intents: &[ToolIntent],
+) -> bool {
+    (intents.is_empty() && interpreted.suspicious_stop)
+        || intents
+            .iter()
+            .any(|intent| intent_requires_model_correction(normalized, intent))
+}
+
+fn intent_requires_model_correction(normalized: &NormalizedRequest, intent: &ToolIntent) -> bool {
+    let Some(arguments) = intent.arguments.as_ref() else {
+        return true;
+    };
+    let Some(tool) = normalized
+        .tools
+        .iter()
+        .find(|tool| tool.function.name == intent.name)
+    else {
+        return false;
+    };
+    !arguments_have_required_properties(tool, arguments)
 }
 
 fn repair_tool_intents(
@@ -177,6 +217,19 @@ fn repair_tool_intents(
             });
         }
 
+        let Some(tool) = normalized
+            .tools
+            .iter()
+            .find(|tool| tool.function.name == name)
+        else {
+            actions.push(RepairAction {
+                action: "unknown_tool_dropped".to_string(),
+                confidence: 0.9,
+                reason: format!("dropped unrecoverable unknown tool name {name:?}"),
+            });
+            continue;
+        };
+
         let mut argument_actions = Vec::new();
         let mut arguments_value = match intent.arguments {
             Some(value) => Some(value),
@@ -196,22 +249,34 @@ fn repair_tool_intents(
         };
 
         if config.policy.schema_guided_repair {
-            if let Some(tool) = normalized
-                .tools
-                .iter()
-                .find(|tool| tool.function.name == name)
-            {
-                if let Some(value) = arguments_value.take() {
-                    let repaired = repair_arguments_for_schema(tool, value, &mut argument_actions);
-                    arguments_value = Some(repaired);
-                }
+            if let Some(value) = arguments_value.take() {
+                let repaired = repair_arguments_for_schema(tool, value, &mut argument_actions);
+                arguments_value = Some(repaired);
             }
         }
         actions.extend(argument_actions);
 
-        let arguments = arguments_value
-            .map(serialize_arguments)
-            .unwrap_or(intent.raw_arguments);
+        let Some(arguments_value) = arguments_value else {
+            actions.push(RepairAction {
+                action: "json_arguments_unrecoverable".to_string(),
+                confidence: 0.9,
+                reason: format!("dropped tool call {name:?} with unrecoverable JSON arguments"),
+            });
+            continue;
+        };
+
+        if !arguments_have_required_properties(tool, &arguments_value) {
+            actions.push(RepairAction {
+                action: "schema_required_missing".to_string(),
+                confidence: 0.95,
+                reason: format!(
+                    "dropped tool call {name:?} because required schema arguments were missing"
+                ),
+            });
+            continue;
+        }
+
+        let arguments = serialize_arguments(arguments_value);
 
         out.push(OpenAiToolCall::function(name, arguments));
     }
@@ -357,6 +422,28 @@ fn single_required_property(schema: &Value) -> Option<String> {
     }
 }
 
+fn arguments_have_required_properties(tool: &OpenAiTool, value: &Value) -> bool {
+    let Some(required) = tool
+        .function
+        .parameters
+        .get("required")
+        .and_then(Value::as_array)
+    else {
+        return true;
+    };
+    if required.is_empty() {
+        return true;
+    }
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    required.iter().filter_map(Value::as_str).all(|key| {
+        object
+            .get(key)
+            .is_some_and(|value| !value.is_null() && value.as_str().is_none_or(|s| !s.is_empty()))
+    })
+}
+
 pub fn parse_json_lenient(input: &str) -> Option<Value> {
     let cleaned = strip_json_fence(input.trim());
     serde_json::from_str(cleaned)
@@ -423,6 +510,40 @@ fn map_reasoning_content_if_needed(
     if first.message.content_text().is_none() {
         first.message.set_content_text(content);
     }
+}
+
+fn should_suppress_unrecoverable_tool_output(interpreted: &InterpretedResponse) -> bool {
+    interpreted.suspicious_stop || !interpreted.tool_intents.is_empty()
+}
+
+fn suppress_unrecoverable_tool_output(
+    response: &mut ChatCompletionResponse,
+    actions: &mut Vec<RepairAction>,
+) {
+    ensure_first_choice(response, "");
+    let first = response.choices.first_mut().expect("choice ensured");
+    first.message.tool_calls = None;
+    first.message.set_content_text(
+        "The upstream model emitted a malformed tool call that could not be safely recovered.",
+    );
+    first.finish_reason = Some("stop".to_string());
+    actions.push(RepairAction {
+        action: "unrecoverable_tool_call_suppressed".to_string(),
+        confidence: 1.0,
+        reason: "suppressed malformed or invalid tool-call output instead of passing it through"
+            .to_string(),
+    });
+}
+
+fn malformed_response_text(
+    upstream_response: &ChatCompletionResponse,
+    interpreted: &InterpretedResponse,
+) -> String {
+    interpreted
+        .content
+        .clone()
+        .or_else(|| serde_json::to_string(upstream_response).ok())
+        .unwrap_or_default()
 }
 
 fn ensure_first_choice(response: &mut ChatCompletionResponse, model: &str) {
@@ -614,5 +735,99 @@ mod tests {
             .actions
             .iter()
             .any(|action| action.action == "parallel_tool_calls_truncated"));
+    }
+
+    #[tokio::test]
+    async fn drops_native_tool_call_missing_required_arguments() {
+        let normalized = request_with_tool(false);
+        let mut upstream = ChatCompletionResponse::empty_for_model("test");
+        upstream.choices.push(ChatChoice {
+            index: 0,
+            message: ChatMessage {
+                role: "assistant".to_string(),
+                content: Some(Value::Null),
+                name: None,
+                tool_call_id: None,
+                tool_calls: Some(vec![OpenAiToolCall::function("read_file", "{}")]),
+                extra: Map::new(),
+            },
+            finish_reason: Some("tool_calls".to_string()),
+            logprobs: None,
+            extra: Map::new(),
+        });
+        let interpreted =
+            crate::response_interpreter::interpret_response(&upstream, &normalized.tools);
+
+        let outcome = repair_response(
+            &ProxyConfig::default(),
+            &normalized,
+            &ModelProfile::qwen(),
+            &upstream,
+            &interpreted,
+            &crate::agents::NoopCorrectionAgent,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let message = &outcome.final_response.choices[0].message;
+        assert!(message.tool_calls.is_none());
+        assert!(message
+            .content_text()
+            .unwrap()
+            .contains("malformed tool call"));
+        assert!(outcome
+            .actions
+            .iter()
+            .any(|action| action.action == "schema_required_missing"));
+        assert!(outcome
+            .actions
+            .iter()
+            .any(|action| action.action == "unrecoverable_tool_call_suppressed"));
+    }
+
+    struct FailingCorrectionAgent;
+
+    #[async_trait::async_trait]
+    impl CorrectionAgent for FailingCorrectionAgent {
+        async fn correct(
+            &self,
+            _input: CorrectionAgentInput,
+        ) -> Result<Option<crate::agents::CorrectionAgentOutput>> {
+            anyhow::bail!("correction failed")
+        }
+    }
+
+    #[tokio::test]
+    async fn correction_agent_failure_does_not_abort_response() {
+        let normalized = request_with_tool(false);
+        let upstream = synthetic_response(
+            "test",
+            "<tool_call><function=read_file><parameter=\"path\">Cargo.toml</parameter></tool_call>",
+        );
+        let interpreted =
+            crate::response_interpreter::interpret_response(&upstream, &normalized.tools);
+
+        let outcome = repair_response(
+            &ProxyConfig::default(),
+            &normalized,
+            &ModelProfile::qwen(),
+            &upstream,
+            &interpreted,
+            &FailingCorrectionAgent,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(outcome.final_response.choices[0]
+            .message
+            .content_text()
+            .unwrap()
+            .contains("malformed tool call"));
+        assert!(outcome
+            .actions
+            .iter()
+            .any(|action| action.action == "correction_agent_failed"));
     }
 }
