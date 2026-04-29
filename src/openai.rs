@@ -240,62 +240,72 @@ pub fn chat_completion_response_to_sse(
 
     for choice in &response.choices {
         let message = &choice.message;
-        let mut delta = ChatCompletionDelta {
-            role: Some(message.role.clone()),
-            content: message.content_text(),
-            tool_calls: message.tool_calls.as_ref().map(|tool_calls| {
-                tool_calls
-                    .iter()
-                    .enumerate()
-                    .map(|(index, call)| OpenAiToolCallDelta {
-                        index: index as u32,
-                        id: Some(call.id.clone()),
-                        call_type: Some(call.call_type.clone()),
-                        function: OpenAiFunctionCallDelta {
-                            name: Some(call.function.name.clone()),
-                            arguments: Some(call.function.arguments.clone()),
-                        },
-                    })
-                    .collect()
-            }),
-            extra: message.extra.clone(),
-        };
-        if delta.extra.is_empty() {
-            delta.extra = Map::new();
-        }
+        let (reasoning_extra, mut remaining_extra) = split_reasoning_extra(&message.extra);
 
-        push_sse_chunk(
+        push_sse_choice_delta(
             &mut out,
-            ChatCompletionChunk {
-                id: response.id.clone(),
-                object: "chat.completion.chunk".to_string(),
-                created: response.created,
-                model: response.model.clone(),
-                choices: vec![ChatCompletionChunkChoice {
-                    index: choice.index,
-                    delta,
-                    finish_reason: None,
-                    logprobs: choice.logprobs.clone(),
-                }],
-                usage: None,
+            response,
+            choice,
+            ChatCompletionDelta {
+                role: Some(message.role.clone()),
+                content: None,
+                tool_calls: None,
+                extra: reasoning_extra,
             },
+            None,
         )?;
 
-        push_sse_chunk(
+        if let Some(content) = message.content_text() {
+            push_sse_choice_delta(
+                &mut out,
+                response,
+                choice,
+                ChatCompletionDelta {
+                    role: None,
+                    content: Some(content),
+                    tool_calls: None,
+                    extra: std::mem::take(&mut remaining_extra),
+                },
+                None,
+            )?;
+        }
+
+        if let Some(tool_calls) = &message.tool_calls {
+            push_sse_choice_delta(
+                &mut out,
+                response,
+                choice,
+                ChatCompletionDelta {
+                    role: None,
+                    content: None,
+                    tool_calls: Some(tool_call_deltas(tool_calls)),
+                    extra: std::mem::take(&mut remaining_extra),
+                },
+                None,
+            )?;
+        }
+
+        if !remaining_extra.is_empty() {
+            push_sse_choice_delta(
+                &mut out,
+                response,
+                choice,
+                ChatCompletionDelta {
+                    role: None,
+                    content: None,
+                    tool_calls: None,
+                    extra: remaining_extra,
+                },
+                None,
+            )?;
+        }
+
+        push_sse_choice_delta(
             &mut out,
-            ChatCompletionChunk {
-                id: response.id.clone(),
-                object: "chat.completion.chunk".to_string(),
-                created: response.created,
-                model: response.model.clone(),
-                choices: vec![ChatCompletionChunkChoice {
-                    index: choice.index,
-                    delta: ChatCompletionDelta::default(),
-                    finish_reason: choice.finish_reason.clone(),
-                    logprobs: choice.logprobs.clone(),
-                }],
-                usage: None,
-            },
+            response,
+            choice,
+            ChatCompletionDelta::default(),
+            choice.finish_reason.clone(),
         )?;
     }
 
@@ -319,11 +329,72 @@ pub fn chat_completion_response_to_sse(
     Ok(out)
 }
 
+fn push_sse_choice_delta(
+    out: &mut String,
+    response: &ChatCompletionResponse,
+    choice: &ChatChoice,
+    delta: ChatCompletionDelta,
+    finish_reason: Option<String>,
+) -> serde_json::Result<()> {
+    push_sse_chunk(
+        out,
+        ChatCompletionChunk {
+            id: response.id.clone(),
+            object: "chat.completion.chunk".to_string(),
+            created: response.created,
+            model: response.model.clone(),
+            choices: vec![ChatCompletionChunkChoice {
+                index: choice.index,
+                delta,
+                finish_reason,
+                logprobs: choice.logprobs.clone(),
+            }],
+            usage: None,
+        },
+    )
+}
+
 fn push_sse_chunk(out: &mut String, chunk: ChatCompletionChunk) -> serde_json::Result<()> {
     out.push_str("data: ");
     out.push_str(&serde_json::to_string(&chunk)?);
     out.push_str("\n\n");
     Ok(())
+}
+
+fn tool_call_deltas(tool_calls: &[OpenAiToolCall]) -> Vec<OpenAiToolCallDelta> {
+    tool_calls
+        .iter()
+        .enumerate()
+        .map(|(index, call)| OpenAiToolCallDelta {
+            index: index as u32,
+            id: Some(call.id.clone()),
+            call_type: Some(call.call_type.clone()),
+            function: OpenAiFunctionCallDelta {
+                name: Some(call.function.name.clone()),
+                arguments: Some(call.function.arguments.clone()),
+            },
+        })
+        .collect()
+}
+
+fn split_reasoning_extra(extra: &Map<String, Value>) -> (Map<String, Value>, Map<String, Value>) {
+    let mut reasoning = Map::new();
+    let mut remaining = Map::new();
+    for (key, value) in extra {
+        if is_reasoning_key(key) {
+            reasoning.insert(key.clone(), value.clone());
+        } else {
+            remaining.insert(key.clone(), value.clone());
+        }
+    }
+    (reasoning, remaining)
+}
+
+fn is_reasoning_key(key: &str) -> bool {
+    matches!(
+        key,
+        "reasoning" | "reasoning_content" | "reasoning_details" | "thinking" | "thinking_details"
+    )
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -394,7 +465,8 @@ mod tests {
         let sse = chat_completion_response_to_sse(&response, false).unwrap();
 
         assert!(sse.contains(r#""object":"chat.completion.chunk""#));
-        assert!(sse.contains(r#""delta":{"role":"assistant","content":"hello"}"#));
+        assert!(sse.contains(r#""delta":{"role":"assistant"}"#));
+        assert!(sse.contains(r#""delta":{"content":"hello"}"#));
         assert!(sse.contains(r#""finish_reason":"stop""#));
         assert!(sse.ends_with("data: [DONE]\n\n"));
     }
@@ -428,5 +500,38 @@ mod tests {
         assert!(sse.contains(r#""name":"read_file""#));
         assert!(sse.contains(r#""arguments":"{\"path\":\"Cargo.toml\"}""#));
         assert!(sse.contains(r#""finish_reason":"tool_calls""#));
+    }
+
+    #[test]
+    fn streams_reasoning_before_content() {
+        let mut response = ChatCompletionResponse::empty_for_model("test-model");
+        response.id = "chatcmpl-test".to_string();
+        response.created = 1;
+        let mut message = ChatMessage::new("assistant", "final answer");
+        message.extra.insert(
+            "reasoning_content".to_string(),
+            Value::String("thinking first".to_string()),
+        );
+        message.extra.insert(
+            "reasoning_details".to_string(),
+            json!([{"type": "reasoning.text", "text": "detail first"}]),
+        );
+        response.choices.push(ChatChoice {
+            index: 0,
+            message,
+            finish_reason: Some("stop".to_string()),
+            logprobs: None,
+            extra: Map::new(),
+        });
+
+        let sse = chat_completion_response_to_sse(&response, false).unwrap();
+        let reasoning_index = sse.find(r#""reasoning_content":"thinking first""#).unwrap();
+        let details_index = sse.find(r#""reasoning_details":[{"#).unwrap();
+        let content_index = sse.find(r#""content":"final answer""#).unwrap();
+
+        assert!(reasoning_index < content_index);
+        assert!(details_index < content_index);
+        assert_eq!(sse.matches("reasoning_content").count(), 1);
+        assert_eq!(sse.matches("reasoning_details").count(), 1);
     }
 }

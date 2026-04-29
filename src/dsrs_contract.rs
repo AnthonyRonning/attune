@@ -19,7 +19,8 @@ struct OpenAiToolUseContract {
     /// exactly the DSRs output fields. Put user-facing text in content. Put tool
     /// calls in tool_calls as a JSON array of {"name": string, "arguments": object}.
     /// Use [] when no tool call is needed. If parallel_tool_calls is false, emit at
-    /// most one tool call.
+    /// most one tool call. Do not put field labels, scratchpad reasoning, or
+    /// chain-of-thought in content.
     #[input(desc = "Additional profile-specific guidance")]
     pub profile_guidance: String,
 
@@ -35,7 +36,7 @@ struct OpenAiToolUseContract {
     #[input(desc = "Whether multiple tool calls may be emitted")]
     pub parallel_tool_calls: bool,
 
-    #[output(desc = "Assistant content. Use an empty string when emitting tool calls.")]
+    #[output(desc = "Plain user-facing reply text without labels; empty when using tools.")]
     pub content: String,
 
     #[output(desc = "JSON array of {\"name\": string, \"arguments\": object} tool calls")]
@@ -277,17 +278,15 @@ mod tests {
     #[test]
     fn formats_request_with_dsrs_field_markers() {
         let formatted = format_tool_contract(&normalized_request(), &ModelProfile::qwen()).unwrap();
+        let user_message = formatted.messages[1].content_text().unwrap();
 
         assert_eq!(formatted.messages[0].role, "system");
         assert!(formatted.instruction.contains("[[ ## content ## ]]"));
-        assert!(formatted.messages[1]
-            .content_text()
-            .unwrap()
-            .contains("[[ ## conversation ## ]]"));
-        assert!(formatted.messages[1]
-            .content_text()
-            .unwrap()
-            .contains("bash"));
+        assert!(user_message.contains("[[ ## conversation ## ]]"));
+        assert!(user_message.contains("bash"));
+        assert!(!user_message.contains("[[ ## content ## ]]"));
+        assert!(!user_message.contains("[[ ## tool_calls ## ]]"));
+        assert!(!user_message.contains("assistant text"));
     }
 
     #[test]

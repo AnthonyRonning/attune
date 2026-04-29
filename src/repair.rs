@@ -507,7 +507,7 @@ fn map_reasoning_content_if_needed(
     };
     ensure_first_choice(response, "");
     let first = response.choices.first_mut().expect("choice ensured");
-    if first.message.content_text().is_none() {
+    if first.message.content_text().as_deref() != Some(content.as_str()) {
         first.message.set_content_text(content);
     }
 }
@@ -735,6 +735,36 @@ mod tests {
             .actions
             .iter()
             .any(|action| action.action == "parallel_tool_calls_truncated"));
+    }
+
+    #[tokio::test]
+    async fn strips_dsrs_markers_for_no_tool_content() {
+        let normalized = request_with_tool(false);
+        let upstream = synthetic_response(
+            "test",
+            "[[ ## content ## ]]\nHello.\n[[ ## tool_calls ## ]]\n[]\n[[ ## completed ## ]]",
+        );
+        let interpreted =
+            crate::response_interpreter::interpret_response(&upstream, &normalized.tools);
+
+        let outcome = repair_response(
+            &ProxyConfig::default(),
+            &normalized,
+            &ModelProfile::qwen(),
+            &upstream,
+            &interpreted,
+            &crate::agents::NoopCorrectionAgent,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let content = outcome.final_response.choices[0]
+            .message
+            .content_text()
+            .unwrap();
+        assert_eq!(content, "Hello.");
+        assert!(!content.contains("[[ ##"));
     }
 
     #[tokio::test]
