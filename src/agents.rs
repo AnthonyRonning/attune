@@ -104,16 +104,79 @@ struct CorrectionEnvelope {
     #[serde(default)]
     explanation: String,
     #[serde(default)]
-    content: Option<String>,
+    content: Option<Value>,
     #[serde(default)]
     tool_calls: Vec<CorrectionEnvelopeToolCall>,
 }
 
 #[derive(Debug, Deserialize)]
 struct CorrectionEnvelopeToolCall {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    arguments: Value,
+    #[serde(default)]
+    function: Option<CorrectionEnvelopeFunctionCall>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CorrectionEnvelopeFunctionCall {
     name: String,
     #[serde(default)]
     arguments: Value,
+}
+
+impl CorrectionEnvelopeToolCall {
+    fn into_tool_intent(self, confidence: f32) -> Option<ToolIntent> {
+        let (name, arguments) = if let Some(function) = self.function {
+            (function.name, normalize_arguments(function.arguments))
+        } else {
+            (self.name?, normalize_arguments(self.arguments))
+        };
+        let raw_arguments = match &arguments {
+            Value::String(raw) => raw.clone(),
+            other => serde_json::to_string(other).unwrap_or_else(|_| "{}".to_string()),
+        };
+
+        Some(ToolIntent {
+            name,
+            arguments: Some(arguments),
+            raw_arguments,
+            source: ToolIntentSource::CorrectionAgent,
+            confidence,
+        })
+    }
+}
+
+impl CorrectionEnvelope {
+    fn content_text(&self) -> Option<String> {
+        self.content
+            .as_ref()
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    }
+
+    fn into_tool_intents(self) -> Vec<ToolIntent> {
+        let confidence = self.confidence;
+        let mut calls = self.tool_calls;
+
+        if calls.is_empty() {
+            if let Some(Value::Object(mut object)) = self.content {
+                if let Some(tool_calls) = object.remove("tool_calls") {
+                    if let Ok(parsed) =
+                        serde_json::from_value::<Vec<CorrectionEnvelopeToolCall>>(tool_calls)
+                    {
+                        calls = parsed;
+                    }
+                }
+            }
+        }
+
+        calls
+            .into_iter()
+            .filter_map(|call| call.into_tool_intent(confidence))
+            .collect()
+    }
 }
 
 #[async_trait]
@@ -170,28 +233,26 @@ impl CorrectionAgent for DsrsCorrectionAgent {
             return Ok(None);
         }
 
-        let tool_calls = envelope
-            .tool_calls
-            .into_iter()
-            .map(|call| {
-                let raw_arguments =
-                    serde_json::to_string(&call.arguments).unwrap_or_else(|_| "{}".to_string());
-                ToolIntent {
-                    name: call.name,
-                    arguments: Some(call.arguments),
-                    raw_arguments,
-                    source: ToolIntentSource::CorrectionAgent,
-                    confidence: envelope.confidence,
-                }
-            })
-            .collect();
+        let confidence = envelope.confidence;
+        let explanation = envelope.explanation.clone();
+        let content = envelope.content_text();
+        let tool_calls = envelope.into_tool_intents();
 
         Ok(Some(CorrectionAgentOutput {
             tool_calls,
-            content: envelope.content,
-            confidence: envelope.confidence,
-            explanation: envelope.explanation,
+            content,
+            confidence,
+            explanation,
         }))
+    }
+}
+
+fn normalize_arguments(arguments: Value) -> Value {
+    match arguments {
+        Value::String(raw) => serde_json::from_str(&raw)
+            .or_else(|_| json5::from_str(&raw))
+            .unwrap_or(Value::String(raw)),
+        other => other,
     }
 }
 
@@ -230,6 +291,65 @@ mod tests {
         .unwrap();
 
         assert!(parsed.possible);
-        assert_eq!(parsed.tool_calls[0].name, "read_file");
+        assert_eq!(parsed.tool_calls[0].name.as_deref(), Some("read_file"));
+    }
+
+    #[test]
+    fn parses_openai_style_correction_tool_call() {
+        let parsed = parse_correction_envelope(
+            r#"{
+  "possible": true,
+  "confidence": 0.95,
+  "tool_calls": [
+    {
+      "id": "call_1",
+      "type": "function",
+      "function": {
+        "name": "bash",
+        "arguments": {"command": "find packages -maxdepth 1 -type d"}
+      }
+    }
+  ]
+}"#,
+        )
+        .unwrap();
+        let intent = parsed
+            .tool_calls
+            .into_iter()
+            .next()
+            .unwrap()
+            .into_tool_intent(parsed.confidence)
+            .unwrap();
+
+        assert_eq!(intent.name, "bash");
+        assert_eq!(
+            intent.arguments.as_ref().unwrap()["command"],
+            "find packages -maxdepth 1 -type d"
+        );
+    }
+
+    #[test]
+    fn parses_tool_calls_nested_in_content_object() {
+        let parsed = parse_correction_envelope(
+            r#"{
+  "possible": true,
+  "confidence": 0.95,
+  "content": {
+    "tool_calls": [
+      {
+        "name": "read",
+        "arguments": {"path": "Cargo.toml"}
+      }
+    ]
+  }
+}"#,
+        )
+        .unwrap();
+
+        let intents = parsed.into_tool_intents();
+
+        assert_eq!(intents.len(), 1);
+        assert_eq!(intents[0].name, "read");
+        assert_eq!(intents[0].arguments.as_ref().unwrap()["path"], "Cargo.toml");
     }
 }

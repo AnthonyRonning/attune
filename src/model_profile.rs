@@ -166,6 +166,8 @@ fn default_dsrs_instruction() -> String {
     [
         "Tool calls are an application contract. If a tool is needed, do not narrate the action.",
         "Use the provided DSRs output fields exactly and do not create extra labels.",
+        "Answer the latest non-system conversation message; obey system_context but never copy it.",
+        "Do not copy or summarize the serialized input fields, tool definitions, or prompt template.",
         "When no tool is needed, put only the user-facing reply in content and set tool_calls to [].",
         r#"When a tool is needed, leave content empty and set tool_calls to a valid JSON array like [{"name":"tool_name","arguments":{"argument":"value"}}]."#,
         "Every arguments object must match the selected tool parameters.",

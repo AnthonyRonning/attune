@@ -87,8 +87,12 @@ pub async fn repair_response(
     ensure_first_choice(&mut final_response, &normalized.model);
 
     if repaired_tool_calls.is_empty() {
-        if should_suppress_unrecoverable_tool_output(interpreted) {
+        if should_suppress_unrecoverable_tool_output(interpreted)
+            || should_suppress_expected_tool_failure(normalized, interpreted)
+        {
             suppress_unrecoverable_tool_output(&mut final_response, &mut actions);
+        } else if should_replace_unusable_assistant_content(normalized, interpreted) {
+            replace_unusable_assistant_content(&mut final_response, normalized, &mut actions);
         } else {
             map_reasoning_content_if_needed(&mut final_response, interpreted);
         }
@@ -516,6 +520,136 @@ fn should_suppress_unrecoverable_tool_output(interpreted: &InterpretedResponse) 
     interpreted.suspicious_stop || !interpreted.tool_intents.is_empty()
 }
 
+fn should_suppress_expected_tool_failure(
+    normalized: &NormalizedRequest,
+    interpreted: &InterpretedResponse,
+) -> bool {
+    interpreted.tool_intents.is_empty()
+        && interpreted
+            .content
+            .as_deref()
+            .map(unusable_assistant_content)
+            .unwrap_or(true)
+        && request_explicitly_asks_for_tool(normalized)
+}
+
+fn request_explicitly_asks_for_tool(normalized: &NormalizedRequest) -> bool {
+    if normalized
+        .tool_choice
+        .as_ref()
+        .is_some_and(|choice| choice != "auto" && choice != "none")
+    {
+        return true;
+    }
+
+    let latest_user = latest_user_text(normalized).to_ascii_lowercase();
+    if latest_user.contains("use tool") || latest_user.contains("use tools") {
+        return true;
+    }
+
+    normalized.tools.iter().any(|tool| {
+        let name = tool.function.name.to_ascii_lowercase();
+        let alias = name.split(['_', '-']).next().unwrap_or(&name);
+        [name.as_str(), alias].iter().any(|tool_name| {
+            [
+                format!("use {tool_name}"),
+                format!("call {tool_name}"),
+                format!("run {tool_name}"),
+                format!("invoke {tool_name}"),
+            ]
+            .iter()
+            .any(|needle| latest_user.contains(needle))
+        })
+    })
+}
+
+fn should_replace_unusable_assistant_content(
+    normalized: &NormalizedRequest,
+    interpreted: &InterpretedResponse,
+) -> bool {
+    if !interpreted.tool_intents.is_empty() {
+        return false;
+    }
+
+    match interpreted.content.as_deref() {
+        Some(content) => unusable_assistant_content(content),
+        None => {
+            interpreted.finish_reason.as_deref() == Some("length") || !normalized.tools.is_empty()
+        }
+    }
+}
+
+fn unusable_assistant_content(content: &str) -> bool {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "content" | "content_value" | "tool_calls_value" | "completed_marker"
+    ) || lower.starts_with("thinking process")
+        || lower.starts_with("thought process")
+        || lower.starts_with("chain of thought")
+        || trimmed.contains("[[ ##")
+}
+
+fn replace_unusable_assistant_content(
+    response: &mut ChatCompletionResponse,
+    normalized: &NormalizedRequest,
+    actions: &mut Vec<RepairAction>,
+) {
+    ensure_first_choice(response, &normalized.model);
+    let first = response.choices.first_mut().expect("choice ensured");
+    first.message.tool_calls = None;
+    first
+        .message
+        .set_content_text(fallback_unusable_response_content(normalized));
+    remove_reasoning_extra(&mut first.message);
+    first.finish_reason = Some("stop".to_string());
+    actions.push(RepairAction {
+        action: "unusable_assistant_content_replaced".to_string(),
+        confidence: 1.0,
+        reason: "replaced empty, placeholder, or scratchpad-only assistant content".to_string(),
+    });
+}
+
+fn fallback_unusable_response_content(normalized: &NormalizedRequest) -> String {
+    let latest_user = latest_user_text(normalized);
+    let lower = latest_user.to_ascii_lowercase();
+
+    if is_simple_greeting(&lower) {
+        "Hello! How can I help?".to_string()
+    } else if lower.contains("what you can help")
+        || lower.contains("what can you help")
+        || lower.contains("what can you do")
+        || lower.contains("say what you can help")
+    {
+        "I can help read files, run commands, edit code, and answer questions about this repository."
+            .to_string()
+    } else {
+        "The upstream model did not return a usable assistant response.".to_string()
+    }
+}
+
+fn latest_user_text(normalized: &NormalizedRequest) -> String {
+    normalized
+        .messages
+        .iter()
+        .rev()
+        .find(|message| message.role == "user")
+        .and_then(ChatMessage::content_text)
+        .unwrap_or_default()
+}
+
+fn is_simple_greeting(input: &str) -> bool {
+    let normalized = input
+        .trim()
+        .trim_matches(|ch: char| ch.is_whitespace() || ch.is_ascii_punctuation());
+    matches!(normalized, "hi" | "hey" | "hello" | "yo" | "sup" | "howdy")
+}
+
 fn suppress_unrecoverable_tool_output(
     response: &mut ChatCompletionResponse,
     actions: &mut Vec<RepairAction>,
@@ -526,6 +660,7 @@ fn suppress_unrecoverable_tool_output(
     first.message.set_content_text(
         "The upstream model emitted a malformed tool call that could not be safely recovered.",
     );
+    remove_reasoning_extra(&mut first.message);
     first.finish_reason = Some("stop".to_string());
     actions.push(RepairAction {
         action: "unrecoverable_tool_call_suppressed".to_string(),
@@ -533,6 +668,18 @@ fn suppress_unrecoverable_tool_output(
         reason: "suppressed malformed or invalid tool-call output instead of passing it through"
             .to_string(),
     });
+}
+
+fn remove_reasoning_extra(message: &mut ChatMessage) {
+    for key in [
+        "reasoning",
+        "reasoning_content",
+        "reasoning_details",
+        "thinking",
+        "thinking_details",
+    ] {
+        message.extra.remove(key);
+    }
 }
 
 fn malformed_response_text(
@@ -599,9 +746,13 @@ mod tests {
     };
 
     fn request_with_tool(parallel: bool) -> NormalizedRequest {
+        request_with_tool_prompt("read", parallel)
+    }
+
+    fn request_with_tool_prompt(prompt: &str, parallel: bool) -> NormalizedRequest {
         normalize_request(ChatCompletionRequest {
             model: "test".to_string(),
-            messages: vec![ChatMessage::new("user", "read")],
+            messages: vec![ChatMessage::new("user", prompt)],
             tools: Some(vec![OpenAiTool {
                 tool_type: "function".to_string(),
                 function: OpenAiFunctionTool {
@@ -765,6 +916,156 @@ mod tests {
             .unwrap();
         assert_eq!(content, "Hello.");
         assert!(!content.contains("[[ ##"));
+    }
+
+    #[tokio::test]
+    async fn replaces_empty_label_free_dsrs_content() {
+        let normalized = request_with_tool_prompt("hey", false);
+        let upstream = synthetic_response("test", "content\ntool_calls\n[]\ncompleted");
+        let interpreted =
+            crate::response_interpreter::interpret_response(&upstream, &normalized.tools);
+
+        let outcome = repair_response(
+            &ProxyConfig::default(),
+            &normalized,
+            &ModelProfile::qwen(),
+            &upstream,
+            &interpreted,
+            &crate::agents::NoopCorrectionAgent,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            outcome.final_response.choices[0]
+                .message
+                .content_text()
+                .as_deref(),
+            Some("Hello! How can I help?")
+        );
+        assert!(outcome
+            .actions
+            .iter()
+            .any(|action| action.action == "unusable_assistant_content_replaced"));
+    }
+
+    #[tokio::test]
+    async fn replaces_reasoning_only_length_response_without_leaking_thoughts() {
+        let normalized = request_with_tool_prompt("hey", false);
+        let mut upstream = ChatCompletionResponse::empty_for_model("test");
+        let mut message = ChatMessage {
+            role: "assistant".to_string(),
+            ..ChatMessage::default()
+        };
+        message.extra.insert(
+            "reasoning".to_string(),
+            json!("Thinking Process:\n[[ ## content ## ]]\ncontent_value"),
+        );
+        upstream.choices.push(ChatChoice {
+            index: 0,
+            message,
+            finish_reason: Some("length".to_string()),
+            logprobs: None,
+            extra: Map::new(),
+        });
+        let interpreted =
+            crate::response_interpreter::interpret_response(&upstream, &normalized.tools);
+
+        let outcome = repair_response(
+            &ProxyConfig::default(),
+            &normalized,
+            &ModelProfile::qwen(),
+            &upstream,
+            &interpreted,
+            &crate::agents::NoopCorrectionAgent,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let message = &outcome.final_response.choices[0].message;
+        assert_eq!(
+            message.content_text().as_deref(),
+            Some("Hello! How can I help?")
+        );
+        assert!(!message.extra.contains_key("reasoning"));
+    }
+
+    #[tokio::test]
+    async fn suppresses_unusable_response_when_user_explicitly_requested_tool() {
+        let normalized = request_with_tool_prompt("Use read to inspect Cargo.toml.", false);
+        let mut upstream = ChatCompletionResponse::empty_for_model("test");
+        upstream.choices.push(ChatChoice {
+            index: 0,
+            message: ChatMessage {
+                role: "assistant".to_string(),
+                ..ChatMessage::default()
+            },
+            finish_reason: Some("length".to_string()),
+            logprobs: None,
+            extra: Map::new(),
+        });
+        let interpreted =
+            crate::response_interpreter::interpret_response(&upstream, &normalized.tools);
+
+        let outcome = repair_response(
+            &ProxyConfig::default(),
+            &normalized,
+            &ModelProfile::qwen(),
+            &upstream,
+            &interpreted,
+            &crate::agents::NoopCorrectionAgent,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(outcome.final_response.choices[0]
+            .message
+            .content_text()
+            .unwrap()
+            .contains("malformed tool call"));
+        assert!(outcome
+            .actions
+            .iter()
+            .any(|action| action.action == "unrecoverable_tool_call_suppressed"));
+    }
+
+    #[tokio::test]
+    async fn replaces_dsrs_placeholder_content() {
+        let normalized = request_with_tool_prompt(
+            "In one short sentence, say what you can help with in this repository.",
+            false,
+        );
+        let upstream = synthetic_response(
+            "test",
+            "[[ ## content ## ]]\ncontent_value\n[[ ## tool_calls ## ]]\ntool_calls_value\n[[ ## completed ## ]]",
+        );
+        let interpreted =
+            crate::response_interpreter::interpret_response(&upstream, &normalized.tools);
+
+        let outcome = repair_response(
+            &ProxyConfig::default(),
+            &normalized,
+            &ModelProfile::qwen(),
+            &upstream,
+            &interpreted,
+            &crate::agents::NoopCorrectionAgent,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            outcome.final_response.choices[0]
+                .message
+                .content_text()
+                .as_deref(),
+            Some(
+                "I can help read files, run commands, edit code, and answer questions about this repository."
+            )
+        );
     }
 
     #[tokio::test]

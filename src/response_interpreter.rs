@@ -57,7 +57,7 @@ pub fn interpret_response(
     let mut parse_events = Vec::new();
     let mut content = message.content_text();
     let reasoning = message.reasoning_text();
-    if content.is_none() && reasoning.is_some() {
+    if content.is_none() && reasoning.is_some() && !tools_available(tools) {
         content = reasoning.clone();
         parse_events
             .push("mapped reasoning/thinking text into content for compatibility".to_string());
@@ -88,20 +88,28 @@ pub fn interpret_response(
         if let Some(parsed) = parse_tool_contract_response(&text) {
             parsed_dsrs = true;
             parse_events.extend(parsed.events);
-            if parsed.content.is_some() {
-                content = parsed.content;
-            } else if !parsed.tool_intents.is_empty() {
+            let parsed_tool_intents = parsed.tool_intents;
+            content = parsed
+                .content
+                .or_else(|| parsed_tool_intents.is_empty().then(String::new));
+            if !parsed_tool_intents.is_empty() {
                 content = None;
             }
-            tool_intents.extend(parsed.tool_intents);
+            tool_intents.extend(parsed_tool_intents);
         }
 
-        if !parsed_dsrs || tool_intents.is_empty() {
+        if !parsed_dsrs {
             tool_intents.extend(extract_tool_intents_from_content(
                 &text,
                 tools,
                 &mut parse_events,
             ));
+            if tool_intents.is_empty() && tools_available(tools) {
+                if let Some(cleaned) = strip_stray_text_label(&text) {
+                    content = Some(cleaned);
+                    parse_events.push("stripped stray DSRs text label".to_string());
+                }
+            }
         }
     }
 
@@ -409,6 +417,38 @@ fn looks_like_malformed_tool_output(content: &str) -> bool {
     .any(|needle| lower.contains(needle))
 }
 
+fn strip_stray_text_label(content: &str) -> Option<String> {
+    let trimmed = content.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    let rest = if lower.starts_with("assistant text:") {
+        trimmed.get("assistant text:".len()..)?
+    } else if lower.starts_with("content:") {
+        trimmed.get("content:".len()..)?
+    } else if lower.starts_with("content\n") {
+        trimmed.get("content\n".len()..)?
+    } else if lower.starts_with("content\r\n") {
+        trimmed.get("content\r\n".len()..)?
+    } else if lower.starts_with("content \"") || lower.starts_with("content '") {
+        trimmed.get("content ".len()..)?
+    } else {
+        return None;
+    };
+
+    let cleaned = rest.trim();
+    let cleaned = unquote(cleaned).unwrap_or(cleaned).trim();
+    (!cleaned.is_empty()).then(|| cleaned.to_string())
+}
+
+fn unquote(value: &str) -> Option<&str> {
+    let first = value.chars().next()?;
+    if first != '"' && first != '\'' {
+        return None;
+    }
+    value
+        .strip_prefix(first)
+        .and_then(|value| value.strip_suffix(first))
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::{json, Map};
@@ -532,6 +572,83 @@ mod tests {
     }
 
     #[test]
+    fn strips_label_free_dsrs_empty_tool_tail() {
+        let response = ChatCompletionResponse {
+            id: "1".to_string(),
+            object: "chat.completion".to_string(),
+            created: 0,
+            model: "m".to_string(),
+            choices: vec![ChatChoice {
+                index: 0,
+                message: ChatMessage::new("assistant", "Hello! How can I help?\n\n[]\n\ncompleted"),
+                finish_reason: Some("stop".to_string()),
+                logprobs: None,
+                extra: Map::new(),
+            }],
+            usage: None,
+            extra: Map::new(),
+        };
+
+        let interpreted = interpret_response(&response, &[tool("read_file")]);
+
+        assert_eq!(
+            interpreted.content.as_deref(),
+            Some("Hello! How can I help?")
+        );
+        assert!(interpreted.tool_intents.is_empty());
+        assert!(!interpreted.suspicious_stop);
+    }
+
+    #[test]
+    fn clears_empty_label_free_dsrs_without_leaking_labels() {
+        let response = ChatCompletionResponse {
+            id: "1".to_string(),
+            object: "chat.completion".to_string(),
+            created: 0,
+            model: "m".to_string(),
+            choices: vec![ChatChoice {
+                index: 0,
+                message: ChatMessage::new("assistant", "content\n\ntool_calls\n\ncompleted"),
+                finish_reason: Some("stop".to_string()),
+                logprobs: None,
+                extra: Map::new(),
+            }],
+            usage: None,
+            extra: Map::new(),
+        };
+
+        let interpreted = interpret_response(&response, &[tool("read_file")]);
+
+        assert_eq!(interpreted.content.as_deref(), Some(""));
+        assert!(interpreted.tool_intents.is_empty());
+        assert!(!interpreted.suspicious_stop);
+    }
+
+    #[test]
+    fn strips_stray_content_label_without_completed_marker() {
+        let response = ChatCompletionResponse {
+            id: "1".to_string(),
+            object: "chat.completion".to_string(),
+            created: 0,
+            model: "m".to_string(),
+            choices: vec![ChatChoice {
+                index: 0,
+                message: ChatMessage::new("assistant", "content \"Hello!\""),
+                finish_reason: Some("stop".to_string()),
+                logprobs: None,
+                extra: Map::new(),
+            }],
+            usage: None,
+            extra: Map::new(),
+        };
+
+        let interpreted = interpret_response(&response, &[tool("read_file")]);
+
+        assert_eq!(interpreted.content.as_deref(), Some("Hello!"));
+        assert!(interpreted.tool_intents.is_empty());
+    }
+
+    #[test]
     fn malformed_structured_tool_output_is_suspicious() {
         let response = ChatCompletionResponse {
             id: "1".to_string(),
@@ -584,5 +701,39 @@ mod tests {
 
         let interpreted = interpret_response(&response, &[]);
         assert_eq!(interpreted.content.as_deref(), Some("visible text"));
+    }
+
+    #[test]
+    fn does_not_map_reasoning_into_content_when_tools_are_available() {
+        let mut msg = ChatMessage {
+            role: "assistant".to_string(),
+            ..ChatMessage::default()
+        };
+        msg.extra
+            .insert("reasoning".to_string(), json!("Thinking Process:\nsecret"));
+        let response = ChatCompletionResponse {
+            id: "1".to_string(),
+            object: "chat.completion".to_string(),
+            created: 0,
+            model: "m".to_string(),
+            choices: vec![ChatChoice {
+                index: 0,
+                message: msg,
+                finish_reason: Some("length".to_string()),
+                logprobs: None,
+                extra: Map::new(),
+            }],
+            usage: None,
+            extra: Map::new(),
+        };
+
+        let interpreted = interpret_response(&response, &[tool("bash")]);
+
+        assert_eq!(interpreted.content, None);
+        assert_eq!(
+            interpreted.reasoning.as_deref(),
+            Some("Thinking Process:\nsecret")
+        );
+        assert!(interpreted.tool_intents.is_empty());
     }
 }

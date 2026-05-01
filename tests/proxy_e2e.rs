@@ -38,7 +38,7 @@ fn pi_like_request(model: &str, prompt: &str, stream: bool) -> Value {
         "tools": pi_tools(),
         "parallel_tool_calls": true,
         "stream": stream,
-        "max_tokens": 500
+        "max_tokens": 1200
     })
 }
 
@@ -220,10 +220,12 @@ async fn proxy_e2e_matrix_for_pi_like_prompts() {
 #[tokio::test]
 #[ignore = "requires a valid OPENROUTER_API_KEY and makes paid live requests"]
 async fn live_openrouter_pi_prompt_matrix() {
-    let api_key = std::env::var("OPENROUTER_API_KEY").expect("OPENROUTER_API_KEY is required");
+    let api_key = live_openrouter_key().expect("OPENROUTER_API_KEY is required");
     let models = std::env::var("OPENROUTER_LIVE_MODELS").unwrap_or_else(|_| {
         [
             "qwen/qwen3.5-9b",
+            "qwen/qwen3.5-flash-02-23",
+            "qwen/qwen3-8b",
             "meta-llama/llama-3.1-8b-instruct",
             "google/gemma-3-12b-it",
         ]
@@ -273,13 +275,25 @@ async fn live_openrouter_pi_prompt_matrix() {
                 response.text().await.unwrap_or_default()
             );
             let body = response.text().await.expect("response text");
+            let parsed: Value = serde_json::from_str(&body)
+                .unwrap_or_else(|error| panic!("{model} {prompt}: invalid JSON {error}: {body}"));
+            let content = parsed
+                .pointer("/choices/0/message/content")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
             assert!(
-                !body.contains("[[ ##"),
+                !content.contains("[[ ##"),
                 "{model} leaked DSRs markers: {body}"
             );
             assert!(
-                !body.contains("assistant text:"),
+                !content.contains("assistant text:"),
                 "{model} leaked presentation label: {body}"
+            );
+            let trimmed_content = content.trim_start().to_ascii_lowercase();
+            assert!(
+                !trimmed_content.starts_with("content ")
+                    && !trimmed_content.starts_with("content:"),
+                "{model} leaked DSRs content label: {body}"
             );
             if expect_tool {
                 assert!(
@@ -291,4 +305,41 @@ async fn live_openrouter_pi_prompt_matrix() {
     }
 
     handle.abort();
+}
+
+fn live_openrouter_key() -> Option<String> {
+    read_env_key("OPENROUTER_API_KEY")
+        .or_else(|| read_env_key("MCP_UPSTREAM_API_KEY"))
+        .or_else(|| env_key("OPENROUTER_API_KEY"))
+        .or_else(|| env_key("MCP_UPSTREAM_API_KEY"))
+}
+
+fn env_key(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| normalize_key(&value))
+}
+
+fn read_env_key(name: &str) -> Option<String> {
+    let env = std::fs::read_to_string(".env").ok()?;
+    env.lines().find_map(|line| {
+        let line = line.trim();
+        let (key, value) = line.split_once('=')?;
+        let key = key.trim().strip_prefix("export ").unwrap_or(key.trim());
+        if key == name {
+            normalize_key(value)
+        } else {
+            None
+        }
+    })
+}
+
+fn normalize_key(value: &str) -> Option<String> {
+    let value = value.trim().trim_matches('"').trim_matches('\'').trim();
+    let value = value
+        .strip_prefix("Bearer ")
+        .or_else(|| value.strip_prefix("bearer "))
+        .unwrap_or(value)
+        .trim();
+    (!value.is_empty()).then(|| value.to_string())
 }
