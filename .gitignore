@@ -4,3 +4,4 @@
 /eval/*.local.jsonl
 *.log
 *.env
+.codex
