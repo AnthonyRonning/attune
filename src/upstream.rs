@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use anyhow::{Context, Result};
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
@@ -5,7 +7,7 @@ use thiserror::Error;
 
 use crate::{
     config::UpstreamConfig,
-    openai::{ChatCompletionRequest, ChatCompletionResponse},
+    openai::{ChatCompletionRequest, ChatCompletionResponse, ChatMessage, OpenAiTool},
 };
 
 #[derive(Debug, Clone, Default)]
@@ -30,6 +32,18 @@ impl InboundAuth {
             .and_then(header_api_key_value)
             .or_else(|| self.x_api_key.as_ref().and_then(header_api_key_value))
             .or_else(|| self.api_key.as_ref().and_then(header_api_key_value))
+    }
+
+    pub fn source_label(&self) -> &'static str {
+        if self.authorization.as_ref().is_some_and(non_empty) {
+            "authorization"
+        } else if self.x_api_key.as_ref().is_some_and(non_empty) {
+            "x-api-key"
+        } else if self.api_key.as_ref().is_some_and(non_empty) {
+            "api-key"
+        } else {
+            "none"
+        }
     }
 
     #[cfg(test)]
@@ -83,49 +97,204 @@ impl UpstreamClient {
         request: &ChatCompletionRequest,
         inbound_auth: &InboundAuth,
     ) -> Result<ChatCompletionResponse, UpstreamError> {
+        let started = Instant::now();
+        let url = self.endpoint_url("chat/completions");
+        let auth_source = self.effective_auth_source(inbound_auth);
+        tracing::info!(
+            endpoint = "chat/completions",
+            model = %request.model,
+            messages = request.messages.len(),
+            tools = request.tools.as_ref().map_or(0, Vec::len),
+            stream = request.stream.unwrap_or(false),
+            auth_source,
+            "upstream request started"
+        );
+        tracing::debug!(
+            endpoint = "chat/completions",
+            url = %url,
+            timeout_seconds = self.config.timeout_seconds,
+            max_tokens = ?request.max_tokens,
+            max_completion_tokens = ?request.max_completion_tokens,
+            temperature = ?request.temperature,
+            top_p = ?request.top_p,
+            extra_fields = request.extra.len(),
+            "upstream request details"
+        );
+        tracing::trace!(
+            endpoint = "chat/completions",
+            message_roles = ?message_roles(&request.messages),
+            tool_names = ?tool_names(request.tools.as_deref()),
+            "upstream request shape"
+        );
+
         let mut builder = self
             .http
-            .post(self.endpoint_url("chat/completions"))
+            .post(url)
             .header(CONTENT_TYPE, "application/json")
             .header("X-Title", "model-correction-proxy")
             .json(request);
 
         builder = self.apply_auth(builder, inbound_auth);
 
-        let response = builder.send().await.map_err(UpstreamError::Transport)?;
+        let response = match builder.send().await {
+            Ok(response) => response,
+            Err(error) => {
+                tracing::warn!(
+                    endpoint = "chat/completions",
+                    elapsed_ms = started.elapsed().as_millis(),
+                    error = %error,
+                    "upstream transport failed"
+                );
+                return Err(UpstreamError::Transport(error));
+            }
+        };
         let status = response.status();
-        let body = response.text().await.map_err(UpstreamError::Transport)?;
+        let body = match response.text().await {
+            Ok(body) => body,
+            Err(error) => {
+                tracing::warn!(
+                    endpoint = "chat/completions",
+                    status = status.as_u16(),
+                    elapsed_ms = started.elapsed().as_millis(),
+                    error = %error,
+                    "failed to read upstream response body"
+                );
+                return Err(UpstreamError::Transport(error));
+            }
+        };
         if !status.is_success() {
+            tracing::warn!(
+                endpoint = "chat/completions",
+                status = status.as_u16(),
+                elapsed_ms = started.elapsed().as_millis(),
+                body_len = body.len(),
+                body_preview = %preview(&body),
+                "upstream returned non-success status"
+            );
             return Err(UpstreamError::Status {
                 status: status.as_u16(),
                 body,
             });
         }
 
-        serde_json::from_str(&body).map_err(|source| UpstreamError::Decode { source, body })
+        let decoded = match serde_json::from_str::<ChatCompletionResponse>(&body) {
+            Ok(decoded) => decoded,
+            Err(source) => {
+                tracing::warn!(
+                    endpoint = "chat/completions",
+                    status = status.as_u16(),
+                    elapsed_ms = started.elapsed().as_millis(),
+                    body_len = body.len(),
+                    body_preview = %preview(&body),
+                    error = %source,
+                    "failed to decode upstream response"
+                );
+                return Err(UpstreamError::Decode { source, body });
+            }
+        };
+
+        tracing::info!(
+            endpoint = "chat/completions",
+            status = status.as_u16(),
+            elapsed_ms = started.elapsed().as_millis(),
+            response_model = %decoded.model,
+            choices = decoded.choices.len(),
+            finish_reason = ?first_finish_reason(&decoded),
+            usage_present = decoded.usage.is_some(),
+            "upstream request completed"
+        );
+        Ok(decoded)
     }
 
     pub async fn models(
         &self,
         inbound_auth: &InboundAuth,
     ) -> Result<serde_json::Value, UpstreamError> {
+        let started = Instant::now();
+        let url = self.endpoint_url("models");
+        let auth_source = self.effective_auth_source(inbound_auth);
+        tracing::info!(endpoint = "models", auth_source, "upstream request started");
+        tracing::debug!(
+            endpoint = "models",
+            url = %url,
+            timeout_seconds = self.config.timeout_seconds,
+            "upstream request details"
+        );
+
         let builder = self
             .http
-            .get(self.endpoint_url("models"))
+            .get(url)
             .header("X-Title", "model-correction-proxy");
         let builder = self.apply_auth(builder, inbound_auth);
 
-        let response = builder.send().await.map_err(UpstreamError::Transport)?;
+        let response = match builder.send().await {
+            Ok(response) => response,
+            Err(error) => {
+                tracing::warn!(
+                    endpoint = "models",
+                    elapsed_ms = started.elapsed().as_millis(),
+                    error = %error,
+                    "upstream transport failed"
+                );
+                return Err(UpstreamError::Transport(error));
+            }
+        };
         let status = response.status();
-        let body = response.text().await.map_err(UpstreamError::Transport)?;
+        let body = match response.text().await {
+            Ok(body) => body,
+            Err(error) => {
+                tracing::warn!(
+                    endpoint = "models",
+                    status = status.as_u16(),
+                    elapsed_ms = started.elapsed().as_millis(),
+                    error = %error,
+                    "failed to read upstream response body"
+                );
+                return Err(UpstreamError::Transport(error));
+            }
+        };
         if !status.is_success() {
+            tracing::warn!(
+                endpoint = "models",
+                status = status.as_u16(),
+                elapsed_ms = started.elapsed().as_millis(),
+                body_len = body.len(),
+                body_preview = %preview(&body),
+                "upstream returned non-success status"
+            );
             return Err(UpstreamError::Status {
                 status: status.as_u16(),
                 body,
             });
         }
 
-        serde_json::from_str(&body).map_err(|source| UpstreamError::Decode { source, body })
+        let decoded = match serde_json::from_str::<serde_json::Value>(&body) {
+            Ok(decoded) => decoded,
+            Err(source) => {
+                tracing::warn!(
+                    endpoint = "models",
+                    status = status.as_u16(),
+                    elapsed_ms = started.elapsed().as_millis(),
+                    body_len = body.len(),
+                    body_preview = %preview(&body),
+                    error = %source,
+                    "failed to decode upstream response"
+                );
+                return Err(UpstreamError::Decode { source, body });
+            }
+        };
+
+        tracing::info!(
+            endpoint = "models",
+            status = status.as_u16(),
+            elapsed_ms = started.elapsed().as_millis(),
+            models = decoded
+                .get("data")
+                .and_then(|value| value.as_array())
+                .map_or(0, Vec::len),
+            "upstream request completed"
+        );
+        Ok(decoded)
     }
 
     fn endpoint_url(&self, endpoint: &str) -> String {
@@ -176,6 +345,21 @@ impl UpstreamClient {
         }
         builder
     }
+
+    fn effective_auth_source(&self, inbound_auth: &InboundAuth) -> &'static str {
+        if inbound_auth.has_client_auth() {
+            inbound_auth.source_label()
+        } else if self
+            .config
+            .api_key
+            .as_ref()
+            .is_some_and(|key| !key.trim().is_empty())
+        {
+            "configured-api-key"
+        } else {
+            "none"
+        }
+    }
 }
 
 impl InboundAuth {
@@ -221,6 +405,37 @@ fn header_api_key_value(value: &HeaderValue) -> Option<String> {
     } else {
         Some(value.to_string())
     }
+}
+
+fn message_roles(messages: &[ChatMessage]) -> Vec<&str> {
+    messages
+        .iter()
+        .map(|message| message.role.as_str())
+        .collect()
+}
+
+fn tool_names(tools: Option<&[OpenAiTool]>) -> Vec<&str> {
+    tools
+        .unwrap_or_default()
+        .iter()
+        .map(|tool| tool.function.name.as_str())
+        .collect()
+}
+
+fn first_finish_reason(response: &ChatCompletionResponse) -> Option<&str> {
+    response
+        .choices
+        .first()
+        .and_then(|choice| choice.finish_reason.as_deref())
+}
+
+fn preview(value: &str) -> String {
+    const MAX: usize = 512;
+    let mut preview = value.chars().take(MAX).collect::<String>();
+    if value.chars().count() > MAX {
+        preview.push_str("...");
+    }
+    preview
 }
 
 #[derive(Debug, Error)]

@@ -82,6 +82,9 @@ async fn main() -> anyhow::Result<()> {
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .with(tracing_subscriber::fmt::layer())
         .init();
+    tracing::info!(
+        "logging initialized; set RUST_LOG=model_correction_proxy=debug,tower_http=debug for more detail or model_correction_proxy=trace for request-shape traces"
+    );
 
     let cli = Cli::parse();
     match cli.command.unwrap_or(Command::Serve) {
