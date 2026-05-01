@@ -1,9 +1,12 @@
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::{
+    fmt::Write,
+    panic::{catch_unwind, AssertUnwindSafe},
+};
 
 use anyhow::Result;
 use dspy_rs::{adapter::Adapter, example, ChatAdapter, Message, Signature};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::{
     model_profile::ModelProfile,
@@ -70,8 +73,8 @@ pub fn format_tool_contract(
         .iter()
         .cloned()
         .partition(|message| message.role == "system" || message.role == "developer");
-    let system_context = serde_json::to_string_pretty(&system_messages)?;
-    let conversation = serde_json::to_string_pretty(&conversation_messages)?;
+    let system_context = render_system_context(&system_messages)?;
+    let conversation = render_conversation(&conversation_messages)?;
     let available_tools = serde_json::to_string_pretty(&normalized.tools)?;
     let tool_choice = normalized
         .tool_choice
@@ -171,9 +174,7 @@ fn dsrs_message_to_openai(message: Message) -> ChatMessage {
 }
 
 fn contains_dsrs_marker(content: &str) -> bool {
-    content.contains("[[ ## content ## ]]")
-        || content.contains("[[ ## tool_calls ## ]]")
-        || looks_like_label_free_dsrs(content)
+    content.contains("[[ ## content ## ]]") || content.contains("[[ ## tool_calls ## ]]")
 }
 
 #[derive(Debug, Default)]
@@ -196,62 +197,7 @@ fn parse_contract_fallback(content: &str) -> ContractFallback {
         };
     }
 
-    if looks_like_label_free_dsrs(content) {
-        return parse_label_free_dsrs(content);
-    }
-
     ContractFallback::default()
-}
-
-fn parse_label_free_dsrs(content: &str) -> ContractFallback {
-    let mut lines: Vec<&str> = content.lines().collect();
-    trim_blank_line_suffix(&mut lines);
-    if lines.last().is_some_and(|line| is_completed_line(line)) {
-        lines.pop();
-    }
-    trim_blank_line_suffix(&mut lines);
-
-    if let Some(tool_calls_index) = lines
-        .iter()
-        .rposition(|line| is_label(line.trim(), "tool_calls"))
-    {
-        let content = clean_contract_content(&lines[..tool_calls_index].join("\n"));
-        let tool_call_lines = &lines[tool_calls_index + 1..];
-        let tool_calls = if tool_call_lines.iter().all(|line| line.trim().is_empty()) {
-            "[]".to_string()
-        } else {
-            tool_call_lines
-                .iter()
-                .map(|line| line.trim())
-                .filter(|line| !line.is_empty())
-                .collect::<Vec<_>>()
-                .join("\n")
-        };
-        return ContractFallback {
-            content,
-            tool_calls: Some(tool_calls),
-        };
-    }
-
-    let mut tool_calls = None;
-    if lines
-        .last()
-        .is_some_and(|line| line.trim().starts_with('[') && line.trim().ends_with(']'))
-    {
-        tool_calls = lines.pop().map(|line| line.trim().to_string());
-    }
-    trim_blank_line_suffix(&mut lines);
-
-    ContractFallback {
-        content: clean_contract_content(&lines.join("\n")),
-        tool_calls,
-    }
-}
-
-fn trim_blank_line_suffix(lines: &mut Vec<&str>) {
-    while lines.last().is_some_and(|line| line.trim().is_empty()) {
-        lines.pop();
-    }
 }
 
 fn extract_until_completed(content: &str) -> &str {
@@ -267,12 +213,7 @@ fn clean_contract_content(content: &str) -> Option<String> {
         .replace("[[ ## content ## ]]", "")
         .trim()
         .to_string();
-    if let Some(rest) = cleaned
-        .strip_prefix("content\n")
-        .or_else(|| cleaned.strip_prefix("content:\n"))
-        .or_else(|| cleaned.strip_prefix("content\r\n"))
-        .or_else(|| cleaned.strip_prefix("content:\r\n"))
-    {
+    if let Some(rest) = strip_field_label_prefix(&cleaned, "content") {
         cleaned = rest.trim().to_string();
     }
 
@@ -289,7 +230,9 @@ fn clean_output_content(value: &str) -> Option<String> {
 }
 
 fn clean_tool_calls_field(value: &str) -> Option<&str> {
-    let cleaned = value.trim();
+    let cleaned = strip_field_label_prefix(value.trim(), "tool_calls")
+        .unwrap_or(value)
+        .trim();
     if is_placeholder_value(cleaned) || is_label(cleaned, "tool_calls") {
         None
     } else {
@@ -297,21 +240,24 @@ fn clean_tool_calls_field(value: &str) -> Option<&str> {
     }
 }
 
-fn looks_like_label_free_dsrs(content: &str) -> bool {
-    let mut lines = content
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty());
-    let Some(last) = lines.next_back() else {
-        return false;
-    };
-    is_completed_line(last)
-        && lines
-            .any(|line| line == "[]" || is_label(line, "content") || is_label(line, "tool_calls"))
+fn strip_field_label_prefix<'a>(value: &'a str, label: &str) -> Option<&'a str> {
+    let trimmed = value.trim_start();
+    let rest = trimmed
+        .strip_prefix(label)
+        .or_else(|| strip_ascii_case_prefix(trimmed, label))?;
+    let rest = rest.strip_prefix(':').unwrap_or(rest);
+    if rest.starts_with(char::is_whitespace) || rest.is_empty() {
+        Some(rest)
+    } else {
+        None
+    }
 }
 
-fn is_completed_line(line: &str) -> bool {
-    is_label(line, "completed") || line.trim().eq_ignore_ascii_case("[[ ## completed ## ]]")
+fn strip_ascii_case_prefix<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
+    value
+        .get(..prefix.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+        .then(|| &value[prefix.len()..])
 }
 
 fn is_label(line: &str, label: &str) -> bool {
@@ -331,7 +277,8 @@ fn parse_tool_calls_field(field: &str, events: &mut Vec<String>) -> Vec<ToolInte
         return Vec::new();
     }
 
-    let Some(value) = parse_jsonish(field) else {
+    let Some(value) = parse_jsonish(field).or_else(|| parse_adjacent_tool_call_values(field))
+    else {
         events.push("DSRs tool_calls field was not valid JSON".to_string());
         return Vec::new();
     };
@@ -352,6 +299,92 @@ fn parse_tool_calls_field(field: &str, events: &mut Vec<String>) -> Vec<ToolInte
         .into_iter()
         .filter_map(|call| tool_intent_from_value(call, events))
         .collect()
+}
+
+fn parse_adjacent_tool_call_values(field: &str) -> Option<Value> {
+    let values = parse_json_sequence(field)?;
+    let mut calls = Vec::new();
+    for value in values {
+        match value {
+            Value::Array(items) => calls.extend(items),
+            Value::Object(mut object) => match object.remove("tool_calls") {
+                Some(Value::Array(items)) => calls.extend(items),
+                _ => calls.push(Value::Object(object)),
+            },
+            _ => return None,
+        }
+    }
+    (!calls.is_empty()).then(|| Value::Array(calls))
+}
+
+fn parse_json_sequence(input: &str) -> Option<Vec<Value>> {
+    let mut values = Vec::new();
+    let mut offset = 0usize;
+    let input = input.trim();
+
+    while offset < input.len() {
+        let rest = input[offset..].trim_start();
+        offset = input.len() - rest.len();
+        if rest.is_empty() {
+            break;
+        }
+
+        let end = json_value_end(rest)?;
+        let value_text = &rest[..end];
+        let value = parse_jsonish(value_text)?;
+        values.push(value);
+        offset += end;
+    }
+
+    (values.len() > 1).then_some(values)
+}
+
+fn json_value_end(input: &str) -> Option<usize> {
+    let mut chars = input.char_indices();
+    let (_, first) = chars.next()?;
+    let (open, close) = match first {
+        '[' => ('[', ']'),
+        '{' => ('{', '}'),
+        _ => return None,
+    };
+    let mut stack = vec![open];
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (index, ch) in chars {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => in_string = true,
+            '[' | '{' => stack.push(ch),
+            ']' | '}' => {
+                let expected = match stack.pop()? {
+                    '[' => ']',
+                    '{' => '}',
+                    _ => return None,
+                };
+                if ch != expected {
+                    return None;
+                }
+                if stack.is_empty() {
+                    return Some(index + ch.len_utf8());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let _ = close;
+    None
 }
 
 fn tool_intent_from_value(call: Value, events: &mut Vec<String>) -> Option<ToolIntent> {
@@ -408,12 +441,87 @@ fn parse_jsonish(input: &str) -> Option<Value> {
         .or_else(|| json5::from_str(trimmed).ok())
 }
 
+fn render_system_context(messages: &[ChatMessage]) -> Result<String> {
+    if messages.is_empty() {
+        return Ok("No system or developer messages.".to_string());
+    }
+
+    let mut out = String::new();
+    for (index, message) in messages.iter().enumerate() {
+        writeln!(&mut out, "[{index}] role: {}", message.role)?;
+        if let Some(name) = &message.name {
+            writeln!(&mut out, "name: {name}")?;
+        }
+        writeln!(&mut out, "content:\n{}\n", render_message_content(message)?)?;
+    }
+    Ok(out.trim_end().to_string())
+}
+
+fn render_conversation(messages: &[ChatMessage]) -> Result<String> {
+    if messages.is_empty() {
+        return Ok("No non-system conversation messages.".to_string());
+    }
+
+    let mut out = String::new();
+    for (index, message) in messages.iter().enumerate() {
+        writeln!(&mut out, "[{index}] role: {}", message.role)?;
+        if let Some(name) = &message.name {
+            writeln!(&mut out, "name: {name}")?;
+        }
+        if let Some(tool_call_id) = &message.tool_call_id {
+            writeln!(&mut out, "tool_call_id: {tool_call_id}")?;
+        }
+        writeln!(&mut out, "content:\n{}", render_message_content(message)?)?;
+        if let Some(tool_calls) = &message.tool_calls {
+            let rendered = tool_calls
+                .iter()
+                .map(|call| {
+                    json!({
+                        "id": call.id,
+                        "name": call.function.name,
+                        "arguments": parse_jsonish(&call.function.arguments)
+                            .unwrap_or_else(|| Value::String(call.function.arguments.clone()))
+                    })
+                })
+                .collect::<Vec<_>>();
+            writeln!(
+                &mut out,
+                "assistant_tool_calls:\n{}",
+                serde_json::to_string_pretty(&rendered)?
+            )?;
+        }
+        writeln!(&mut out)?;
+    }
+    Ok(out.trim_end().to_string())
+}
+
+fn render_message_content(message: &ChatMessage) -> Result<String> {
+    match &message.content {
+        Some(Value::String(text)) => Ok(text.clone()),
+        Some(Value::Array(parts)) => {
+            let mut text = String::new();
+            for part in parts {
+                if let Some(part_text) = part.get("text").and_then(Value::as_str) {
+                    text.push_str(part_text);
+                }
+            }
+            if text.is_empty() {
+                Ok(serde_json::to_string_pretty(parts)?)
+            } else {
+                Ok(text)
+            }
+        }
+        Some(Value::Null) | None => Ok(String::new()),
+        Some(value) => Ok(serde_json::to_string_pretty(value)?),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::{json, Map};
 
     use super::*;
-    use crate::openai::{ChatCompletionRequest, OpenAiFunctionTool, OpenAiTool};
+    use crate::openai::{ChatCompletionRequest, OpenAiFunctionTool, OpenAiTool, OpenAiToolCall};
 
     fn normalized_request() -> NormalizedRequest {
         crate::normalizer::normalize_request(ChatCompletionRequest {
@@ -464,6 +572,37 @@ mod tests {
     }
 
     #[test]
+    fn formats_prior_assistant_tool_calls_and_tool_results_in_conversation() {
+        let mut assistant = ChatMessage::new("assistant", "");
+        assistant.tool_calls = Some(vec![OpenAiToolCall::function(
+            "read",
+            r#"{"path":"README.md"}"#,
+        )]);
+        let mut tool = ChatMessage::new("tool", "README contents");
+        tool.tool_call_id = assistant
+            .tool_calls
+            .as_ref()
+            .map(|calls| calls[0].id.clone());
+        let mut request = normalized_request();
+        request.messages = vec![
+            ChatMessage::new("system", "Do not repeat this."),
+            ChatMessage::new("user", "read README"),
+            assistant,
+            tool,
+            ChatMessage::new("user", "summarize it"),
+        ];
+
+        let formatted = format_tool_contract(&request, &ModelProfile::qwen()).unwrap();
+        let user_message = formatted.messages[1].content_text().unwrap();
+
+        assert!(user_message.contains("assistant_tool_calls"));
+        assert!(user_message.contains("\"name\": \"read\""));
+        assert!(user_message.contains("\"path\": \"README.md\""));
+        assert!(user_message.contains("role: tool"));
+        assert!(user_message.contains("README contents"));
+    }
+
+    #[test]
     fn parses_dsrs_tool_calls_field() {
         let parsed = parse_tool_contract_response(
             r#"[[ ## content ## ]]
@@ -483,6 +622,51 @@ mod tests {
     }
 
     #[test]
+    fn parses_tagged_dsrs_with_redundant_inner_field_labels() {
+        let parsed = parse_tool_contract_response(
+            r#"[[ ## content ## ]]
+content:
+[[ ## tool_calls ## ]]
+tool_calls: [
+  {"name":"read","arguments":{"path":"packages/agent/README.md"}},
+  {"name":"read","arguments":{"path":"packages/ai/README.md"}}
+]
+[[ ## completed ## ]]"#,
+        )
+        .unwrap();
+
+        assert_eq!(parsed.content, None);
+        assert_eq!(parsed.tool_intents.len(), 2);
+        assert_eq!(parsed.tool_intents[0].name, "read");
+        assert_eq!(
+            parsed.tool_intents[0].arguments.as_ref().unwrap()["path"],
+            "packages/agent/README.md"
+        );
+    }
+
+    #[test]
+    fn parses_tagged_dsrs_with_adjacent_tool_call_arrays() {
+        let parsed = parse_tool_contract_response(
+            r#"[[ ## content ## ]]
+
+[[ ## tool_calls ## ]]
+[{"name":"bash","arguments":{"command":"ls packages"}}]
+[{"name":"read","arguments":{"path":"packages/ai/README.md","limit":100}}]
+[{"name":"read","arguments":{"path":"packages/tui/README.md","limit":100}}]
+[[ ## completed ## ]]"#,
+        )
+        .unwrap();
+
+        assert_eq!(parsed.content, None);
+        assert_eq!(parsed.tool_intents.len(), 3);
+        assert_eq!(parsed.tool_intents[0].name, "bash");
+        assert_eq!(
+            parsed.tool_intents[1].arguments.as_ref().unwrap()["path"],
+            "packages/ai/README.md"
+        );
+    }
+
+    #[test]
     fn parses_partial_dsrs_without_content_marker() {
         let parsed = parse_tool_contract_response(
             "content\nHello!\n\n[[ ## tool_calls ## ]]\n[]\n\n[[ ## completed ## ]]",
@@ -494,35 +678,26 @@ mod tests {
     }
 
     #[test]
-    fn parses_label_free_empty_tool_calls_tail() {
-        let parsed =
-            parse_tool_contract_response("Hello! How can I help?\n\n[]\n\ncompleted").unwrap();
+    fn rejects_label_free_empty_tool_calls_tail() {
+        let parsed = parse_tool_contract_response("Hello! How can I help?\n\n[]\n\ncompleted");
 
-        assert_eq!(parsed.content.as_deref(), Some("Hello! How can I help?"));
-        assert!(parsed.tool_intents.is_empty());
+        assert!(parsed.is_none());
     }
 
     #[test]
-    fn parses_label_free_named_tool_calls_section() {
-        let parsed =
-            parse_tool_contract_response("content\nHello!\n\ntool_calls\n[]\n\ncompleted").unwrap();
+    fn rejects_label_free_named_tool_calls_section() {
+        let parsed = parse_tool_contract_response("content\nHello!\n\ntool_calls\n[]\n\ncompleted");
 
-        assert_eq!(parsed.content.as_deref(), Some("Hello!"));
-        assert!(parsed.tool_intents.is_empty());
+        assert!(parsed.is_none());
     }
 
     #[test]
-    fn parses_label_free_output_with_completed_marker() {
+    fn rejects_label_free_output_with_completed_marker() {
         let parsed = parse_tool_contract_response(
             "content\nI can help with this repository.\n\ntool_calls\n[]\n\n[[ ## completed ## ]]",
-        )
-        .unwrap();
-
-        assert_eq!(
-            parsed.content.as_deref(),
-            Some("I can help with this repository.")
         );
-        assert!(parsed.tool_intents.is_empty());
+
+        assert!(parsed.is_none());
     }
 
     #[test]
@@ -548,7 +723,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_label_free_multiline_tool_call_section() {
+    fn rejects_label_free_multiline_tool_call_section() {
         let parsed = parse_tool_contract_response(
             r#"content
 
@@ -563,15 +738,8 @@ tool_calls
 ]
 
 completed"#,
-        )
-        .unwrap();
-
-        assert_eq!(parsed.content, None);
-        assert_eq!(parsed.tool_intents.len(), 1);
-        assert_eq!(parsed.tool_intents[0].name, "bash");
-        assert_eq!(
-            parsed.tool_intents[0].arguments.as_ref().unwrap()["command"],
-            "ls"
         );
+
+        assert!(parsed.is_none());
     }
 }

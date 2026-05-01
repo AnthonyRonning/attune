@@ -9,6 +9,7 @@ use model_correction_proxy::{
     gateway::Gateway,
     optimization::{optimize_correction_prompt, GepaOptimizationConfig},
     replay::{replay_traces, ReplayConfig},
+    trace::{read_trace_records, trace_summaries, TraceSummary},
 };
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
@@ -52,6 +53,14 @@ enum Command {
         #[arg(long, default_value = "traces/model-correction-proxy.jsonl")]
         trace_path: String,
     },
+    InspectTraces {
+        #[arg(long, default_value = "traces/model-correction-proxy.jsonl")]
+        trace_path: String,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
     Eval {
         #[arg(long, default_value = "eval/regressions.jsonl")]
         suite_path: String,
@@ -82,7 +91,7 @@ async fn main() -> anyhow::Result<()> {
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .with(tracing_subscriber::fmt::layer())
         .init();
-    tracing::info!(
+    tracing::debug!(
         "logging initialized; set RUST_LOG=model_correction_proxy=debug,tower_http=debug for more detail or model_correction_proxy=trace for request-shape traces"
     );
 
@@ -115,6 +124,20 @@ async fn main() -> anyhow::Result<()> {
             })
             .await
         }
+        Command::InspectTraces {
+            trace_path,
+            limit,
+            json,
+        } => {
+            let records = read_trace_records(&trace_path.into()).await?;
+            let summaries = trace_summaries(&records, limit);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&summaries)?);
+            } else {
+                print_trace_summaries(&summaries);
+            }
+            Ok(())
+        }
         Command::Eval { suite_path } => {
             let report = run_regression_suite(RegressionConfig {
                 suite_path: suite_path.into(),
@@ -144,6 +167,55 @@ async fn main() -> anyhow::Result<()> {
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(())
         }
+    }
+}
+
+fn print_trace_summaries(summaries: &[TraceSummary]) {
+    for summary in summaries {
+        println!("trace {}", summary.trace_id);
+        println!(
+            "  model={} profile={} mode={} messages={} tools={}",
+            summary.model,
+            summary.profile.as_deref().unwrap_or("-"),
+            summary.adapter_mode.as_deref().unwrap_or("-"),
+            summary.request_messages,
+            summary.request_tools
+        );
+        if let Some(latest_user) = &summary.latest_user {
+            println!("  user: {latest_user}");
+        }
+        println!(
+            "  upstream: finish={:?} content_len={} reasoning_len={}",
+            summary.upstream_finish_reason,
+            summary.upstream_content_len,
+            summary.upstream_reasoning_len
+        );
+        if let Some(content) = &summary.upstream_content_preview {
+            println!("    content: {content}");
+        }
+        println!(
+            "  interpreted: suspicious={:?} content_len={} intents={}",
+            summary.suspicious_stop,
+            summary.interpreted_content_len,
+            summary.tool_intents.join(", ")
+        );
+        if !summary.parse_events.is_empty() {
+            println!("    events: {}", summary.parse_events.join(" | "));
+        }
+        if !summary.repair_actions.is_empty() {
+            println!("  repair: {}", summary.repair_actions.join(" | "));
+        }
+        println!(
+            "  final: finish={:?} content_len={} tool_calls={}",
+            summary.final_finish_reason, summary.final_content_len, summary.final_tool_calls
+        );
+        if let Some(content) = &summary.final_content_preview {
+            println!("    content: {content}");
+        }
+        if let Some(error) = &summary.error {
+            println!("  error: {error}");
+        }
+        println!();
     }
 }
 

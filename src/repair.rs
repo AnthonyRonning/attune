@@ -45,6 +45,7 @@ pub async fn repair_response(
 
     let mut actions = Vec::new();
     let mut intents = interpreted.tool_intents.clone();
+    let mut corrected_content: Option<(String, f32, String)> = None;
 
     if should_try_correction_agent(normalized, interpreted, &intents)
         && config.correction.enabled
@@ -73,6 +74,16 @@ pub async fn repair_response(
                 });
                 intents.extend(output.tool_calls);
             }
+            Ok(Some(output)) => {
+                if let Some(content) = output.content.filter(|content| !content.trim().is_empty()) {
+                    actions.push(RepairAction {
+                        action: "correction_agent_content_recovery".to_string(),
+                        confidence: output.confidence,
+                        reason: output.explanation.clone(),
+                    });
+                    corrected_content = Some((content, output.confidence, output.explanation));
+                }
+            }
             Ok(_) => {}
             Err(error) => actions.push(RepairAction {
                 action: "correction_agent_failed".to_string(),
@@ -87,6 +98,14 @@ pub async fn repair_response(
     ensure_first_choice(&mut final_response, &normalized.model);
 
     if repaired_tool_calls.is_empty() {
+        if let Some((content, confidence, reason)) = corrected_content {
+            apply_corrected_content(&mut final_response, content, confidence, reason);
+            return Ok(RepairOutcome {
+                final_response,
+                actions,
+            });
+        }
+
         if should_suppress_unrecoverable_tool_output(interpreted)
             || should_suppress_expected_tool_failure(normalized, interpreted)
         {
@@ -517,7 +536,27 @@ fn map_reasoning_content_if_needed(
 }
 
 fn should_suppress_unrecoverable_tool_output(interpreted: &InterpretedResponse) -> bool {
-    interpreted.suspicious_stop || !interpreted.tool_intents.is_empty()
+    !interpreted.tool_intents.is_empty()
+        || interpreted
+            .content
+            .as_deref()
+            .map(contains_unrecoverable_tool_output)
+            .unwrap_or(false)
+}
+
+fn contains_unrecoverable_tool_output(content: &str) -> bool {
+    let lower = content.to_ascii_lowercase();
+    lower.contains("<tool_call")
+        || lower.contains("<tool ")
+        || lower.contains("<function")
+        || lower.contains("function=")
+        || lower.contains("tool_calls")
+        || lower.contains("[\"content\"")
+        || lower.contains("[\"tool_calls\"")
+        || lower.contains("[## completed ##]")
+        || lower.contains("![## completed ##]")
+        || (lower.contains("\"name\"") && lower.contains("\"arguments\""))
+        || lower.contains("[[ ## tool_calls ## ]]")
 }
 
 fn should_suppress_expected_tool_failure(
@@ -589,7 +628,10 @@ fn unusable_assistant_content(content: &str) -> bool {
     matches!(
         lower.as_str(),
         "content" | "content_value" | "tool_calls_value" | "completed_marker"
-    ) || lower.starts_with("thinking process")
+    ) || lower.starts_with("tool_calls")
+        || lower.contains("\ntool_calls")
+        || (lower.contains("\n[]") && lower.ends_with("completed"))
+        || lower.starts_with("thinking process")
         || lower.starts_with("thought process")
         || lower.starts_with("chain of thought")
         || trimmed.contains("[[ ##")
@@ -613,6 +655,25 @@ fn replace_unusable_assistant_content(
         confidence: 1.0,
         reason: "replaced empty, placeholder, or scratchpad-only assistant content".to_string(),
     });
+}
+
+fn apply_corrected_content(
+    response: &mut ChatCompletionResponse,
+    content: String,
+    confidence: f32,
+    reason: String,
+) {
+    ensure_first_choice(response, "");
+    let first = response.choices.first_mut().expect("choice ensured");
+    first.message.tool_calls = None;
+    first.message.set_content_text(content);
+    remove_reasoning_extra(&mut first.message);
+    first.finish_reason = Some("stop".to_string());
+    tracing::debug!(
+        confidence,
+        reason = %reason,
+        "applied correction-agent content recovery"
+    );
 }
 
 fn fallback_unusable_response_content(normalized: &NormalizedRequest) -> String {
@@ -686,11 +747,24 @@ fn malformed_response_text(
     upstream_response: &ChatCompletionResponse,
     interpreted: &InterpretedResponse,
 ) -> String {
-    interpreted
-        .content
-        .clone()
+    let content = upstream_response
+        .choices
+        .first()
+        .and_then(|choice| choice.message.content_text())
+        .or_else(|| interpreted.content.clone())
         .or_else(|| serde_json::to_string(upstream_response).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    let reasoning = upstream_response
+        .choices
+        .first()
+        .and_then(|choice| choice.message.reasoning_text())
+        .or_else(|| interpreted.reasoning.clone());
+
+    if let Some(reasoning) = reasoning.filter(|reasoning| !reasoning.trim().is_empty()) {
+        format!("assistant_content:\n{content}\n\nassistant_reasoning:\n{reasoning}")
+    } else {
+        content
+    }
 }
 
 fn ensure_first_choice(response: &mut ChatCompletionResponse, model: &str) {
@@ -750,13 +824,17 @@ mod tests {
     }
 
     fn request_with_tool_prompt(prompt: &str, parallel: bool) -> NormalizedRequest {
+        request_with_named_tool("read_file", prompt, parallel)
+    }
+
+    fn request_with_named_tool(name: &str, prompt: &str, parallel: bool) -> NormalizedRequest {
         normalize_request(ChatCompletionRequest {
             model: "test".to_string(),
             messages: vec![ChatMessage::new("user", prompt)],
             tools: Some(vec![OpenAiTool {
                 tool_type: "function".to_string(),
                 function: OpenAiFunctionTool {
-                    name: "read_file".to_string(),
+                    name: name.to_string(),
                     description: None,
                     parameters: json!({
                         "type":"object",
@@ -919,7 +997,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn replaces_empty_label_free_dsrs_content() {
+    async fn suppresses_empty_label_free_dsrs_content_when_correction_is_unavailable() {
         let normalized = request_with_tool_prompt("hey", false);
         let upstream = synthetic_response("test", "content\ntool_calls\n[]\ncompleted");
         let interpreted =
@@ -942,12 +1020,164 @@ mod tests {
                 .message
                 .content_text()
                 .as_deref(),
-            Some("Hello! How can I help?")
+            Some("The upstream model emitted a malformed tool call that could not be safely recovered.")
         );
         assert!(outcome
             .actions
             .iter()
-            .any(|action| action.action == "unusable_assistant_content_replaced"));
+            .any(|action| action.action == "unrecoverable_tool_call_suppressed"));
+    }
+
+    struct ContentCorrectionAgent;
+
+    #[async_trait::async_trait]
+    impl CorrectionAgent for ContentCorrectionAgent {
+        async fn correct(
+            &self,
+            input: CorrectionAgentInput,
+        ) -> Result<Option<crate::agents::CorrectionAgentOutput>> {
+            assert!(input.malformed_response.contains("tool_calls: []"));
+            Ok(Some(crate::agents::CorrectionAgentOutput {
+                tool_calls: Vec::new(),
+                content: Some("Just coding everything. How about you?".to_string()),
+                confidence: 0.94,
+                explanation: "recovered content from malformed DSRs-like output".to_string(),
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn correction_agent_can_recover_content_only_contract_violation() {
+        let normalized = request_with_tool_prompt("hey what's up?", false);
+        let upstream = synthetic_response(
+            "test",
+            "content: Just coding everything. How about you?\n\ntool_calls: []\n\n[[ ## completed ## ]]",
+        );
+        let interpreted =
+            crate::response_interpreter::interpret_response(&upstream, &normalized.tools);
+
+        assert!(interpreted.suspicious_stop);
+        assert!(interpreted.tool_intents.is_empty());
+
+        let outcome = repair_response(
+            &ProxyConfig::default(),
+            &normalized,
+            &ModelProfile::qwen(),
+            &upstream,
+            &interpreted,
+            &ContentCorrectionAgent,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            outcome.final_response.choices[0]
+                .message
+                .content_text()
+                .as_deref(),
+            Some("Just coding everything. How about you?")
+        );
+        assert!(outcome.final_response.choices[0]
+            .message
+            .tool_calls
+            .is_none());
+        assert!(outcome
+            .actions
+            .iter()
+            .any(|action| action.action == "correction_agent_content_recovery"));
+    }
+
+    struct ReadmeCorrectionAgent;
+
+    #[async_trait::async_trait]
+    impl CorrectionAgent for ReadmeCorrectionAgent {
+        async fn correct(
+            &self,
+            input: CorrectionAgentInput,
+        ) -> Result<Option<crate::agents::CorrectionAgentOutput>> {
+            assert!(input.malformed_response.contains("packages/ai/README.md"));
+            assert!(input
+                .parser_events
+                .iter()
+                .any(|event| event.contains("assistant appears")));
+            Ok(Some(crate::agents::CorrectionAgentOutput {
+                tool_calls: vec![
+                    ToolIntent {
+                        name: "read".to_string(),
+                        arguments: Some(json!({"path":"packages/ai/README.md"})),
+                        raw_arguments: r#"{"path":"packages/ai/README.md"}"#.to_string(),
+                        source: ToolIntentSource::CorrectionAgent,
+                        confidence: 0.95,
+                    },
+                    ToolIntent {
+                        name: "read".to_string(),
+                        arguments: Some(json!({"path":"packages/agent/README.md"})),
+                        raw_arguments: r#"{"path":"packages/agent/README.md"}"#.to_string(),
+                        source: ToolIntentSource::CorrectionAgent,
+                        confidence: 0.95,
+                    },
+                ],
+                content: None,
+                confidence: 0.95,
+                explanation: "recovered adjacent JSON tool-call array".to_string(),
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn adjacent_json_tool_payload_routes_to_correction_agent() {
+        let normalized = request_with_named_tool(
+            "read",
+            "do each of them have a readme that says a little more than that though?",
+            true,
+        );
+        let upstream = synthetic_response(
+            "qwen/qwen3.5-9b",
+            r#"[]
+
+[
+  {"name":"read","arguments":{"path":"packages/ai/README.md"}},
+  {"name":"read","arguments":{"path":"packages/agent/README.md"}}
+]"#,
+        );
+        let interpreted =
+            crate::response_interpreter::interpret_response(&upstream, &normalized.tools);
+
+        assert!(interpreted.suspicious_stop);
+        assert!(interpreted.tool_intents.is_empty());
+
+        let outcome = repair_response(
+            &ProxyConfig::default(),
+            &normalized,
+            &ModelProfile::qwen(),
+            &upstream,
+            &interpreted,
+            &ReadmeCorrectionAgent,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let calls = outcome.final_response.choices[0]
+            .message
+            .tool_calls
+            .as_ref()
+            .unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].function.name, "read");
+        assert_eq!(
+            calls[0].function.arguments,
+            r#"{"path":"packages/ai/README.md"}"#
+        );
+        assert!(outcome.final_response.choices[0]
+            .message
+            .content_text()
+            .is_none());
+        assert!(outcome
+            .actions
+            .iter()
+            .any(|action| action.action == "correction_agent_tool_recovery"));
     }
 
     #[tokio::test]
@@ -1160,5 +1390,53 @@ mod tests {
             .actions
             .iter()
             .any(|action| action.action == "correction_agent_failed"));
+    }
+
+    #[tokio::test]
+    async fn suppresses_array_pair_contract_violation_when_correction_fails() {
+        let normalized = request_with_named_tool(
+            "read",
+            "very cool. can you dive into each package and let me know more information about each?",
+            true,
+        );
+        let mut upstream = synthetic_response(
+            "qwen/qwen3.5-9b",
+            "[\"content\",\"\"]\n\n[\"tool_calls\",\"[]\\\"]\n\n![## completed ##]",
+        );
+        upstream.choices[0].message.extra.insert(
+            "reasoning".to_string(),
+            json!("I should read package README files before answering."),
+        );
+        let interpreted =
+            crate::response_interpreter::interpret_response(&upstream, &normalized.tools);
+
+        assert!(interpreted.suspicious_stop);
+
+        let outcome = repair_response(
+            &ProxyConfig::default(),
+            &normalized,
+            &ModelProfile::qwen(),
+            &upstream,
+            &interpreted,
+            &FailingCorrectionAgent,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let content = outcome.final_response.choices[0]
+            .message
+            .content_text()
+            .unwrap();
+        assert!(content.contains("malformed tool call"));
+        assert!(!content.contains("[\"content\""));
+        assert!(outcome
+            .actions
+            .iter()
+            .any(|action| action.action == "correction_agent_failed"));
+        assert!(outcome
+            .actions
+            .iter()
+            .any(|action| action.action == "unrecoverable_tool_call_suppressed"));
     }
 }

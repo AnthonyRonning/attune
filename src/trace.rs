@@ -10,7 +10,7 @@ use uuid::Uuid;
 use crate::{
     model_profile::ModelProfile,
     normalizer::NormalizedRequest,
-    openai::{ChatCompletionRequest, ChatCompletionResponse},
+    openai::{ChatCompletionRequest, ChatCompletionResponse, ChatMessage},
     prompt_adapter::AdaptedRequest,
     repair::RepairAction,
     response_interpreter::InterpretedResponse,
@@ -52,6 +52,7 @@ impl TraceStore {
             .await
             .with_context(|| format!("failed to open trace file {}", self.path.display()))?;
         record.completed_at = Some(Utc::now());
+        record.summary = Some(TraceSummary::from_record(&record));
         let mut line = serde_json::to_vec(&record)?;
         line.push(b'\n');
         file.write_all(&line).await?;
@@ -74,6 +75,8 @@ pub struct TraceRecord {
     pub final_response: Option<ChatCompletionResponse>,
     pub error: Option<String>,
     pub metadata: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<TraceSummary>,
 }
 
 impl TraceRecord {
@@ -92,8 +95,127 @@ impl TraceRecord {
             final_response: None,
             error: None,
             metadata,
+            summary: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TraceSummary {
+    pub trace_id: String,
+    pub model: String,
+    pub profile: Option<String>,
+    pub adapter_mode: Option<String>,
+    pub latest_user: Option<String>,
+    pub request_messages: usize,
+    pub request_tools: usize,
+    pub upstream_finish_reason: Option<String>,
+    pub upstream_content_len: usize,
+    pub upstream_content_preview: Option<String>,
+    pub upstream_reasoning_len: usize,
+    pub interpreted_content_len: usize,
+    pub interpreted_content_preview: Option<String>,
+    pub parse_events: Vec<String>,
+    pub suspicious_stop: Option<bool>,
+    pub tool_intents: Vec<String>,
+    pub repair_actions: Vec<String>,
+    pub final_finish_reason: Option<String>,
+    pub final_content_len: usize,
+    pub final_content_preview: Option<String>,
+    pub final_tool_calls: usize,
+    pub error: Option<String>,
+}
+
+impl TraceSummary {
+    pub fn from_record(record: &TraceRecord) -> Self {
+        let upstream_message = record
+            .upstream_response
+            .as_ref()
+            .and_then(|response| response.choices.first())
+            .map(|choice| &choice.message);
+        let upstream_content = upstream_message.and_then(ChatMessage::content_text);
+        let upstream_reasoning = upstream_message.and_then(ChatMessage::reasoning_text);
+        let interpreted_content = record
+            .interpreted
+            .as_ref()
+            .and_then(|interpreted| interpreted.content.clone());
+        let final_message = record
+            .final_response
+            .as_ref()
+            .and_then(|response| response.choices.first())
+            .map(|choice| &choice.message);
+        let final_content = final_message.and_then(ChatMessage::content_text);
+
+        Self {
+            trace_id: record.trace_id.clone(),
+            model: record.request.model.clone(),
+            profile: record.profile.as_ref().map(|profile| profile.name.clone()),
+            adapter_mode: record
+                .adapted_request
+                .as_ref()
+                .map(|adapted| format!("{:?}", adapted.mode)),
+            latest_user: latest_user_text(&record.request.messages).map(|text| preview(&text)),
+            request_messages: record.request.messages.len(),
+            request_tools: record.request.tools.as_ref().map_or(0, Vec::len),
+            upstream_finish_reason: record
+                .upstream_response
+                .as_ref()
+                .and_then(first_finish_reason),
+            upstream_content_len: upstream_content.as_ref().map_or(0, String::len),
+            upstream_content_preview: upstream_content.as_deref().map(preview),
+            upstream_reasoning_len: upstream_reasoning.as_ref().map_or(0, String::len),
+            interpreted_content_len: interpreted_content.as_ref().map_or(0, String::len),
+            interpreted_content_preview: interpreted_content.as_deref().map(preview),
+            parse_events: record
+                .interpreted
+                .as_ref()
+                .map(|interpreted| interpreted.parse_events.clone())
+                .unwrap_or_default(),
+            suspicious_stop: record
+                .interpreted
+                .as_ref()
+                .map(|interpreted| interpreted.suspicious_stop),
+            tool_intents: record
+                .interpreted
+                .as_ref()
+                .map(|interpreted| {
+                    interpreted
+                        .tool_intents
+                        .iter()
+                        .map(|intent| format!("{}:{:?}", intent.name, intent.source))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            repair_actions: record
+                .repair_actions
+                .iter()
+                .map(|action| action.action.clone())
+                .collect(),
+            final_finish_reason: record.final_response.as_ref().and_then(first_finish_reason),
+            final_content_len: final_content.as_ref().map_or(0, String::len),
+            final_content_preview: final_content.as_deref().map(preview),
+            final_tool_calls: final_message
+                .and_then(|message| message.tool_calls.as_ref())
+                .map_or(0, Vec::len),
+            error: record.error.clone(),
+        }
+    }
+}
+
+pub fn trace_summaries(records: &[TraceRecord], limit: usize) -> Vec<TraceSummary> {
+    let mut summaries = records
+        .iter()
+        .rev()
+        .take(limit)
+        .map(|record| {
+            record
+                .summary
+                .clone()
+                .unwrap_or_else(|| TraceSummary::from_record(record))
+        })
+        .collect::<Vec<_>>();
+    summaries.reverse();
+    summaries
 }
 
 pub async fn read_trace_records(path: &PathBuf) -> Result<Vec<TraceRecord>> {
@@ -115,4 +237,31 @@ pub async fn read_trace_records(path: &PathBuf) -> Result<Vec<TraceRecord>> {
         records.push(record);
     }
     Ok(records)
+}
+
+fn latest_user_text(messages: &[ChatMessage]) -> Option<String> {
+    messages
+        .iter()
+        .rev()
+        .find(|message| message.role == "user")
+        .and_then(ChatMessage::content_text)
+}
+
+fn first_finish_reason(response: &ChatCompletionResponse) -> Option<String> {
+    response
+        .choices
+        .first()
+        .and_then(|choice| choice.finish_reason.clone())
+}
+
+fn preview(text: &str) -> String {
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    const MAX: usize = 240;
+    if normalized.chars().count() <= MAX {
+        return normalized;
+    }
+
+    let mut out = normalized.chars().take(MAX).collect::<String>();
+    out.push_str("...");
+    out
 }

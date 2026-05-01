@@ -71,7 +71,7 @@ The proxy supports two early modes:
    - It removes native upstream tool definitions.
    - It renders the conversation, tool definitions, `tool_choice`, and parallel-call setting into a DSRs contract using `dspy-rs`.
    - It parses the model's text back into OpenAI `tool_calls`.
-   - It tolerates several real small-model deviations from the ideal DSRs format, including label-free output, placeholder values, repeated field blocks, and JSON5-like tool-call arguments.
+   - It deterministically parses tagged DSRs output and keeps untagged DSRs-like output on the correction path instead of treating it as valid contract output.
 
 2. **Pass-through repair**
    - The proxy can preserve native upstream tool calling behavior.
@@ -109,7 +109,8 @@ Current deterministic and schema-guided repairs include:
   [[ ## completed ## ]]
   ```
 
-- common malformed DSRs variants seen from smaller live models, including label-free `content` / `tool_calls` sections, placeholder values, and repeated field blocks
+- tagged DSRs variants seen from smaller live models, including placeholder values, repeated field blocks, and malformed JSON inside the tagged `tool_calls` field
+- routing untagged DSRs-like contract violations, such as `content: ... tool_calls: []` or adjacent `[]` plus tool-call JSON, to the correction-agent path rather than accepting them as valid DSRs
 - XML tool calls such as:
 
   ```xml
@@ -160,10 +161,19 @@ Every completed request can produce a JSONL trace containing:
 - repair actions and confidence metadata
 - final response
 - errors, if any
+- a compact `summary` block with the latest user prompt, upstream/final previews, parser events, suspicious-stop state, tool intents, and repair actions
 
 Responses include an `x-model-correction-trace-id` header when a trace is written.
 
 Trace files can contain prompts, model outputs, and tool arguments. Authorization, cookie, and key-like headers are redacted, but trace storage should still be treated as sensitive application data.
+
+For readable trace triage:
+
+```sh
+nix develop --command cargo run -- inspect-traces --limit 20
+```
+
+Use `--json` to print only compact summaries as pretty JSON.
 
 ## Installation
 

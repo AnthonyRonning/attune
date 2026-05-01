@@ -119,7 +119,6 @@ pub async fn optimize_correction_prompt(
         .api_key(api_key)
         .model(config.model.clone())
         .temperature(0.2)
-        .max_tokens(800)
         .build()
         .await
         .context("failed to build GEPA LM")?;

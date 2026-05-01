@@ -74,8 +74,13 @@ impl DsrsCorrectionAgent {
 
 #[Signature]
 struct CorrectMalformedToolResponse {
-    /// You are a strict model-response correction agent. Recover only clear tool-call
-    /// intent from the malformed response. Return valid JSON only.
+    /// You are a strict model-response correction agent. Recover a malformed
+    /// assistant response into the OpenAI-compatible result the client should have
+    /// received. Return valid JSON only, with no markdown and no prose outside the
+    /// JSON object. If clear tool calls were intended, put them in tool_calls and
+    /// leave content null. If no tool call was intended, put the user-facing text in
+    /// content and leave tool_calls empty. If the malformed response is ambiguous or
+    /// unsafe to repair, set possible to false.
 
     #[input(desc = "OpenAI-compatible tool definitions")]
     pub available_tools: String,
@@ -196,7 +201,6 @@ impl CorrectionAgent for DsrsCorrectionAgent {
             .api_key(api_key)
             .model(model)
             .temperature(0.1)
-            .max_tokens(700)
             .build()
             .await
             .context("failed to build DSRs correction LM")?;
@@ -258,15 +262,77 @@ fn normalize_arguments(arguments: Value) -> Value {
 
 fn parse_correction_envelope(output: &str) -> Result<CorrectionEnvelope> {
     let trimmed = output.trim();
-    let unwrapped = trimmed
+    let fenced = trimmed
         .strip_prefix("```json")
         .or_else(|| trimmed.strip_prefix("```"))
         .and_then(|s| s.strip_suffix("```"))
         .unwrap_or(trimmed)
         .trim();
-    serde_json::from_str(unwrapped)
-        .or_else(|_| json5::from_str(unwrapped))
-        .context("failed to parse correction envelope")
+    let dsrs_field = extract_dsrs_corrected_json(fenced);
+    let json_object = extract_json_object(fenced);
+
+    for candidate in [Some(fenced), dsrs_field, json_object.as_deref()]
+        .into_iter()
+        .flatten()
+    {
+        if let Ok(envelope) =
+            serde_json::from_str(candidate).or_else(|_| json5::from_str(candidate))
+        {
+            return Ok(envelope);
+        }
+    }
+
+    anyhow::bail!("failed to parse correction envelope")
+}
+
+fn extract_dsrs_corrected_json(output: &str) -> Option<&str> {
+    let (_, after_marker) = output.split_once("[[ ## corrected_json ## ]]")?;
+    Some(
+        after_marker
+            .split("[[ ## completed ## ]]")
+            .next()
+            .unwrap_or(after_marker)
+            .trim(),
+    )
+}
+
+fn extract_json_object(output: &str) -> Option<String> {
+    let mut start = None;
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (index, ch) in output.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => in_string = true,
+            '{' => {
+                if start.is_none() {
+                    start = Some(index);
+                }
+                depth += 1;
+            }
+            '}' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    let start = start?;
+                    return Some(output[start..=index].to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 pub fn recent_messages(messages: &[ChatMessage], max: usize) -> Vec<ChatMessage> {
@@ -351,5 +417,31 @@ mod tests {
         assert_eq!(intents.len(), 1);
         assert_eq!(intents[0].name, "read");
         assert_eq!(intents[0].arguments.as_ref().unwrap()["path"], "Cargo.toml");
+    }
+
+    #[test]
+    fn parses_correction_envelope_from_dsrs_field() {
+        let parsed = parse_correction_envelope(
+            r#"[[ ## corrected_json ## ]]
+{"possible":true,"confidence":0.91,"content":"Hello.","tool_calls":[]}
+[[ ## completed ## ]]"#,
+        )
+        .unwrap();
+
+        assert!(parsed.possible);
+        assert_eq!(parsed.content_text().as_deref(), Some("Hello."));
+    }
+
+    #[test]
+    fn parses_correction_envelope_embedded_in_prose() {
+        let parsed = parse_correction_envelope(
+            r#"Here is the corrected response:
+{"possible":true,"confidence":0.9,"tool_calls":[{"name":"read","arguments":{"path":"README.md"}}]}
+Done."#,
+        )
+        .unwrap();
+
+        assert!(parsed.possible);
+        assert_eq!(parsed.tool_calls[0].name.as_deref(), Some("read"));
     }
 }

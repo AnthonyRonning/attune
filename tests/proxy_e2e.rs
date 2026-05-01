@@ -9,6 +9,7 @@ use tokio::task::JoinHandle;
 async fn spawn_proxy(upstream_base_url: String, trace_path: PathBuf) -> (String, JoinHandle<()>) {
     let mut config = ProxyConfig::default();
     config.upstream.base_url = upstream_base_url;
+    config.upstream.api_key = Some("test-key".to_string());
     config.trace.path = trace_path;
 
     let gateway = Gateway::new(config).expect("gateway starts");
@@ -37,8 +38,7 @@ fn pi_like_request(model: &str, prompt: &str, stream: bool) -> Value {
         ],
         "tools": pi_tools(),
         "parallel_tool_calls": true,
-        "stream": stream,
-        "max_tokens": 1200
+        "stream": stream
     })
 }
 
@@ -100,6 +100,10 @@ async fn run_case(
     stream: bool,
     upstream_response: Value,
 ) -> (String, String) {
+    run_request(pi_like_request(model, prompt, stream), upstream_response).await
+}
+
+async fn run_request(request: Value, upstream_response: Value) -> (String, String) {
     let upstream = MockServer::start_async().await;
     let _mock = upstream
         .mock_async(|when, then| {
@@ -115,7 +119,7 @@ async fn run_case(
 
     let response = reqwest::Client::new()
         .post(format!("{proxy_url}/v1/chat/completions"))
-        .json(&pi_like_request(model, prompt, stream))
+        .json(&request)
         .send()
         .await
         .expect("proxy response");
@@ -215,6 +219,207 @@ async fn proxy_e2e_matrix_for_pi_like_prompts() {
     .await;
     assert!(body.contains("malformed tool call"));
     assert!(!body.contains("\"tool_calls\""));
+}
+
+#[tokio::test]
+async fn proxy_e2e_translates_multiturn_tool_history_into_dsrs_context() {
+    let request = json!({
+        "model": "qwen/qwen3.5-9b",
+        "messages": [
+            {
+                "role": "system",
+                "content": "You are an expert coding assistant operating inside pi. Use tools for file work."
+            },
+            {"role": "user", "content": [{"type":"text","text":"read the readme"}]},
+            {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [
+                    {
+                        "id": "call_read_1",
+                        "type": "function",
+                        "function": {
+                            "name": "read",
+                            "arguments": "{\"path\":\"README.md\"}"
+                        }
+                    }
+                ]
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_read_1",
+                "content": "# Project\nA proxy for correcting model responses."
+            },
+            {"role": "user", "content": [{"type":"text","text":"summarize that briefly"}]}
+        ],
+        "tools": pi_tools(),
+        "parallel_tool_calls": true,
+        "stream": false
+    });
+
+    let (body, trace) = run_request(
+        request,
+        chat_response(
+            "qwen/qwen3.5-9b",
+            json!({
+                "role": "assistant",
+                "content": "[[ ## content ## ]]\nIt is a proxy for correcting model responses.\n[[ ## tool_calls ## ]]\n[]\n[[ ## completed ## ]]"
+            }),
+            "stop",
+        ),
+    )
+    .await;
+
+    assert!(body.contains("proxy for correcting model responses"));
+    assert!(
+        trace.contains("assistant_tool_calls"),
+        "trace did not include translated assistant tool history: {trace}"
+    );
+    assert!(trace.contains("\\\"name\\\": \\\"read\\\""));
+    assert!(trace.contains("role: tool"));
+    assert!(trace.contains("A proxy for correcting model responses."));
+    assert!(trace.contains("\"summary\""));
+}
+
+#[tokio::test]
+async fn proxy_e2e_routes_adjacent_json_violation_through_correction_agent() {
+    let upstream = MockServer::start_async().await;
+    let _correction_mock = upstream
+        .mock_async(|when, then| {
+            when.method(POST)
+                .path("/v1/chat/completions")
+                .body_contains("corrected_json");
+            then.status(200).json_body(chat_response(
+                "qwen/qwen3.5-9b",
+                json!({
+                    "role": "assistant",
+                    "content": "[[ ## corrected_json ## ]]\n{\"possible\":true,\"confidence\":0.95,\"explanation\":\"recovered adjacent JSON tool calls\",\"content\":null,\"tool_calls\":[{\"name\":\"read\",\"arguments\":{\"path\":\"packages/ai/README.md\"}},{\"name\":\"read\",\"arguments\":{\"path\":\"packages/agent/README.md\"}}]}\n[[ ## completed ## ]]"
+                }),
+                "stop",
+            ));
+        })
+        .await;
+    let _upstream_mock = upstream
+        .mock_async(|when, then| {
+            when.method(POST)
+                .path("/v1/chat/completions")
+                .body_contains("parallel_tool_calls");
+            then.status(200).json_body(chat_response(
+                "qwen/qwen3.5-9b",
+                json!({
+                    "role": "assistant",
+                    "content": "[]\n\n[\n  {\"name\":\"read\",\"arguments\":{\"path\":\"packages/ai/README.md\"}},\n  {\"name\":\"read\",\"arguments\":{\"path\":\"packages/agent/README.md\"}}\n]"
+                }),
+                "stop",
+            ));
+        })
+        .await;
+
+    let trace_file = NamedTempFile::new().expect("trace file");
+    let trace_path = trace_file.path().to_path_buf();
+    let (proxy_url, handle) =
+        spawn_proxy(format!("{}/v1", upstream.base_url()), trace_path.clone()).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{proxy_url}/v1/chat/completions"))
+        .json(&pi_like_request(
+            "qwen/qwen3.5-9b",
+            "do each of them have a readme that says a little more than that though?",
+            false,
+        ))
+        .send()
+        .await
+        .expect("proxy response");
+    assert!(
+        response.status().is_success(),
+        "proxy status {}: {}",
+        response.status(),
+        response.text().await.unwrap_or_default()
+    );
+    let body = response.text().await.expect("response text");
+    let parsed: Value = serde_json::from_str(&body).expect("response JSON");
+    let calls = parsed
+        .pointer("/choices/0/message/tool_calls")
+        .and_then(Value::as_array)
+        .expect("tool calls");
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0]["function"]["name"], "read");
+    assert_eq!(
+        calls[0]["function"]["arguments"],
+        "{\"path\":\"packages/ai/README.md\"}"
+    );
+
+    let trace = tokio::fs::read_to_string(trace_path)
+        .await
+        .expect("trace file read");
+    assert!(trace.contains("correction_agent_tool_recovery"));
+    assert!(trace.contains("\"summary\""));
+    handle.abort();
+}
+
+#[tokio::test]
+async fn proxy_e2e_parses_tagged_dsrs_with_inner_field_labels() {
+    let (body, _trace) = run_case(
+        "qwen/qwen3.5-9b",
+        "oh cool. can you dive into all of the subpackages and tell me about them too?",
+        false,
+        chat_response(
+            "qwen/qwen3.5-9b",
+            json!({
+                "role": "assistant",
+                "content": "[[ ## content ## ]]\ncontent:\n[[ ## tool_calls ## ]]\ntool_calls: [\n  {\"name\":\"read\",\"arguments\":{\"path\":\"packages/agent/README.md\"}},\n  {\"name\":\"read\",\"arguments\":{\"path\":\"packages/ai/README.md\"}}\n]\n[[ ## completed ## ]]"
+            }),
+            "stop",
+        ),
+    )
+    .await;
+
+    let parsed: Value = serde_json::from_str(&body).expect("response JSON");
+    let calls = parsed
+        .pointer("/choices/0/message/tool_calls")
+        .and_then(Value::as_array)
+        .expect("tool calls");
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0]["function"]["name"], "read");
+    assert_eq!(
+        calls[0]["function"]["arguments"],
+        "{\"path\":\"packages/agent/README.md\"}"
+    );
+    assert_eq!(
+        parsed.pointer("/choices/0/finish_reason"),
+        Some(&Value::String("tool_calls".to_string()))
+    );
+}
+
+#[tokio::test]
+async fn proxy_e2e_parses_tagged_dsrs_with_adjacent_tool_call_arrays() {
+    let (body, _trace) = run_case(
+        "qwen/qwen3.5-9b",
+        "oh cool. there's a lot of sub packages here. can you dive into them to get more information about them all?",
+        false,
+        chat_response(
+            "qwen/qwen3.5-9b",
+            json!({
+                "role": "assistant",
+                "content": "[[ ## content ## ]]\n\n[[ ## tool_calls ## ]]\n[{\"name\":\"bash\",\"arguments\":{\"command\":\"ls -la packages/\"}}]\n[{\"name\":\"read\",\"arguments\":{\"path\":\"packages/coding-agent/README.md\",\"limit\":100}}]\n[{\"name\":\"read\",\"arguments\":{\"path\":\"packages/ai/README.md\",\"limit\":100}}]\n[[ ## completed ## ]]"
+            }),
+            "stop",
+        ),
+    )
+    .await;
+
+    let parsed: Value = serde_json::from_str(&body).expect("response JSON");
+    let calls = parsed
+        .pointer("/choices/0/message/tool_calls")
+        .and_then(Value::as_array)
+        .expect("tool calls");
+    assert_eq!(calls.len(), 3);
+    assert_eq!(calls[0]["function"]["name"], "bash");
+    assert_eq!(calls[1]["function"]["name"], "read");
+    let args: Value =
+        serde_json::from_str(calls[2]["function"]["arguments"].as_str().unwrap()).unwrap();
+    assert_eq!(args["path"], "packages/ai/README.md");
+    assert_eq!(args["limit"], 100);
 }
 
 #[tokio::test]

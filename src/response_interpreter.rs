@@ -119,8 +119,8 @@ pub fn interpret_response(
         && content
             .as_deref()
             .map(|content| {
-                looks_like_premature_tool_narration(content)
-                    || looks_like_malformed_tool_output(content)
+                looks_like_premature_tool_narration(content, tools)
+                    || looks_like_malformed_tool_output(content, tools)
             })
             .unwrap_or(false);
 
@@ -386,26 +386,44 @@ fn tools_available(tools: &[OpenAiTool]) -> bool {
     !tools.is_empty()
 }
 
-fn looks_like_premature_tool_narration(content: &str) -> bool {
+fn looks_like_premature_tool_narration(content: &str, tools: &[OpenAiTool]) -> bool {
     let lower = content.to_ascii_lowercase();
-    [
-        "let me",
-        "i'll",
-        "i will",
-        "i’m going to",
-        "i am going to",
-        "read the",
-        "call the",
-        "use the",
-        "check the",
+    let action_phrase = [
+        "i'll read",
+        "i will read",
+        "i'm going to read",
+        "i’m going to read",
+        "let me read",
+        "i'll inspect",
+        "i will inspect",
+        "let me inspect",
+        "i'll run",
+        "i will run",
+        "let me run",
+        "call the tool",
+        "use the tool",
+        "invoke the tool",
     ]
     .iter()
-    .any(|needle| lower.contains(needle))
+    .any(|needle| lower.contains(needle));
+
+    action_phrase
+        || tools.iter().any(|tool| {
+            let name = tool.function.name.to_ascii_lowercase();
+            [
+                format!("call {name}"),
+                format!("use {name}"),
+                format!("run {name}"),
+                format!("invoke {name}"),
+            ]
+            .iter()
+            .any(|needle| lower.contains(needle))
+        })
 }
 
-fn looks_like_malformed_tool_output(content: &str) -> bool {
+fn looks_like_malformed_tool_output(content: &str, tools: &[OpenAiTool]) -> bool {
     let lower = content.to_ascii_lowercase();
-    [
+    let structured_marker = [
         "<tool_call",
         "<tool ",
         "<function",
@@ -414,7 +432,33 @@ fn looks_like_malformed_tool_output(content: &str) -> bool {
         "[[ ## tool_calls ## ]]",
     ]
     .iter()
-    .any(|needle| lower.contains(needle))
+    .any(|needle| lower.contains(needle));
+
+    structured_marker
+        || looks_like_unparsed_tool_call_json(content, tools)
+        || looks_like_untagged_dsrs_contract(content)
+}
+
+fn looks_like_unparsed_tool_call_json(content: &str, tools: &[OpenAiTool]) -> bool {
+    let trimmed = content.trim_start();
+    if !(trimmed.starts_with('[') || trimmed.starts_with('{')) {
+        return false;
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    let has_tool_shape = lower.contains("\"name\"") && lower.contains("\"arguments\"");
+    let references_known_tool = tools.iter().any(|tool| {
+        let needle = format!("\"{}\"", tool.function.name.to_ascii_lowercase());
+        lower.contains(&needle)
+    });
+    has_tool_shape && references_known_tool
+}
+
+fn looks_like_untagged_dsrs_contract(content: &str) -> bool {
+    let lower = content.trim().to_ascii_lowercase();
+    (lower.contains("\ntool_calls") || lower.contains("tool_calls:"))
+        || ((lower.ends_with("completed") || lower.ends_with("[[ ## completed ## ]]"))
+            && lower.lines().any(|line| line.trim() == "[]"))
 }
 
 fn strip_stray_text_label(content: &str) -> Option<String> {
@@ -572,7 +616,7 @@ mod tests {
     }
 
     #[test]
-    fn strips_label_free_dsrs_empty_tool_tail() {
+    fn marks_label_free_dsrs_empty_tool_tail_suspicious() {
         let response = ChatCompletionResponse {
             id: "1".to_string(),
             object: "chat.completion".to_string(),
@@ -593,14 +637,14 @@ mod tests {
 
         assert_eq!(
             interpreted.content.as_deref(),
-            Some("Hello! How can I help?")
+            Some("Hello! How can I help?\n\n[]\n\ncompleted")
         );
         assert!(interpreted.tool_intents.is_empty());
-        assert!(!interpreted.suspicious_stop);
+        assert!(interpreted.suspicious_stop);
     }
 
     #[test]
-    fn clears_empty_label_free_dsrs_without_leaking_labels() {
+    fn marks_empty_label_free_dsrs_suspicious_without_parsing_as_dsrs() {
         let response = ChatCompletionResponse {
             id: "1".to_string(),
             object: "chat.completion".to_string(),
@@ -619,9 +663,12 @@ mod tests {
 
         let interpreted = interpret_response(&response, &[tool("read_file")]);
 
-        assert_eq!(interpreted.content.as_deref(), Some(""));
+        assert_eq!(
+            interpreted.content.as_deref(),
+            Some("tool_calls\n\ncompleted")
+        );
         assert!(interpreted.tool_intents.is_empty());
-        assert!(!interpreted.suspicious_stop);
+        assert!(interpreted.suspicious_stop);
     }
 
     #[test]
