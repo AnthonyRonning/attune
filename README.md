@@ -20,13 +20,13 @@ This proxy treats tool use as an application-level contract rather than an infer
 
 ## Current status
 
-Implemented scope currently covers the first three phases:
+Implemented scope currently covers the first three phases, with the runtime now centered on a DSRs-style tool-use contract:
 
-- **Phase 1:** non-streaming OpenAI-compatible chat proxy, request normalization, upstream OpenAI-compatible calls, deterministic repair, DSRs correction agent path, JSONL traces
-- **Phase 2:** proxy-owned XML/tagged tool rendering, model profiles, multi-tool parsing, parallel-tool enforcement, schema-guided repair
+- **Phase 1:** OpenAI-compatible chat proxy, request normalization, upstream OpenAI-compatible calls, deterministic repair, DSRs correction agent path, JSONL traces
+- **Phase 2:** proxy-owned DSRs tool rendering, model profiles, multi-tool parsing, parallel-tool enforcement, schema-guided repair, inbound auth passthrough, `/v1/models` proxying, buffered client SSE responses
 - **Phase 3:** trace-to-dataset export, replay harness, regression evaluation, DSRs/GEPA prompt optimization scaffolding
 
-The proxy is intentionally non-streaming right now. It buffers the upstream response so it can interpret and repair the complete output before returning a client-compatible response.
+The proxy intentionally buffers upstream chat completions so it can interpret and repair the complete output before returning a client-compatible response. If the client requests `stream: true`, the proxy returns a corrected SSE response after buffering and repair; it does not yet proxy upstream tokens incrementally.
 
 ## Architecture
 
@@ -47,13 +47,13 @@ Client application
 
 | Component | Source | Purpose |
 | --- | --- | --- |
-| Gateway | `src/gateway.rs` | Axum HTTP server exposing `/health` and `/v1/chat/completions` |
+| Gateway | `src/gateway.rs` | Axum HTTP server exposing `/health`, `/v1/models`, and `/v1/chat/completions` |
 | OpenAI types | `src/openai.rs` | OpenAI-compatible request/response structures |
 | Normalizer | `src/normalizer.rs` | Converts incoming requests into internal `NormalizedRequest` |
 | Model profiles | `src/model_profile.rs` | Chooses model-specific tool rendering and repair defaults |
-| Prompt adapter | `src/prompt_adapter.rs` | Converts native tools into proxy-owned XML/tagged tool instructions |
-| Upstream client | `src/upstream.rs` | Calls generic OpenAI-compatible `/chat/completions` APIs |
-| Response interpreter | `src/response_interpreter.rs` | Detects native, XML, tagged JSON, markdown JSON, direct JSON, and function-like tool intent |
+| Prompt adapter | `src/prompt_adapter.rs` | Converts native tools into a proxy-owned DSRs contract, with XML/tagged renderers still available |
+| Upstream client | `src/upstream.rs` | Calls generic OpenAI-compatible `/chat/completions` and `/models` APIs |
+| Response interpreter | `src/response_interpreter.rs` | Detects native, DSRs, XML, tagged JSON, markdown JSON, direct JSON, and function-like tool intent |
 | Repair engine | `src/repair.rs` | Repairs tool names, JSON arguments, schema key typos, scalar/array shape issues, and parallel-tool violations |
 | Correction agents | `src/agents.rs` | DSRs-powered correction-agent path for suspicious malformed responses |
 | Traces | `src/trace.rs` | Local JSONL trace logging for audit and dataset generation |
@@ -66,17 +66,18 @@ Client application
 
 The proxy supports two early modes:
 
-1. **Proxy-owned tool rendering**
+1. **Proxy-owned DSRs tool rendering**
    - The proxy consumes OpenAI-style `tools`.
    - It removes native upstream tool definitions.
-   - It renders available tools into text instructions suited to the selected model profile.
+   - It renders the conversation, tool definitions, `tool_choice`, and parallel-call setting into a DSRs contract using `dspy-rs`.
    - It parses the model's text back into OpenAI `tool_calls`.
+   - It tolerates several real small-model deviations from the ideal DSRs format, including label-free output, placeholder values, repeated field blocks, and JSON5-like tool-call arguments.
 
 2. **Pass-through repair**
    - The proxy can preserve native upstream tool calling behavior.
    - It still interprets and repairs malformed or misplaced outputs after the upstream response.
 
-Proxy-owned rendering is the primary reliability path because it avoids relying on brittle inference-engine tool parsers.
+Proxy-owned DSRs rendering is the primary reliability path because it avoids relying on brittle inference-engine tool parsers. XML and tagged JSON parsing are still supported as compatibility paths, and the older XML/tagged renderers remain available in code for future profiles or experiments.
 
 ## Built-in model profiles
 
@@ -84,12 +85,12 @@ Built-in profiles are selected by model-name substring:
 
 | Profile | Matching models | Tool format |
 | --- | --- | --- |
-| `qwen-xml` | `qwen`, `qwq` | XML |
-| `kimi-xml` | `kimi`, `moonshot` | XML |
-| `glm-xml` | `glm`, `z-ai` | XML |
-| `llama-tagged-json` | `llama` | tagged JSON |
-| `gemma-xml-conservative` | `gemma` | XML, conservative parallel-tool defaults |
-| `balanced-default` | fallback | XML |
+| `qwen-dsrs` | `qwen`, `qwq` | DSRs |
+| `kimi-dsrs` | `kimi`, `moonshot` | DSRs with compact-output guidance |
+| `glm-dsrs` | `glm`, `z-ai` | DSRs |
+| `llama-dsrs` | `llama` | DSRs |
+| `gemma-dsrs-conservative` | `gemma` | DSRs, conservative parallel-tool defaults |
+| `balanced-default` | fallback | DSRs |
 
 Profiles are currently code-level configuration. A config-file loader is not implemented yet.
 
@@ -98,6 +99,17 @@ Profiles are currently code-level configuration. A config-file loader is not imp
 Current deterministic and schema-guided repairs include:
 
 - tool calls embedded in assistant `content`
+- DSRs contract output such as:
+
+  ```text
+  [[ ## content ## ]]
+
+  [[ ## tool_calls ## ]]
+  [{"name":"read_file","arguments":{"path":"Cargo.toml"}}]
+  [[ ## completed ## ]]
+  ```
+
+- common malformed DSRs variants seen from smaller live models, including label-free `content` / `tool_calls` sections, placeholder values, and repeated field blocks
 - XML tool calls such as:
 
   ```xml
@@ -198,7 +210,10 @@ nix develop --command cargo run -- \
 The server listens on:
 
 - `GET /health`
+- `GET /v1/models`
 - `POST /v1/chat/completions`
+
+Upstream chat completions are always requested with `stream: false` so the proxy can inspect the whole response. Client streaming requests are accepted and returned as corrected OpenAI-style SSE after repair.
 
 ### Runtime options
 
@@ -478,7 +493,7 @@ nix flake check
 1. Add a constructor in `src/model_profile.rs`.
 2. Add it to `builtin_profiles()`.
 3. Decide:
-   - `ToolFormat::Xml` or `ToolFormat::TaggedJson`
+   - `ToolFormat::Dsrs` for the default path, or `ToolFormat::Xml` / `ToolFormat::TaggedJson` for an explicit experiment
    - whether native tool calling should be avoided
    - whether parallel tool calls are expected to work well
    - any model-specific correction or judge model overrides
@@ -507,8 +522,8 @@ Prefer regression cases based on real traces. A good case should include:
 
 ## Current limitations
 
-- Streaming is not implemented; streaming requests are rejected.
-- Only `/health` and `/v1/chat/completions` are exposed.
+- Upstream token streaming is not implemented. Upstream responses are buffered, then optionally returned to streaming clients as corrected SSE.
+- API coverage is intentionally small: `/health`, `/v1/models`, and `/v1/chat/completions`.
 - Runtime configuration is mostly CLI/env plus code-level `ProxyConfig`; no config-file loader yet.
 - Retry/continue policy is represented in configuration but not implemented as an upstream retry loop yet.
 - Optimized GEPA prompts are written as artifacts but not automatically hot-loaded.
@@ -523,7 +538,7 @@ Near-term directions:
 - replay-driven regression suites from real traces
 - loading optimized GEPA prompts into runtime profiles
 - provider-specific compatibility adapters
-- buffered/corrected streaming
+- richer streaming fidelity for corrected responses
 - debug endpoints or a trace inspection UI
 
 Long-term, this project should become a compatibility runtime that learns how each model prefers to be prompted, how it tends to fail, and how best to recover without requiring client applications to change.
