@@ -11,6 +11,7 @@ async fn spawn_proxy(upstream_base_url: String, trace_path: PathBuf) -> (String,
     config.upstream.base_url = upstream_base_url;
     config.upstream.api_key = Some("test-key".to_string());
     config.trace.path = trace_path;
+    config.trace.correction_path = config.trace.path.with_extension("corrections.jsonl");
 
     let gateway = Gateway::new(config).expect("gateway starts");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -352,9 +353,16 @@ async fn proxy_e2e_routes_adjacent_json_violation_through_correction_agent() {
     let trace = tokio::fs::read_to_string(trace_path)
         .await
         .expect("trace file read");
+    let correction_trace =
+        tokio::fs::read_to_string(trace_file.path().with_extension("corrections.jsonl"))
+            .await
+            .expect("correction trace file read");
     assert!(trace.contains("correction_agent_tool_recovery"));
     assert!(trace.contains("\"correction_attempts\""));
     assert!(trace.contains("\"policy_decisions\""));
+    assert!(correction_trace.contains("\"parent_trace_id\""));
+    assert!(correction_trace.contains("\"raw_output\""));
+    assert!(correction_trace.contains("recovered adjacent JSON tool calls"));
     assert!(trace.contains("\"summary\""));
     handle.abort();
 }
@@ -530,6 +538,7 @@ async fn live_openrouter_pi_prompt_matrix() {
     config.upstream.base_url = "https://openrouter.ai/api/v1".to_string();
     config.upstream.api_key = Some(api_key);
     config.trace.path = trace_file.path().to_path_buf();
+    config.trace.correction_path = config.trace.path.with_extension("corrections.jsonl");
 
     let gateway = Gateway::new(config).expect("gateway starts");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")

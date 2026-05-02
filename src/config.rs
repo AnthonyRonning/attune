@@ -60,6 +60,8 @@ impl Default for CorrectionConfig {
 pub struct TraceConfig {
     pub enabled: bool,
     pub path: PathBuf,
+    #[serde(default = "default_correction_trace_path")]
+    pub correction_path: PathBuf,
 }
 
 impl Default for TraceConfig {
@@ -67,6 +69,11 @@ impl Default for TraceConfig {
         Self {
             enabled: true,
             path: PathBuf::from("traces/model-correction-proxy.jsonl"),
+            correction_path: default_correction_trace_path(),
         }
     }
+}
+
+fn default_correction_trace_path() -> PathBuf {
+    PathBuf::from("traces/model-correction-proxy-corrections.jsonl")
 }

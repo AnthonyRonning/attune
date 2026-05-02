@@ -10,10 +10,10 @@ use uuid::Uuid;
 use crate::{
     model_profile::ModelProfile,
     normalizer::NormalizedRequest,
-    openai::{ChatCompletionRequest, ChatCompletionResponse, ChatMessage},
+    openai::{ChatCompletionRequest, ChatCompletionResponse, ChatMessage, OpenAiTool},
     prompt_adapter::AdaptedRequest,
     repair::{CorrectionAttemptTrace, PolicyDecisionTrace, RepairAction},
-    response_interpreter::InterpretedResponse,
+    response_interpreter::{InterpretedResponse, ResponseFailure, ToolIntent},
 };
 
 #[derive(Clone)]
@@ -58,6 +58,123 @@ impl TraceStore {
         file.write_all(&line).await?;
         Ok(trace_id)
     }
+}
+
+#[derive(Clone)]
+pub struct CorrectionTraceStore {
+    path: PathBuf,
+    lock: Arc<Mutex<()>>,
+    enabled: bool,
+}
+
+impl CorrectionTraceStore {
+    pub fn new(path: PathBuf, enabled: bool) -> Self {
+        Self {
+            path,
+            lock: Arc::new(Mutex::new(())),
+            enabled,
+        }
+    }
+
+    pub async fn append(&self, record: CorrectionAgentTraceRecord) -> Result<String> {
+        let trace_id = record.trace_id.clone();
+        if !self.enabled {
+            return Ok(trace_id);
+        }
+
+        if let Some(parent) = self.path.parent() {
+            tokio::fs::create_dir_all(parent).await.with_context(|| {
+                format!(
+                    "failed to create correction trace directory {}",
+                    parent.display()
+                )
+            })?;
+        }
+
+        let _guard = self.lock.lock().await;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to open correction trace file {}",
+                    self.path.display()
+                )
+            })?;
+        let mut line = serde_json::to_vec(&record)?;
+        line.push(b'\n');
+        file.write_all(&line).await?;
+        Ok(trace_id)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CorrectionAgentTraceRecord {
+    pub trace_id: String,
+    pub parent_trace_id: String,
+    pub started_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub model: String,
+    pub profile: String,
+    pub correction_model: String,
+    pub input: CorrectionAgentTraceInput,
+    pub raw_output: Option<String>,
+    pub possible: Option<bool>,
+    pub output_tool_calls: Vec<ToolIntent>,
+    pub output_content: Option<String>,
+    pub result: String,
+    pub accepted: bool,
+    pub confidence: Option<f32>,
+    pub explanation: Option<String>,
+    pub error: Option<String>,
+    pub tool_calls: usize,
+    pub content_len: usize,
+}
+
+impl CorrectionAgentTraceRecord {
+    pub fn from_attempt(parent_trace_id: &str, attempt: &CorrectionAttemptTrace) -> Self {
+        Self {
+            trace_id: attempt
+                .attempt_id
+                .clone()
+                .unwrap_or_else(|| format!("correction_{}", Uuid::new_v4().simple())),
+            parent_trace_id: parent_trace_id.to_string(),
+            started_at: attempt.started_at,
+            completed_at: attempt.completed_at,
+            model: attempt.model.clone(),
+            profile: attempt.profile.clone(),
+            correction_model: attempt.correction_model.clone(),
+            input: CorrectionAgentTraceInput {
+                tools: attempt.tools.clone(),
+                recent_messages: attempt.recent_messages.clone(),
+                malformed_response: attempt.malformed_response.clone(),
+                parser_events: attempt.parser_events.clone(),
+                response_failures: attempt.response_failures.clone(),
+            },
+            raw_output: attempt.raw_output.clone(),
+            possible: attempt.possible,
+            output_tool_calls: attempt.output_tool_calls.clone(),
+            output_content: attempt.output_content.clone(),
+            result: attempt.result.clone(),
+            accepted: attempt.accepted,
+            confidence: attempt.confidence,
+            explanation: attempt.explanation.clone(),
+            error: attempt.error.clone(),
+            tool_calls: attempt.tool_calls,
+            content_len: attempt.content_len,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CorrectionAgentTraceInput {
+    pub tools: Vec<OpenAiTool>,
+    pub recent_messages: Vec<ChatMessage>,
+    pub malformed_response: String,
+    pub parser_events: Vec<String>,
+    pub response_failures: Vec<ResponseFailure>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

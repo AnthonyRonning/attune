@@ -1,16 +1,21 @@
 use anyhow::Result;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use strsim::jaro_winkler;
+use uuid::Uuid;
 
 use crate::{
-    agents::{recent_messages, CorrectionAgent, CorrectionAgentInput},
+    agents::{
+        recent_messages, CorrectionAgent, CorrectionAgentError, CorrectionAgentInput,
+        CorrectionAgentOutput,
+    },
     config::ProxyConfig,
     model_profile::ModelProfile,
     normalizer::NormalizedRequest,
     openai::{ChatChoice, ChatCompletionResponse, ChatMessage, OpenAiTool, OpenAiToolCall},
     response_interpreter::{
-        InterpretedResponse, ResponseFailureKind, ToolIntent, ToolIntentSource,
+        InterpretedResponse, ResponseFailure, ResponseFailureKind, ToolIntent, ToolIntentSource,
     },
 };
 
@@ -33,12 +38,34 @@ pub struct RepairAction {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CorrectionAttemptTrace {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<DateTime<Utc>>,
     pub model: String,
     pub profile: String,
     pub correction_model: String,
+    #[serde(default)]
+    pub tools: Vec<OpenAiTool>,
+    #[serde(default)]
+    pub recent_messages: Vec<ChatMessage>,
+    #[serde(default)]
+    pub malformed_response: String,
     pub parser_events: Vec<String>,
+    #[serde(default)]
+    pub response_failures: Vec<ResponseFailure>,
     pub failure_kinds: Vec<ResponseFailureKind>,
     pub malformed_response_preview: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_output: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub possible: Option<bool>,
+    #[serde(default)]
+    pub output_tool_calls: Vec<ToolIntent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_content: Option<String>,
     pub result: String,
     pub accepted: bool,
     pub confidence: Option<f32>,
@@ -113,6 +140,8 @@ pub async fn repair_response(
     if should_try_correction && correction_available {
         let malformed_response = malformed_response_text(upstream_response, interpreted);
         let correction_model = correction_model_for(config, normalized, profile);
+        let attempt_id = format!("correction_{}", Uuid::new_v4().simple());
+        let attempt_started_at = Utc::now();
         let input = CorrectionAgentInput {
             tools: normalized.tools.clone(),
             recent_messages: recent_messages(
@@ -127,25 +156,23 @@ pub async fn repair_response(
             api_key_override: correction_api_key,
         };
 
-        match correction_agent.correct(input).await {
-            Ok(Some(output)) if !output.tool_calls.is_empty() => {
+        match correction_agent.correct(input.clone()).await {
+            Ok(Some(output))
+                if correction_output_is_accepted(config, &output)
+                    && !output.tool_calls.is_empty() =>
+            {
                 let confidence = output.confidence;
                 let explanation = output.explanation.clone();
-                correction_attempts.push(CorrectionAttemptTrace {
-                    model: normalized.model.clone(),
-                    profile: profile.name.clone(),
-                    correction_model,
-                    parser_events: interpreted.parse_events.clone(),
-                    failure_kinds: interpreted.failure_kinds(),
-                    malformed_response_preview: preview(&malformed_response),
-                    result: "tool_recovery".to_string(),
-                    accepted: true,
-                    confidence: Some(confidence),
-                    explanation: Some(explanation.clone()),
-                    error: None,
-                    tool_calls: output.tool_calls.len(),
-                    content_len: output.content.as_ref().map_or(0, String::len),
-                });
+                correction_attempts.push(build_correction_attempt_trace(
+                    &attempt_id,
+                    attempt_started_at,
+                    correction_model.clone(),
+                    &input,
+                    "tool_recovery",
+                    true,
+                    Some(&output),
+                    None,
+                ));
                 actions.push(RepairAction {
                     action: "correction_agent_tool_recovery".to_string(),
                     confidence,
@@ -154,80 +181,85 @@ pub async fn repair_response(
                 intents.extend(output.tool_calls);
             }
             Ok(Some(output)) => {
-                if let Some(content) = output.content.filter(|content| !content.trim().is_empty()) {
-                    let confidence = output.confidence;
-                    let explanation = output.explanation.clone();
-                    correction_attempts.push(CorrectionAttemptTrace {
-                        model: normalized.model.clone(),
-                        profile: profile.name.clone(),
-                        correction_model,
-                        parser_events: interpreted.parse_events.clone(),
-                        failure_kinds: interpreted.failure_kinds(),
-                        malformed_response_preview: preview(&malformed_response),
-                        result: "content_recovery".to_string(),
-                        accepted: true,
-                        confidence: Some(confidence),
-                        explanation: Some(explanation.clone()),
-                        error: None,
-                        tool_calls: output.tool_calls.len(),
-                        content_len: content.len(),
-                    });
-                    actions.push(RepairAction {
-                        action: "correction_agent_content_recovery".to_string(),
-                        confidence,
-                        reason: explanation.clone(),
-                    });
-                    corrected_content = Some((content, confidence, explanation));
+                if correction_output_is_accepted(config, &output) {
+                    if let Some(content) = output
+                        .content
+                        .clone()
+                        .filter(|content| !content.trim().is_empty())
+                    {
+                        let confidence = output.confidence;
+                        let explanation = output.explanation.clone();
+                        correction_attempts.push(build_correction_attempt_trace(
+                            &attempt_id,
+                            attempt_started_at,
+                            correction_model.clone(),
+                            &input,
+                            "content_recovery",
+                            true,
+                            Some(&output),
+                            None,
+                        ));
+                        actions.push(RepairAction {
+                            action: "correction_agent_content_recovery".to_string(),
+                            confidence,
+                            reason: explanation.clone(),
+                        });
+                        corrected_content = Some((content, confidence, explanation));
+                    } else {
+                        correction_attempts.push(build_correction_attempt_trace(
+                            &attempt_id,
+                            attempt_started_at,
+                            correction_model.clone(),
+                            &input,
+                            "empty_recovery",
+                            false,
+                            Some(&output),
+                            None,
+                        ));
+                    }
                 } else {
-                    correction_attempts.push(CorrectionAttemptTrace {
-                        model: normalized.model.clone(),
-                        profile: profile.name.clone(),
-                        correction_model,
-                        parser_events: interpreted.parse_events.clone(),
-                        failure_kinds: interpreted.failure_kinds(),
-                        malformed_response_preview: preview(&malformed_response),
-                        result: "empty_recovery".to_string(),
-                        accepted: false,
-                        confidence: Some(output.confidence),
-                        explanation: Some(output.explanation),
-                        error: None,
-                        tool_calls: 0,
-                        content_len: 0,
-                    });
+                    let result = if !output.possible {
+                        "not_possible"
+                    } else {
+                        "low_confidence"
+                    };
+                    correction_attempts.push(build_correction_attempt_trace(
+                        &attempt_id,
+                        attempt_started_at,
+                        correction_model.clone(),
+                        &input,
+                        result,
+                        false,
+                        Some(&output),
+                        None,
+                    ));
                 }
             }
-            Ok(_) => correction_attempts.push(CorrectionAttemptTrace {
-                model: normalized.model.clone(),
-                profile: profile.name.clone(),
-                correction_model,
-                parser_events: interpreted.parse_events.clone(),
-                failure_kinds: interpreted.failure_kinds(),
-                malformed_response_preview: preview(&malformed_response),
-                result: "no_recovery".to_string(),
-                accepted: false,
-                confidence: None,
-                explanation: None,
-                error: None,
-                tool_calls: 0,
-                content_len: 0,
-            }),
+            Ok(_) => correction_attempts.push(build_correction_attempt_trace(
+                &attempt_id,
+                attempt_started_at,
+                correction_model.clone(),
+                &input,
+                "no_recovery",
+                false,
+                None,
+                None,
+            )),
             Err(error) => {
+                let raw_output = correction_error_raw_output(&error);
                 let error = error.to_string();
-                correction_attempts.push(CorrectionAttemptTrace {
-                    model: normalized.model.clone(),
-                    profile: profile.name.clone(),
-                    correction_model,
-                    parser_events: interpreted.parse_events.clone(),
-                    failure_kinds: interpreted.failure_kinds(),
-                    malformed_response_preview: preview(&malformed_response),
-                    result: "failed".to_string(),
-                    accepted: false,
-                    confidence: None,
-                    explanation: None,
-                    error: Some(error.clone()),
-                    tool_calls: 0,
-                    content_len: 0,
-                });
+                let mut attempt = build_correction_attempt_trace(
+                    &attempt_id,
+                    attempt_started_at,
+                    correction_model.clone(),
+                    &input,
+                    "failed",
+                    false,
+                    None,
+                    Some(error.clone()),
+                );
+                attempt.raw_output = raw_output;
+                correction_attempts.push(attempt);
                 actions.push(RepairAction {
                     action: "correction_agent_failed".to_string(),
                     confidence: 0.0,
@@ -435,6 +467,62 @@ fn correction_model_for(
         .clone()
         .or_else(|| config.correction.default_model.clone())
         .unwrap_or_else(|| normalized.model.clone())
+}
+
+fn correction_output_is_accepted(config: &ProxyConfig, output: &CorrectionAgentOutput) -> bool {
+    output.possible && output.confidence >= config.correction.min_confidence
+}
+
+fn build_correction_attempt_trace(
+    attempt_id: &str,
+    started_at: DateTime<Utc>,
+    correction_model: String,
+    input: &CorrectionAgentInput,
+    result: &str,
+    accepted: bool,
+    output: Option<&CorrectionAgentOutput>,
+    error: Option<String>,
+) -> CorrectionAttemptTrace {
+    let output_tool_calls = output
+        .map(|output| output.tool_calls.clone())
+        .unwrap_or_default();
+    let output_content = output.and_then(|output| output.content.clone());
+    CorrectionAttemptTrace {
+        attempt_id: Some(attempt_id.to_string()),
+        started_at: Some(started_at),
+        completed_at: Some(Utc::now()),
+        model: input.model.clone(),
+        profile: input.profile.name.clone(),
+        correction_model,
+        tools: input.tools.clone(),
+        recent_messages: input.recent_messages.clone(),
+        malformed_response: input.malformed_response.clone(),
+        parser_events: input.parser_events.clone(),
+        response_failures: input.response_failures.clone(),
+        failure_kinds: input
+            .response_failures
+            .iter()
+            .map(|failure| failure.kind)
+            .collect(),
+        malformed_response_preview: preview(&input.malformed_response),
+        raw_output: output.and_then(|output| output.raw_output.clone()),
+        possible: output.map(|output| output.possible),
+        output_tool_calls,
+        output_content: output_content.clone(),
+        result: result.to_string(),
+        accepted,
+        confidence: output.map(|output| output.confidence),
+        explanation: output.map(|output| output.explanation.clone()),
+        error,
+        tool_calls: output.map_or(0, |output| output.tool_calls.len()),
+        content_len: output_content.as_ref().map_or(0, String::len),
+    }
+}
+
+fn correction_error_raw_output(error: &anyhow::Error) -> Option<String> {
+    error
+        .downcast_ref::<CorrectionAgentError>()
+        .and_then(|error| error.raw_output().map(str::to_string))
 }
 
 fn intent_requires_model_correction(normalized: &NormalizedRequest, intent: &ToolIntent) -> bool {
@@ -1314,8 +1402,10 @@ mod tests {
             Ok(Some(crate::agents::CorrectionAgentOutput {
                 tool_calls: Vec::new(),
                 content: Some("Just coding everything. How about you?".to_string()),
+                possible: true,
                 confidence: 0.94,
                 explanation: "recovered content from malformed DSRs-like output".to_string(),
+                raw_output: Some("content correction fixture".to_string()),
             }))
         }
     }
@@ -1393,8 +1483,10 @@ mod tests {
                     },
                 ],
                 content: None,
+                possible: true,
                 confidence: 0.95,
                 explanation: "recovered adjacent JSON tool-call array".to_string(),
+                raw_output: Some("tool correction fixture".to_string()),
             }))
         }
     }
@@ -1479,8 +1571,10 @@ mod tests {
                     confidence: 0.96,
                 }],
                 content: None,
+                possible: true,
                 confidence: 0.96,
                 explanation: "recovered tool call from malformed tagged output".to_string(),
+                raw_output: Some("contract correction fixture".to_string()),
             }))
         }
     }

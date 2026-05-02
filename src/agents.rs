@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{fmt, sync::Arc};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -31,9 +31,44 @@ pub struct CorrectionAgentInput {
 pub struct CorrectionAgentOutput {
     pub tool_calls: Vec<ToolIntent>,
     pub content: Option<String>,
+    #[serde(default = "default_possible")]
+    pub possible: bool,
     pub confidence: f32,
     pub explanation: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_output: Option<String>,
 }
+
+fn default_possible() -> bool {
+    true
+}
+
+#[derive(Debug)]
+pub struct CorrectionAgentError {
+    message: String,
+    raw_output: Option<String>,
+}
+
+impl CorrectionAgentError {
+    fn non_json(raw_output: String) -> Self {
+        Self {
+            message: format!("correction agent returned non-JSON output: {raw_output}"),
+            raw_output: Some(raw_output),
+        }
+    }
+
+    pub fn raw_output(&self) -> Option<&str> {
+        self.raw_output.as_deref()
+    }
+}
+
+impl fmt::Display for CorrectionAgentError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for CorrectionAgentError {}
 
 #[async_trait]
 pub trait CorrectionAgent: Send + Sync {
@@ -238,12 +273,9 @@ impl CorrectionAgent for DsrsCorrectionAgent {
             .to_string();
 
         let envelope = parse_correction_envelope(&corrected)
-            .with_context(|| format!("correction agent returned non-JSON output: {corrected}"))?;
+            .map_err(|_| CorrectionAgentError::non_json(corrected.clone()))?;
 
-        if !envelope.possible || envelope.confidence < self.correction.min_confidence {
-            return Ok(None);
-        }
-
+        let possible = envelope.possible;
         let confidence = envelope.confidence;
         let explanation = envelope.explanation.clone();
         let content = envelope.content_text();
@@ -252,8 +284,10 @@ impl CorrectionAgent for DsrsCorrectionAgent {
         Ok(Some(CorrectionAgentOutput {
             tool_calls,
             content,
+            possible,
             confidence,
             explanation,
+            raw_output: Some(corrected),
         }))
     }
 }

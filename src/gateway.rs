@@ -30,7 +30,7 @@ use crate::{
     prompt_adapter::adapt_request,
     repair::{repair_response, CorrectionAttemptTrace, PolicyDecisionTrace, RepairAction},
     response_interpreter::{interpret_response, ToolIntent},
-    trace::{TraceRecord, TraceStore},
+    trace::{CorrectionAgentTraceRecord, CorrectionTraceStore, TraceRecord, TraceStore},
     upstream::{InboundAuth, UpstreamClient},
 };
 
@@ -43,6 +43,7 @@ struct AppState {
     config: ProxyConfig,
     upstream: UpstreamClient,
     trace_store: TraceStore,
+    correction_trace_store: CorrectionTraceStore,
     correction_agent: Arc<dyn CorrectionAgent>,
 }
 
@@ -50,6 +51,8 @@ impl Gateway {
     pub fn new(config: ProxyConfig) -> Result<Self> {
         let upstream = UpstreamClient::new(config.upstream.clone())?;
         let trace_store = TraceStore::new(config.trace.path.clone(), config.trace.enabled);
+        let correction_trace_store =
+            CorrectionTraceStore::new(config.trace.correction_path.clone(), config.trace.enabled);
         let correction_agent: Arc<dyn CorrectionAgent> = if config.correction.enabled {
             Arc::new(DsrsCorrectionAgent::new(
                 config.upstream.clone(),
@@ -74,6 +77,7 @@ impl Gateway {
                 config,
                 upstream,
                 trace_store,
+                correction_trace_store,
                 correction_agent,
             }),
         })
@@ -360,6 +364,7 @@ async fn chat_completions(
     for attempt in &repair.correction_attempts {
         log_correction_attempt(&trace_id, attempt);
     }
+    append_correction_traces(&state, &trace_id, &repair.correction_attempts).await;
     for decision in &repair.policy_decisions {
         log_policy_decision(&trace_id, decision);
     }
@@ -400,6 +405,25 @@ async fn append_trace(state: &AppState, trace: TraceRecord) -> String {
                 "failed to append trace"
             );
             fallback
+        }
+    }
+}
+
+async fn append_correction_traces(
+    state: &AppState,
+    parent_trace_id: &str,
+    attempts: &[CorrectionAttemptTrace],
+) {
+    for attempt in attempts {
+        let record = CorrectionAgentTraceRecord::from_attempt(parent_trace_id, attempt);
+        let correction_trace_id = record.trace_id.clone();
+        if let Err(error) = state.correction_trace_store.append(record).await {
+            tracing::warn!(
+                trace_id = %parent_trace_id,
+                correction_trace_id = %correction_trace_id,
+                error = %error,
+                "failed to append correction-agent trace"
+            );
         }
     }
 }
