@@ -14,7 +14,59 @@ pub struct InterpretedResponse {
     pub finish_reason: Option<String>,
     pub tool_intents: Vec<ToolIntent>,
     pub parse_events: Vec<String>,
+    #[serde(default)]
+    pub failures: Vec<ResponseFailure>,
     pub suspicious_stop: bool,
+}
+
+impl InterpretedResponse {
+    pub fn has_failure(&self, kind: ResponseFailureKind) -> bool {
+        self.failures.iter().any(|failure| failure.kind == kind)
+    }
+
+    pub fn has_any_failure(&self, kinds: &[ResponseFailureKind]) -> bool {
+        self.failures
+            .iter()
+            .any(|failure| kinds.contains(&failure.kind))
+    }
+
+    pub fn failure_kinds(&self) -> Vec<ResponseFailureKind> {
+        self.failures.iter().map(|failure| failure.kind).collect()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResponseFailure {
+    pub kind: ResponseFailureKind,
+    pub detail: String,
+}
+
+impl ResponseFailure {
+    pub fn new(kind: ResponseFailureKind, detail: impl Into<String>) -> Self {
+        Self {
+            kind,
+            detail: detail.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ResponseFailureKind {
+    NoChoices,
+    NativeMalformedJsonArguments,
+    DsrsContractViolation,
+    DsrsContentOutsideTaggedFields,
+    DsrsInvalidToolCallsJson,
+    DsrsInvalidToolCallsShape,
+    DsrsPlaceholderOnly,
+    TemplateLeak,
+    PromptEcho,
+    PrematureToolStop,
+    MalformedKnownToolCall,
+    UntaggedDsrsLikeOutput,
+    SchemaViolation,
+    UnknownTool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,6 +101,10 @@ pub fn interpret_response(
             finish_reason: None,
             tool_intents: Vec::new(),
             parse_events: vec!["upstream response contained no choices".to_string()],
+            failures: vec![ResponseFailure::new(
+                ResponseFailureKind::NoChoices,
+                "upstream response contained no choices",
+            )],
             suspicious_stop: true,
         };
     };
@@ -64,6 +120,7 @@ pub fn interpret_response(
     }
 
     let mut tool_intents = Vec::new();
+    let mut failures = Vec::new();
     if let Some(native_calls) = &message.tool_calls {
         for call in native_calls {
             let parsed = parse_jsonish(&call.function.arguments);
@@ -72,6 +129,14 @@ pub fn interpret_response(
                     "native tool call {} had malformed JSON arguments",
                     call.function.name
                 ));
+                push_failure(
+                    &mut failures,
+                    ResponseFailureKind::NativeMalformedJsonArguments,
+                    format!(
+                        "native tool call {} had malformed JSON arguments",
+                        call.function.name
+                    ),
+                );
             }
             tool_intents.push(ToolIntent {
                 name: call.function.name.clone(),
@@ -88,6 +153,7 @@ pub fn interpret_response(
         if let Some(parsed) = parse_tool_contract_response(&text) {
             parsed_dsrs = true;
             parse_events.extend(parsed.events);
+            failures.extend(parsed.failures);
             let parsed_tool_intents = parsed.tool_intents;
             content = parsed
                 .content
@@ -110,24 +176,49 @@ pub fn interpret_response(
                     parse_events.push("stripped stray DSRs text label".to_string());
                 }
             }
+            if looks_like_untagged_dsrs_contract(&text) {
+                push_failure(
+                    &mut failures,
+                    ResponseFailureKind::UntaggedDsrsLikeOutput,
+                    "assistant emitted DSRs-like field labels without valid DSRs output markers",
+                );
+            }
         }
     }
 
+    classify_intent_failures(&tool_intents, tools, &mut failures);
+
+    let content_suggests_premature_tool = content
+        .as_deref()
+        .map(|content| looks_like_premature_tool_narration(content, tools))
+        .unwrap_or(false);
+    let content_suggests_malformed_tool = content
+        .as_deref()
+        .map(|content| looks_like_malformed_tool_output(content, tools))
+        .unwrap_or(false);
     let suspicious_stop = tool_intents.is_empty()
         && tools_available(tools)
         && choice.finish_reason.as_deref().unwrap_or("stop") == "stop"
-        && content
-            .as_deref()
-            .map(|content| {
-                looks_like_premature_tool_narration(content, tools)
-                    || looks_like_malformed_tool_output(content, tools)
-            })
-            .unwrap_or(false);
+        && (content_suggests_premature_tool || content_suggests_malformed_tool);
 
     if suspicious_stop {
         parse_events.push(
             "assistant appears to contain tool intent but emitted no valid tool call".to_string(),
         );
+        if content_suggests_premature_tool {
+            push_failure(
+                &mut failures,
+                ResponseFailureKind::PrematureToolStop,
+                "assistant narrated an intent to use a tool but stopped without a tool call",
+            );
+        }
+        if content_suggests_malformed_tool {
+            push_failure(
+                &mut failures,
+                ResponseFailureKind::MalformedKnownToolCall,
+                "assistant emitted malformed structured tool-call output",
+            );
+        }
     }
 
     InterpretedResponse {
@@ -136,6 +227,7 @@ pub fn interpret_response(
         finish_reason: choice.finish_reason.clone(),
         tool_intents,
         parse_events,
+        failures,
         suspicious_stop,
     }
 }
@@ -384,6 +476,89 @@ fn parse_jsonish(input: &str) -> Option<Value> {
 
 fn tools_available(tools: &[OpenAiTool]) -> bool {
     !tools.is_empty()
+}
+
+fn classify_intent_failures(
+    intents: &[ToolIntent],
+    tools: &[OpenAiTool],
+    failures: &mut Vec<ResponseFailure>,
+) {
+    for intent in intents {
+        let Some(tool) = tools.iter().find(|tool| tool.function.name == intent.name) else {
+            if !tools.is_empty() {
+                push_failure(
+                    failures,
+                    ResponseFailureKind::UnknownTool,
+                    format!("assistant requested unknown tool {:?}", intent.name),
+                );
+            }
+            continue;
+        };
+
+        if intent.arguments.is_none() {
+            push_failure(
+                failures,
+                ResponseFailureKind::MalformedKnownToolCall,
+                format!(
+                    "assistant requested tool {:?} with malformed arguments",
+                    intent.name
+                ),
+            );
+            continue;
+        }
+
+        if intent
+            .arguments
+            .as_ref()
+            .is_some_and(|arguments| !arguments_have_required_properties(tool, arguments))
+        {
+            push_failure(
+                failures,
+                ResponseFailureKind::SchemaViolation,
+                format!(
+                    "assistant requested tool {:?} without required schema properties",
+                    intent.name
+                ),
+            );
+        }
+    }
+}
+
+fn arguments_have_required_properties(tool: &OpenAiTool, value: &Value) -> bool {
+    let Some(required) = tool
+        .function
+        .parameters
+        .get("required")
+        .and_then(Value::as_array)
+    else {
+        return true;
+    };
+    if required.is_empty() {
+        return true;
+    }
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    required.iter().filter_map(Value::as_str).all(|key| {
+        object
+            .get(key)
+            .is_some_and(|value| !value.is_null() && value.as_str().is_none_or(|s| !s.is_empty()))
+    })
+}
+
+pub(crate) fn push_failure(
+    failures: &mut Vec<ResponseFailure>,
+    kind: ResponseFailureKind,
+    detail: impl Into<String>,
+) {
+    let detail = detail.into();
+    if failures
+        .iter()
+        .any(|failure| failure.kind == kind && failure.detail == detail)
+    {
+        return;
+    }
+    failures.push(ResponseFailure::new(kind, detail));
 }
 
 fn looks_like_premature_tool_narration(content: &str, tools: &[OpenAiTool]) -> bool {
@@ -641,6 +816,8 @@ mod tests {
         );
         assert!(interpreted.tool_intents.is_empty());
         assert!(interpreted.suspicious_stop);
+        assert!(interpreted.has_failure(ResponseFailureKind::UntaggedDsrsLikeOutput));
+        assert!(interpreted.has_failure(ResponseFailureKind::MalformedKnownToolCall));
     }
 
     #[test]
@@ -669,6 +846,7 @@ mod tests {
         );
         assert!(interpreted.tool_intents.is_empty());
         assert!(interpreted.suspicious_stop);
+        assert!(interpreted.has_failure(ResponseFailureKind::UntaggedDsrsLikeOutput));
     }
 
     #[test]
@@ -720,6 +898,7 @@ mod tests {
 
         assert!(interpreted.tool_intents.is_empty());
         assert!(interpreted.suspicious_stop);
+        assert!(interpreted.has_failure(ResponseFailureKind::MalformedKnownToolCall));
     }
 
     #[test]

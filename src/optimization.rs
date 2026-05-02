@@ -47,6 +47,9 @@ struct CorrectionPromptSignature {
     #[input(desc = "Parser diagnostics from deterministic parsing")]
     pub parser_events: String,
 
+    #[input(desc = "Typed response failure diagnostics from deterministic parsing")]
+    pub response_failures: String,
+
     #[output(desc = "JSON with possible, confidence, explanation, content, and tool_calls")]
     pub corrected_json: String,
 }
@@ -167,6 +170,7 @@ pub fn traces_to_gepa_examples(dataset_rows: &[Value]) -> Vec<Example> {
                 "recent_messages": "input" => stringify_field(row.get("recent_messages")),
                 "malformed_response": "input" => stringify_field(row.get("malformed_response")),
                 "parser_events": "input" => stringify_field(row.get("parser_events")),
+                "response_failures": "input" => stringify_field(row.get("response_failures")),
                 "expected_repair": "output" => row.get("expected_repair").cloned().unwrap_or(Value::Null)
             }
         })

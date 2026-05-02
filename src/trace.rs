@@ -12,7 +12,7 @@ use crate::{
     normalizer::NormalizedRequest,
     openai::{ChatCompletionRequest, ChatCompletionResponse, ChatMessage},
     prompt_adapter::AdaptedRequest,
-    repair::RepairAction,
+    repair::{CorrectionAttemptTrace, PolicyDecisionTrace, RepairAction},
     response_interpreter::InterpretedResponse,
 };
 
@@ -71,6 +71,10 @@ pub struct TraceRecord {
     pub adapted_request: Option<AdaptedRequest>,
     pub upstream_response: Option<ChatCompletionResponse>,
     pub interpreted: Option<InterpretedResponse>,
+    #[serde(default)]
+    pub correction_attempts: Vec<CorrectionAttemptTrace>,
+    #[serde(default)]
+    pub policy_decisions: Vec<PolicyDecisionTrace>,
     pub repair_actions: Vec<RepairAction>,
     pub final_response: Option<ChatCompletionResponse>,
     pub error: Option<String>,
@@ -91,6 +95,8 @@ impl TraceRecord {
             adapted_request: None,
             upstream_response: None,
             interpreted: None,
+            correction_attempts: Vec::new(),
+            policy_decisions: Vec::new(),
             repair_actions: Vec::new(),
             final_response: None,
             error: None,
@@ -116,8 +122,14 @@ pub struct TraceSummary {
     pub interpreted_content_len: usize,
     pub interpreted_content_preview: Option<String>,
     pub parse_events: Vec<String>,
+    #[serde(default)]
+    pub failure_kinds: Vec<String>,
     pub suspicious_stop: Option<bool>,
     pub tool_intents: Vec<String>,
+    #[serde(default)]
+    pub correction_attempts: Vec<String>,
+    #[serde(default)]
+    pub policy_decisions: Vec<String>,
     pub repair_actions: Vec<String>,
     pub final_finish_reason: Option<String>,
     pub final_content_len: usize,
@@ -171,6 +183,17 @@ impl TraceSummary {
                 .as_ref()
                 .map(|interpreted| interpreted.parse_events.clone())
                 .unwrap_or_default(),
+            failure_kinds: record
+                .interpreted
+                .as_ref()
+                .map(|interpreted| {
+                    interpreted
+                        .failures
+                        .iter()
+                        .map(|failure| format!("{:?}", failure.kind))
+                        .collect()
+                })
+                .unwrap_or_default(),
             suspicious_stop: record
                 .interpreted
                 .as_ref()
@@ -186,6 +209,24 @@ impl TraceSummary {
                         .collect()
                 })
                 .unwrap_or_default(),
+            correction_attempts: record
+                .correction_attempts
+                .iter()
+                .map(|attempt| {
+                    format!(
+                        "{}:{} accepted={} confidence={:?}",
+                        attempt.correction_model,
+                        attempt.result,
+                        attempt.accepted,
+                        attempt.confidence
+                    )
+                })
+                .collect(),
+            policy_decisions: record
+                .policy_decisions
+                .iter()
+                .map(|decision| format!("{}:{}", decision.stage, decision.decision))
+                .collect(),
             repair_actions: record
                 .repair_actions
                 .iter()

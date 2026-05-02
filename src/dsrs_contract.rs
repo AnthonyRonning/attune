@@ -12,7 +12,9 @@ use crate::{
     model_profile::ModelProfile,
     normalizer::NormalizedRequest,
     openai::ChatMessage,
-    response_interpreter::{ToolIntent, ToolIntentSource},
+    response_interpreter::{
+        push_failure, ResponseFailure, ResponseFailureKind, ToolIntent, ToolIntentSource,
+    },
 };
 
 #[Signature]
@@ -60,6 +62,7 @@ pub struct ParsedDsrsContract {
     pub content: Option<String>,
     pub tool_intents: Vec<ToolIntent>,
     pub events: Vec<String>,
+    pub failures: Vec<ResponseFailure>,
 }
 
 pub fn format_tool_contract(
@@ -118,6 +121,7 @@ pub fn parse_tool_contract_response(content: &str) -> Option<ParsedDsrsContract>
         return None;
     }
 
+    let mut failures = classify_contract_violations(content);
     let adapter = ChatAdapter;
     let signature = OpenAiToolUseContract::new();
     let parsed = catch_unwind(AssertUnwindSafe(|| {
@@ -127,10 +131,16 @@ pub fn parse_tool_contract_response(content: &str) -> Option<ParsedDsrsContract>
     let parsed = match parsed {
         Ok(parsed) => parsed,
         Err(_) => {
+            push_failure(
+                &mut failures,
+                ResponseFailureKind::DsrsContractViolation,
+                "DSRs contract parser panicked on malformed output",
+            );
             return Some(ParsedDsrsContract {
                 content: None,
                 tool_intents: Vec::new(),
                 events: vec!["DSRs contract parser panicked on malformed output".to_string()],
+                failures,
             });
         }
     };
@@ -148,20 +158,22 @@ pub fn parse_tool_contract_response(content: &str) -> Option<ParsedDsrsContract>
         .get("tool_calls")
         .and_then(Value::as_str)
         .and_then(clean_tool_calls_field);
-    let tool_calls_field = fallback
+    let raw_tool_calls_field = fallback
         .tool_calls
         .as_deref()
         .and_then(clean_tool_calls_field)
         .or(parsed_tool_calls)
-        .unwrap_or("[]")
-        .trim();
+        .unwrap_or("[]");
+    detect_placeholder_leaks(content, raw_tool_calls_field, &mut failures);
+    let tool_calls_field = raw_tool_calls_field.trim();
 
-    let tool_intents = parse_tool_calls_field(tool_calls_field, &mut events);
+    let tool_intents = parse_tool_calls_field(tool_calls_field, &mut events, &mut failures);
 
     Some(ParsedDsrsContract {
         content: parsed_content,
         tool_intents,
         events,
+        failures,
     })
 }
 
@@ -175,6 +187,117 @@ fn dsrs_message_to_openai(message: Message) -> ChatMessage {
 
 fn contains_dsrs_marker(content: &str) -> bool {
     content.contains("[[ ## content ## ]]") || content.contains("[[ ## tool_calls ## ]]")
+}
+
+fn classify_contract_violations(content: &str) -> Vec<ResponseFailure> {
+    let mut failures = Vec::new();
+
+    if let Some(first_marker) = first_output_marker_index(content) {
+        if !content[..first_marker].trim().is_empty() {
+            push_failure(
+                &mut failures,
+                ResponseFailureKind::DsrsContractViolation,
+                "DSRs output contained non-whitespace text before the first output marker",
+            );
+            push_failure(
+                &mut failures,
+                ResponseFailureKind::DsrsContentOutsideTaggedFields,
+                "DSRs output contained content before the tagged fields",
+            );
+        }
+    }
+
+    if let Some((_, after_completed)) = content.rsplit_once("[[ ## completed ## ]]") {
+        if !after_completed.trim().is_empty() {
+            push_failure(
+                &mut failures,
+                ResponseFailureKind::DsrsContractViolation,
+                "DSRs output contained non-whitespace text after the completed marker",
+            );
+            push_failure(
+                &mut failures,
+                ResponseFailureKind::DsrsContentOutsideTaggedFields,
+                "DSRs output contained content after the completed marker",
+            );
+        }
+    } else if contains_dsrs_marker(content) {
+        push_failure(
+            &mut failures,
+            ResponseFailureKind::DsrsContractViolation,
+            "DSRs output was missing the completed marker",
+        );
+    }
+
+    if contains_input_marker(content) {
+        push_failure(
+            &mut failures,
+            ResponseFailureKind::PromptEcho,
+            "DSRs output repeated input-side prompt markers",
+        );
+    }
+
+    if contains_template_artifact(content) {
+        push_failure(
+            &mut failures,
+            ResponseFailureKind::TemplateLeak,
+            "DSRs output contained prompt template placeholders or artifacts",
+        );
+    }
+
+    failures
+}
+
+fn first_output_marker_index(content: &str) -> Option<usize> {
+    ["[[ ## content ## ]]", "[[ ## tool_calls ## ]]"]
+        .iter()
+        .filter_map(|marker| content.find(marker))
+        .min()
+}
+
+fn contains_input_marker(content: &str) -> bool {
+    [
+        "[[ ## profile_guidance ## ]]",
+        "[[ ## system_context ## ]]",
+        "[[ ## conversation ## ]]",
+        "[[ ## available_tools ## ]]",
+        "[[ ## tool_choice ## ]]",
+        "[[ ## parallel_tool_calls ## ]]",
+    ]
+    .iter()
+    .any(|marker| content.contains(marker))
+}
+
+fn contains_template_artifact(content: &str) -> bool {
+    let lower = content.to_ascii_lowercase();
+    [
+        "content_value",
+        "tool_calls_value",
+        "tool_call_value",
+        "completed_marker",
+    ]
+    .iter()
+    .any(|artifact| lower.contains(artifact))
+}
+
+fn detect_placeholder_leaks(
+    full_content: &str,
+    raw_tool_calls_field: &str,
+    failures: &mut Vec<ResponseFailure>,
+) {
+    let placeholder_present =
+        contains_template_artifact(full_content) || is_placeholder_value(raw_tool_calls_field);
+    if placeholder_present {
+        push_failure(
+            failures,
+            ResponseFailureKind::DsrsPlaceholderOnly,
+            "DSRs output contained placeholder-only field values",
+        );
+        push_failure(
+            failures,
+            ResponseFailureKind::TemplateLeak,
+            "DSRs output contained prompt template placeholders or artifacts",
+        );
+    }
 }
 
 #[derive(Debug, Default)]
@@ -272,7 +395,11 @@ fn is_placeholder_value(value: &str) -> bool {
     )
 }
 
-fn parse_tool_calls_field(field: &str, events: &mut Vec<String>) -> Vec<ToolIntent> {
+fn parse_tool_calls_field(
+    field: &str,
+    events: &mut Vec<String>,
+    failures: &mut Vec<ResponseFailure>,
+) -> Vec<ToolIntent> {
     if field.is_empty() || field == "[]" {
         return Vec::new();
     }
@@ -280,6 +407,16 @@ fn parse_tool_calls_field(field: &str, events: &mut Vec<String>) -> Vec<ToolInte
     let Some(value) = parse_jsonish(field).or_else(|| parse_adjacent_tool_call_values(field))
     else {
         events.push("DSRs tool_calls field was not valid JSON".to_string());
+        push_failure(
+            failures,
+            ResponseFailureKind::DsrsInvalidToolCallsJson,
+            "DSRs tool_calls field was not valid JSON",
+        );
+        push_failure(
+            failures,
+            ResponseFailureKind::DsrsContractViolation,
+            "DSRs tool_calls field violated the tool-use contract",
+        );
         return Vec::new();
     };
 
@@ -291,13 +428,23 @@ fn parse_tool_calls_field(field: &str, events: &mut Vec<String>) -> Vec<ToolInte
         },
         _ => {
             events.push("DSRs tool_calls field was not a JSON array or object".to_string());
+            push_failure(
+                failures,
+                ResponseFailureKind::DsrsInvalidToolCallsShape,
+                "DSRs tool_calls field was not a JSON array or object",
+            );
+            push_failure(
+                failures,
+                ResponseFailureKind::DsrsContractViolation,
+                "DSRs tool_calls field violated the tool-use contract",
+            );
             return Vec::new();
         }
     };
 
     calls
         .into_iter()
-        .filter_map(|call| tool_intent_from_value(call, events))
+        .filter_map(|call| tool_intent_from_value(call, events, failures))
         .collect()
 }
 
@@ -387,9 +534,23 @@ fn json_value_end(input: &str) -> Option<usize> {
     None
 }
 
-fn tool_intent_from_value(call: Value, events: &mut Vec<String>) -> Option<ToolIntent> {
+fn tool_intent_from_value(
+    call: Value,
+    events: &mut Vec<String>,
+    failures: &mut Vec<ResponseFailure>,
+) -> Option<ToolIntent> {
     let Value::Object(mut object) = call else {
         events.push("DSRs tool call item was not an object".to_string());
+        push_failure(
+            failures,
+            ResponseFailureKind::DsrsInvalidToolCallsShape,
+            "DSRs tool call item was not an object",
+        );
+        push_failure(
+            failures,
+            ResponseFailureKind::DsrsContractViolation,
+            "DSRs tool_calls field violated the tool-use contract",
+        );
         return None;
     };
 
@@ -409,7 +570,22 @@ fn tool_intent_from_value(call: Value, events: &mut Vec<String>) -> Option<ToolI
         .remove("name")
         .or_else(|| object.remove("tool_name"))
         .and_then(|value| value.as_str().map(str::to_owned))
-        .or(function_name)?;
+        .or(function_name);
+
+    let Some(name) = name else {
+        events.push("DSRs tool call item did not contain a tool name".to_string());
+        push_failure(
+            failures,
+            ResponseFailureKind::DsrsInvalidToolCallsShape,
+            "DSRs tool call item did not contain a tool name",
+        );
+        push_failure(
+            failures,
+            ResponseFailureKind::DsrsContractViolation,
+            "DSRs tool_calls field violated the tool-use contract",
+        );
+        return None;
+    };
 
     let arguments = object
         .remove("arguments")
@@ -664,6 +840,60 @@ tool_calls: [
             parsed.tool_intents[1].arguments.as_ref().unwrap()["path"],
             "packages/ai/README.md"
         );
+    }
+
+    #[test]
+    fn reports_content_outside_tagged_fields() {
+        let parsed = parse_tool_contract_response(
+            "preamble\n[[ ## content ## ]]\nHello.\n[[ ## tool_calls ## ]]\n[]\n[[ ## completed ## ]]",
+        )
+        .unwrap();
+
+        assert_eq!(parsed.content.as_deref(), Some("Hello."));
+        assert!(parsed
+            .failures
+            .iter()
+            .any(|failure| failure.kind == ResponseFailureKind::DsrsContentOutsideTaggedFields));
+        assert!(parsed
+            .failures
+            .iter()
+            .any(|failure| failure.kind == ResponseFailureKind::DsrsContractViolation));
+    }
+
+    #[test]
+    fn reports_invalid_dsrs_tool_calls_json() {
+        let parsed = parse_tool_contract_response(
+            "[[ ## content ## ]]\n---\n[[ ## tool_calls ## ]]\n[{\"name\":\"bash\",\"arguments\":]\n[[ ## completed ## ]]",
+        )
+        .unwrap();
+
+        assert!(parsed.tool_intents.is_empty());
+        assert!(parsed
+            .events
+            .iter()
+            .any(|event| event.contains("not valid JSON")));
+        assert!(parsed
+            .failures
+            .iter()
+            .any(|failure| failure.kind == ResponseFailureKind::DsrsInvalidToolCallsJson));
+    }
+
+    #[test]
+    fn reports_prompt_echo_and_placeholder_leak() {
+        let parsed = parse_tool_contract_response(
+            "[[ ## system_context ## ]]\nDo not repeat this.\n[[ ## content ## ]]\ncontent_value\n[[ ## tool_calls ## ]]\ntool_calls_value\n[[ ## completed ## ]]",
+        )
+        .unwrap();
+
+        assert!(parsed.content.is_none());
+        assert!(parsed
+            .failures
+            .iter()
+            .any(|failure| failure.kind == ResponseFailureKind::PromptEcho));
+        assert!(parsed
+            .failures
+            .iter()
+            .any(|failure| failure.kind == ResponseFailureKind::DsrsPlaceholderOnly));
     }
 
     #[test]

@@ -353,7 +353,90 @@ async fn proxy_e2e_routes_adjacent_json_violation_through_correction_agent() {
         .await
         .expect("trace file read");
     assert!(trace.contains("correction_agent_tool_recovery"));
+    assert!(trace.contains("\"correction_attempts\""));
+    assert!(trace.contains("\"policy_decisions\""));
     assert!(trace.contains("\"summary\""));
+    handle.abort();
+}
+
+#[tokio::test]
+async fn proxy_e2e_routes_dsrs_contract_violation_through_correction_agent() {
+    let upstream = MockServer::start_async().await;
+    let _correction_mock = upstream
+        .mock_async(|when, then| {
+            when.method(POST)
+                .path("/v1/chat/completions")
+                .body_contains("corrected_json")
+                .body_contains("dsrs_content_outside_tagged_fields");
+            then.status(200).json_body(chat_response(
+                "qwen/qwen3.5-9b",
+                json!({
+                    "role": "assistant",
+                    "content": "[[ ## corrected_json ## ]]\n{\"possible\":true,\"confidence\":0.96,\"explanation\":\"recovered malformed DSRs contract output\",\"content\":null,\"tool_calls\":[{\"name\":\"read\",\"arguments\":{\"path\":\"packages/ai/README.md\"}}]}\n[[ ## completed ## ]]"
+                }),
+                "stop",
+            ));
+        })
+        .await;
+    let _upstream_mock = upstream
+        .mock_async(|when, then| {
+            when.method(POST)
+                .path("/v1/chat/completions")
+                .body_contains("parallel_tool_calls");
+            then.status(200).json_body(chat_response(
+                "qwen/qwen3.5-9b",
+                json!({
+                    "role": "assistant",
+                    "content": "I should inspect the package README files.\n\n[{\"name\":\"read\",\"arguments\":{\"path\":\"packages/ai/README.md\"}}]\n\n[[ ## system_context ## ]]\nDo not repeat this.\n\n[[ ## content ## ]]\n---\n[[ ## tool_calls ## ]]\n[]\n[[ ## completed ## ]]"
+                }),
+                "stop",
+            ));
+        })
+        .await;
+
+    let trace_file = NamedTempFile::new().expect("trace file");
+    let trace_path = trace_file.path().to_path_buf();
+    let (proxy_url, handle) =
+        spawn_proxy(format!("{}/v1", upstream.base_url()), trace_path.clone()).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{proxy_url}/v1/chat/completions"))
+        .json(&pi_like_request(
+            "qwen/qwen3.5-9b",
+            "very cool. can you dive into each package and let me know more information about each?",
+            false,
+        ))
+        .send()
+        .await
+        .expect("proxy response");
+    assert!(
+        response.status().is_success(),
+        "proxy status {}: {}",
+        response.status(),
+        response.text().await.unwrap_or_default()
+    );
+    let body = response.text().await.expect("response text");
+    let parsed: Value = serde_json::from_str(&body).expect("response JSON");
+    let calls = parsed
+        .pointer("/choices/0/message/tool_calls")
+        .and_then(Value::as_array)
+        .expect("tool calls");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0]["function"]["name"], "read");
+    assert_eq!(
+        calls[0]["function"]["arguments"],
+        "{\"path\":\"packages/ai/README.md\"}"
+    );
+
+    let trace = tokio::fs::read_to_string(trace_path)
+        .await
+        .expect("trace file read");
+    assert!(trace.contains("DsrsContractViolation"));
+    assert!(trace.contains("DsrsContentOutsideTaggedFields"));
+    assert!(trace.contains("PromptEcho"));
+    assert!(trace.contains("correction_agent_tool_recovery"));
+    assert!(trace.contains("\"correction_attempts\""));
+    assert!(trace.contains("\"policy_decisions\""));
     handle.abort();
 }
 

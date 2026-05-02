@@ -10,7 +10,7 @@ use crate::{
     config::{CorrectionConfig, UpstreamConfig},
     model_profile::ModelProfile,
     openai::{ChatMessage, OpenAiTool},
-    response_interpreter::{ToolIntent, ToolIntentSource},
+    response_interpreter::{ResponseFailure, ToolIntent, ToolIntentSource},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -19,6 +19,8 @@ pub struct CorrectionAgentInput {
     pub recent_messages: Vec<ChatMessage>,
     pub malformed_response: String,
     pub parser_events: Vec<String>,
+    #[serde(default)]
+    pub response_failures: Vec<ResponseFailure>,
     pub model: String,
     pub profile: ModelProfile,
     #[serde(skip)]
@@ -93,6 +95,9 @@ struct CorrectMalformedToolResponse {
 
     #[input(desc = "Parser diagnostics from deterministic parsing")]
     pub parser_events: String,
+
+    #[input(desc = "Typed response failure diagnostics from deterministic parsing")]
+    pub response_failures: String,
 
     #[output(
         desc = "A JSON object with possible, confidence, explanation, content, and tool_calls"
@@ -209,6 +214,7 @@ impl CorrectionAgent for DsrsCorrectionAgent {
         let available_tools = serde_json::to_string_pretty(&input.tools)?;
         let recent_messages = serde_json::to_string_pretty(&input.recent_messages)?;
         let parser_events = input.parser_events.join("\n");
+        let response_failures = serde_json::to_string_pretty(&input.response_failures)?;
 
         let prediction = predictor
             .forward_with_config(
@@ -216,7 +222,8 @@ impl CorrectionAgent for DsrsCorrectionAgent {
                     "available_tools": "input" => available_tools,
                     "recent_messages": "input" => recent_messages,
                     "malformed_response": "input" => input.malformed_response,
-                    "parser_events": "input" => parser_events
+                    "parser_events": "input" => parser_events,
+                    "response_failures": "input" => response_failures
                 },
                 Arc::new(lm),
             )

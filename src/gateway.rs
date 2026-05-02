@@ -28,7 +28,7 @@ use crate::{
         ChatCompletionResponse, OpenAiError, OpenAiErrorResponse,
     },
     prompt_adapter::adapt_request,
-    repair::{repair_response, RepairAction},
+    repair::{repair_response, CorrectionAttemptTrace, PolicyDecisionTrace, RepairAction},
     response_interpreter::{interpret_response, ToolIntent},
     trace::{TraceRecord, TraceStore},
     upstream::{InboundAuth, UpstreamClient},
@@ -292,13 +292,16 @@ async fn chat_completions(
         tool_intents = interpreted.tool_intents.len(),
         suspicious_stop = interpreted.suspicious_stop,
         parse_events = interpreted.parse_events.len(),
+        failures = interpreted.failures.len(),
+        failure_kinds = ?interpreted.failure_kinds(),
         "upstream response interpreted"
     );
-    if interpreted.suspicious_stop {
+    if interpreted.suspicious_stop || !interpreted.failures.is_empty() {
         tracing::warn!(
             %trace_id,
             parse_events = ?interpreted.parse_events,
-            "interpreter marked response as suspicious stop"
+            failures = ?interpreted.failures,
+            "interpreter marked response as suspicious or malformed"
         );
     } else {
         tracing::debug!(
@@ -344,6 +347,8 @@ async fn chat_completions(
     tracing::info!(
         %trace_id,
         repair_actions = repair.actions.len(),
+        correction_attempts = repair.correction_attempts.len(),
+        policy_decisions = repair.policy_decisions.len(),
         final_finish_reason = ?first_finish_reason(&repair.final_response),
         final_tool_calls = first_tool_call_count(&repair.final_response),
         final_content_len = first_content_len(&repair.final_response),
@@ -352,7 +357,15 @@ async fn chat_completions(
     for action in &repair.actions {
         log_repair_action(&trace_id, action);
     }
+    for attempt in &repair.correction_attempts {
+        log_correction_attempt(&trace_id, attempt);
+    }
+    for decision in &repair.policy_decisions {
+        log_policy_decision(&trace_id, decision);
+    }
 
+    trace.correction_attempts = repair.correction_attempts.clone();
+    trace.policy_decisions = repair.policy_decisions.clone();
     trace.repair_actions = repair.actions.clone();
     trace.final_response = Some(repair.final_response.clone());
     let trace_id = append_trace(&state, trace).await;
@@ -501,6 +514,44 @@ fn log_repair_action(trace_id: &str, action: &RepairAction) {
             "repair action applied"
         );
     }
+}
+
+fn log_correction_attempt(trace_id: &str, attempt: &CorrectionAttemptTrace) {
+    if attempt.accepted {
+        tracing::info!(
+            %trace_id,
+            correction_model = %attempt.correction_model,
+            result = %attempt.result,
+            accepted = attempt.accepted,
+            confidence = ?attempt.confidence,
+            tool_calls = attempt.tool_calls,
+            content_len = attempt.content_len,
+            failure_kinds = ?attempt.failure_kinds,
+            "correction-agent attempt completed"
+        );
+    } else {
+        tracing::warn!(
+            %trace_id,
+            correction_model = %attempt.correction_model,
+            result = %attempt.result,
+            accepted = attempt.accepted,
+            confidence = ?attempt.confidence,
+            error = ?attempt.error,
+            failure_kinds = ?attempt.failure_kinds,
+            "correction-agent attempt did not produce an accepted repair"
+        );
+    }
+}
+
+fn log_policy_decision(trace_id: &str, decision: &PolicyDecisionTrace) {
+    tracing::debug!(
+        %trace_id,
+        stage = %decision.stage,
+        decision = %decision.decision,
+        reason = %decision.reason,
+        failure_kinds = ?decision.failure_kinds,
+        "repair policy decision"
+    );
 }
 
 fn repair_action_deserves_warning(action: &str) -> bool {

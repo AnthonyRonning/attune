@@ -29,6 +29,11 @@ pub struct CorrectionDatasetRow {
     pub recent_messages: Value,
     pub malformed_response: Value,
     pub parser_events: Value,
+    pub response_failures: Value,
+    pub upstream_assistant_content: Value,
+    pub upstream_assistant_reasoning: Value,
+    pub interpreted_content: Value,
+    pub correction_attempts: Value,
     pub expected_repair: Value,
     pub repair_actions: Value,
 }
@@ -80,12 +85,21 @@ pub async fn export_dataset_file(config: DatasetExportConfig) -> Result<DatasetE
                 .unwrap_or_else(|| "unknown".to_string()),
             available_tools: serde_json::to_value(&normalized.tools)?,
             recent_messages: serde_json::to_value(&normalized.messages)?,
-            malformed_response: interpreted
+            malformed_response: malformed_response_value(record, interpreted),
+            parser_events: serde_json::to_value(&interpreted.parse_events)?,
+            response_failures: serde_json::to_value(&interpreted.failures)?,
+            upstream_assistant_content: upstream_assistant_content(record)
+                .map(Value::String)
+                .unwrap_or(Value::Null),
+            upstream_assistant_reasoning: upstream_assistant_reasoning(record)
+                .map(Value::String)
+                .unwrap_or(Value::Null),
+            interpreted_content: interpreted
                 .content
                 .clone()
                 .map(Value::String)
                 .unwrap_or(Value::Null),
-            parser_events: serde_json::to_value(&interpreted.parse_events)?,
+            correction_attempts: serde_json::to_value(&record.correction_attempts)?,
             expected_repair: json!({
                 "final_message": final_response.choices.first().map(|choice| &choice.message),
                 "tool_calls": final_response
@@ -109,6 +123,40 @@ pub async fn export_dataset_file(config: DatasetExportConfig) -> Result<DatasetE
         rows_written,
         output_path: config.output_path,
     })
+}
+
+fn malformed_response_value(
+    record: &crate::trace::TraceRecord,
+    interpreted: &crate::response_interpreter::InterpretedResponse,
+) -> Value {
+    let content = upstream_assistant_content(record)
+        .or_else(|| interpreted.content.clone())
+        .unwrap_or_default();
+    let reasoning = upstream_assistant_reasoning(record).or_else(|| interpreted.reasoning.clone());
+
+    if let Some(reasoning) = reasoning.filter(|reasoning| !reasoning.trim().is_empty()) {
+        Value::String(format!(
+            "assistant_content:\n{content}\n\nassistant_reasoning:\n{reasoning}"
+        ))
+    } else {
+        Value::String(content)
+    }
+}
+
+fn upstream_assistant_content(record: &crate::trace::TraceRecord) -> Option<String> {
+    record
+        .upstream_response
+        .as_ref()
+        .and_then(|response| response.choices.first())
+        .and_then(|choice| choice.message.content_text())
+}
+
+fn upstream_assistant_reasoning(record: &crate::trace::TraceRecord) -> Option<String> {
+    record
+        .upstream_response
+        .as_ref()
+        .and_then(|response| response.choices.first())
+        .and_then(|choice| choice.message.reasoning_text())
 }
 
 #[cfg(test)]
@@ -150,6 +198,7 @@ mod tests {
             finish_reason: Some("stop".to_string()),
             tool_intents: Vec::new(),
             parse_events: vec!["bad".to_string()],
+            failures: Vec::new(),
             suspicious_stop: false,
         });
         let mut final_response = ChatCompletionResponse::empty_for_model("test");

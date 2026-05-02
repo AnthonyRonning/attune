@@ -9,13 +9,19 @@ use crate::{
     model_profile::ModelProfile,
     normalizer::NormalizedRequest,
     openai::{ChatChoice, ChatCompletionResponse, ChatMessage, OpenAiTool, OpenAiToolCall},
-    response_interpreter::{InterpretedResponse, ToolIntent, ToolIntentSource},
+    response_interpreter::{
+        InterpretedResponse, ResponseFailureKind, ToolIntent, ToolIntentSource,
+    },
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepairOutcome {
     pub final_response: ChatCompletionResponse,
     pub actions: Vec<RepairAction>,
+    #[serde(default)]
+    pub correction_attempts: Vec<CorrectionAttemptTrace>,
+    #[serde(default)]
+    pub policy_decisions: Vec<PolicyDecisionTrace>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,6 +29,31 @@ pub struct RepairAction {
     pub action: String,
     pub confidence: f32,
     pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CorrectionAttemptTrace {
+    pub model: String,
+    pub profile: String,
+    pub correction_model: String,
+    pub parser_events: Vec<String>,
+    pub failure_kinds: Vec<ResponseFailureKind>,
+    pub malformed_response_preview: String,
+    pub result: String,
+    pub accepted: bool,
+    pub confidence: Option<f32>,
+    pub explanation: Option<String>,
+    pub error: Option<String>,
+    pub tool_calls: usize,
+    pub content_len: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicyDecisionTrace {
+    pub stage: String,
+    pub decision: String,
+    pub reason: String,
+    pub failure_kinds: Vec<ResponseFailureKind>,
 }
 
 pub async fn repair_response(
@@ -40,26 +71,57 @@ pub async fn repair_response(
         return Ok(RepairOutcome {
             final_response: response,
             actions: Vec::new(),
+            correction_attempts: Vec::new(),
+            policy_decisions: vec![PolicyDecisionTrace {
+                stage: "repair".to_string(),
+                decision: "pass_through_native_tool_calls".to_string(),
+                reason: "native OpenAI tool_calls were valid for the requested schema".to_string(),
+                failure_kinds: interpreted.failure_kinds(),
+            }],
         });
     }
 
     let mut actions = Vec::new();
+    let mut correction_attempts = Vec::new();
+    let mut policy_decisions = Vec::new();
     let mut intents = interpreted.tool_intents.clone();
     let mut corrected_content: Option<(String, f32, String)> = None;
-
-    if should_try_correction_agent(normalized, interpreted, &intents)
-        && config.correction.enabled
+    let should_try_correction = should_try_correction_agent(normalized, interpreted, &intents);
+    let correction_available = config.correction.enabled
         && config.policy.correction_agent
-        && profile.max_correction_passes > 0
-    {
+        && profile.max_correction_passes > 0;
+    policy_decisions.push(PolicyDecisionTrace {
+        stage: "repair".to_string(),
+        decision: if should_try_correction && correction_available {
+            "attempt_correction_agent".to_string()
+        } else if should_try_correction {
+            "correction_agent_unavailable".to_string()
+        } else {
+            "skip_correction_agent".to_string()
+        },
+        reason: correction_policy_reason(
+            config,
+            normalized,
+            profile,
+            interpreted,
+            &intents,
+            correction_available,
+        ),
+        failure_kinds: interpreted.failure_kinds(),
+    });
+
+    if should_try_correction && correction_available {
+        let malformed_response = malformed_response_text(upstream_response, interpreted);
+        let correction_model = correction_model_for(config, normalized, profile);
         let input = CorrectionAgentInput {
             tools: normalized.tools.clone(),
             recent_messages: recent_messages(
                 &normalized.messages,
                 config.correction.max_context_messages,
             ),
-            malformed_response: malformed_response_text(upstream_response, interpreted),
+            malformed_response: malformed_response.clone(),
             parser_events: interpreted.parse_events.clone(),
+            response_failures: interpreted.failures.clone(),
             model: normalized.model.clone(),
             profile: profile.clone(),
             api_key_override: correction_api_key,
@@ -67,29 +129,111 @@ pub async fn repair_response(
 
         match correction_agent.correct(input).await {
             Ok(Some(output)) if !output.tool_calls.is_empty() => {
+                let confidence = output.confidence;
+                let explanation = output.explanation.clone();
+                correction_attempts.push(CorrectionAttemptTrace {
+                    model: normalized.model.clone(),
+                    profile: profile.name.clone(),
+                    correction_model,
+                    parser_events: interpreted.parse_events.clone(),
+                    failure_kinds: interpreted.failure_kinds(),
+                    malformed_response_preview: preview(&malformed_response),
+                    result: "tool_recovery".to_string(),
+                    accepted: true,
+                    confidence: Some(confidence),
+                    explanation: Some(explanation.clone()),
+                    error: None,
+                    tool_calls: output.tool_calls.len(),
+                    content_len: output.content.as_ref().map_or(0, String::len),
+                });
                 actions.push(RepairAction {
                     action: "correction_agent_tool_recovery".to_string(),
-                    confidence: output.confidence,
-                    reason: output.explanation,
+                    confidence,
+                    reason: explanation,
                 });
                 intents.extend(output.tool_calls);
             }
             Ok(Some(output)) => {
                 if let Some(content) = output.content.filter(|content| !content.trim().is_empty()) {
+                    let confidence = output.confidence;
+                    let explanation = output.explanation.clone();
+                    correction_attempts.push(CorrectionAttemptTrace {
+                        model: normalized.model.clone(),
+                        profile: profile.name.clone(),
+                        correction_model,
+                        parser_events: interpreted.parse_events.clone(),
+                        failure_kinds: interpreted.failure_kinds(),
+                        malformed_response_preview: preview(&malformed_response),
+                        result: "content_recovery".to_string(),
+                        accepted: true,
+                        confidence: Some(confidence),
+                        explanation: Some(explanation.clone()),
+                        error: None,
+                        tool_calls: output.tool_calls.len(),
+                        content_len: content.len(),
+                    });
                     actions.push(RepairAction {
                         action: "correction_agent_content_recovery".to_string(),
-                        confidence: output.confidence,
-                        reason: output.explanation.clone(),
+                        confidence,
+                        reason: explanation.clone(),
                     });
-                    corrected_content = Some((content, output.confidence, output.explanation));
+                    corrected_content = Some((content, confidence, explanation));
+                } else {
+                    correction_attempts.push(CorrectionAttemptTrace {
+                        model: normalized.model.clone(),
+                        profile: profile.name.clone(),
+                        correction_model,
+                        parser_events: interpreted.parse_events.clone(),
+                        failure_kinds: interpreted.failure_kinds(),
+                        malformed_response_preview: preview(&malformed_response),
+                        result: "empty_recovery".to_string(),
+                        accepted: false,
+                        confidence: Some(output.confidence),
+                        explanation: Some(output.explanation),
+                        error: None,
+                        tool_calls: 0,
+                        content_len: 0,
+                    });
                 }
             }
-            Ok(_) => {}
-            Err(error) => actions.push(RepairAction {
-                action: "correction_agent_failed".to_string(),
-                confidence: 0.0,
-                reason: error.to_string(),
+            Ok(_) => correction_attempts.push(CorrectionAttemptTrace {
+                model: normalized.model.clone(),
+                profile: profile.name.clone(),
+                correction_model,
+                parser_events: interpreted.parse_events.clone(),
+                failure_kinds: interpreted.failure_kinds(),
+                malformed_response_preview: preview(&malformed_response),
+                result: "no_recovery".to_string(),
+                accepted: false,
+                confidence: None,
+                explanation: None,
+                error: None,
+                tool_calls: 0,
+                content_len: 0,
             }),
+            Err(error) => {
+                let error = error.to_string();
+                correction_attempts.push(CorrectionAttemptTrace {
+                    model: normalized.model.clone(),
+                    profile: profile.name.clone(),
+                    correction_model,
+                    parser_events: interpreted.parse_events.clone(),
+                    failure_kinds: interpreted.failure_kinds(),
+                    malformed_response_preview: preview(&malformed_response),
+                    result: "failed".to_string(),
+                    accepted: false,
+                    confidence: None,
+                    explanation: None,
+                    error: Some(error.clone()),
+                    tool_calls: 0,
+                    content_len: 0,
+                });
+                actions.push(RepairAction {
+                    action: "correction_agent_failed".to_string(),
+                    confidence: 0.0,
+                    reason: error,
+                });
+            }
         }
     }
 
@@ -100,9 +244,17 @@ pub async fn repair_response(
     if repaired_tool_calls.is_empty() {
         if let Some((content, confidence, reason)) = corrected_content {
             apply_corrected_content(&mut final_response, content, confidence, reason);
+            policy_decisions.push(PolicyDecisionTrace {
+                stage: "repair".to_string(),
+                decision: "emit_corrected_content".to_string(),
+                reason: "correction agent recovered user-facing content".to_string(),
+                failure_kinds: interpreted.failure_kinds(),
+            });
             return Ok(RepairOutcome {
                 final_response,
                 actions,
+                correction_attempts,
+                policy_decisions,
             });
         }
 
@@ -110,14 +262,35 @@ pub async fn repair_response(
             || should_suppress_expected_tool_failure(normalized, interpreted)
         {
             suppress_unrecoverable_tool_output(&mut final_response, &mut actions);
+            policy_decisions.push(PolicyDecisionTrace {
+                stage: "repair".to_string(),
+                decision: "suppress_unrecoverable_tool_output".to_string(),
+                reason: "malformed tool output could not be safely recovered".to_string(),
+                failure_kinds: interpreted.failure_kinds(),
+            });
         } else if should_replace_unusable_assistant_content(normalized, interpreted) {
             replace_unusable_assistant_content(&mut final_response, normalized, &mut actions);
+            policy_decisions.push(PolicyDecisionTrace {
+                stage: "repair".to_string(),
+                decision: "replace_unusable_assistant_content".to_string(),
+                reason: "assistant content was empty, placeholder-only, or scratchpad-only"
+                    .to_string(),
+                failure_kinds: interpreted.failure_kinds(),
+            });
         } else {
             map_reasoning_content_if_needed(&mut final_response, interpreted);
+            policy_decisions.push(PolicyDecisionTrace {
+                stage: "repair".to_string(),
+                decision: "pass_through_interpreted_content".to_string(),
+                reason: "no safe repair action was required after interpretation".to_string(),
+                failure_kinds: interpreted.failure_kinds(),
+            });
         }
         return Ok(RepairOutcome {
             final_response,
             actions,
+            correction_attempts,
+            policy_decisions,
         });
     }
 
@@ -142,6 +315,16 @@ pub async fn repair_response(
     Ok(RepairOutcome {
         final_response,
         actions,
+        correction_attempts,
+        policy_decisions: {
+            policy_decisions.push(PolicyDecisionTrace {
+                stage: "repair".to_string(),
+                decision: "emit_repaired_tool_calls".to_string(),
+                reason: "repaired tool intents were emitted as OpenAI tool_calls".to_string(),
+                failure_kinds: interpreted.failure_kinds(),
+            });
+            policy_decisions
+        },
     })
 }
 
@@ -182,10 +365,76 @@ fn should_try_correction_agent(
     interpreted: &InterpretedResponse,
     intents: &[ToolIntent],
 ) -> bool {
-    (intents.is_empty() && interpreted.suspicious_stop)
+    interpreter_failures_require_model_correction(interpreted)
+        || (intents.is_empty() && interpreted.suspicious_stop)
         || intents
             .iter()
             .any(|intent| intent_requires_model_correction(normalized, intent))
+}
+
+fn interpreter_failures_require_model_correction(interpreted: &InterpretedResponse) -> bool {
+    interpreted.has_any_failure(&[
+        ResponseFailureKind::NativeMalformedJsonArguments,
+        ResponseFailureKind::DsrsContractViolation,
+        ResponseFailureKind::DsrsContentOutsideTaggedFields,
+        ResponseFailureKind::DsrsInvalidToolCallsJson,
+        ResponseFailureKind::DsrsInvalidToolCallsShape,
+        ResponseFailureKind::DsrsPlaceholderOnly,
+        ResponseFailureKind::TemplateLeak,
+        ResponseFailureKind::PromptEcho,
+        ResponseFailureKind::PrematureToolStop,
+        ResponseFailureKind::MalformedKnownToolCall,
+        ResponseFailureKind::UntaggedDsrsLikeOutput,
+        ResponseFailureKind::SchemaViolation,
+    ])
+}
+
+fn correction_policy_reason(
+    config: &ProxyConfig,
+    normalized: &NormalizedRequest,
+    profile: &ModelProfile,
+    interpreted: &InterpretedResponse,
+    intents: &[ToolIntent],
+    correction_available: bool,
+) -> String {
+    if !correction_available
+        && (interpreter_failures_require_model_correction(interpreted)
+            || (intents.is_empty() && interpreted.suspicious_stop)
+            || intents
+                .iter()
+                .any(|intent| intent_requires_model_correction(normalized, intent)))
+    {
+        return format!(
+            "correction would be useful but is unavailable: enabled={} policy_enabled={} max_passes={}",
+            config.correction.enabled, config.policy.correction_agent, profile.max_correction_passes
+        );
+    }
+    if interpreter_failures_require_model_correction(interpreted) {
+        return "typed response failures require model-based correction".to_string();
+    }
+    if intents.is_empty() && interpreted.suspicious_stop {
+        return "interpreter found a suspicious stop with no valid tool intents".to_string();
+    }
+    if intents
+        .iter()
+        .any(|intent| intent_requires_model_correction(normalized, intent))
+    {
+        return "one or more tool intents have malformed or schema-incomplete arguments"
+            .to_string();
+    }
+    "response can be handled without correction agent".to_string()
+}
+
+fn correction_model_for(
+    config: &ProxyConfig,
+    normalized: &NormalizedRequest,
+    profile: &ModelProfile,
+) -> String {
+    profile
+        .correction_model
+        .clone()
+        .or_else(|| config.correction.default_model.clone())
+        .unwrap_or_else(|| normalized.model.clone())
 }
 
 fn intent_requires_model_correction(normalized: &NormalizedRequest, intent: &ToolIntent) -> bool {
@@ -542,6 +791,16 @@ fn should_suppress_unrecoverable_tool_output(interpreted: &InterpretedResponse) 
             .as_deref()
             .map(contains_unrecoverable_tool_output)
             .unwrap_or(false)
+        || (interpreted.has_any_failure(&[
+            ResponseFailureKind::DsrsInvalidToolCallsJson,
+            ResponseFailureKind::DsrsInvalidToolCallsShape,
+            ResponseFailureKind::MalformedKnownToolCall,
+            ResponseFailureKind::UntaggedDsrsLikeOutput,
+        ]) && interpreted
+            .content
+            .as_deref()
+            .map(unusable_assistant_content)
+            .unwrap_or(true))
 }
 
 fn contains_unrecoverable_tool_output(content: &str) -> bool {
@@ -627,7 +886,13 @@ fn unusable_assistant_content(content: &str) -> bool {
     let lower = trimmed.to_ascii_lowercase();
     matches!(
         lower.as_str(),
-        "content" | "content_value" | "tool_calls_value" | "completed_marker"
+        "-" | "--"
+            | "---"
+            | "..."
+            | "content"
+            | "content_value"
+            | "tool_calls_value"
+            | "completed_marker"
     ) || lower.starts_with("tool_calls")
         || lower.contains("\ntool_calls")
         || (lower.contains("\n[]") && lower.ends_with("completed"))
@@ -765,6 +1030,15 @@ fn malformed_response_text(
     } else {
         content
     }
+}
+
+fn preview(value: &str) -> String {
+    const LIMIT: usize = 1000;
+    let mut out = value.chars().take(LIMIT).collect::<String>();
+    if value.chars().count() > LIMIT {
+        out.push_str("...");
+    }
+    out
 }
 
 fn ensure_first_choice(response: &mut ChatCompletionResponse, model: &str) {
@@ -1180,6 +1454,107 @@ mod tests {
             .any(|action| action.action == "correction_agent_tool_recovery"));
     }
 
+    struct ContractViolationCorrectionAgent;
+
+    #[async_trait::async_trait]
+    impl CorrectionAgent for ContractViolationCorrectionAgent {
+        async fn correct(
+            &self,
+            input: CorrectionAgentInput,
+        ) -> Result<Option<crate::agents::CorrectionAgentOutput>> {
+            assert!(input.malformed_response.contains("packages/ai/README.md"));
+            assert!(input.response_failures.iter().any(|failure| {
+                failure.kind == ResponseFailureKind::DsrsContentOutsideTaggedFields
+            }));
+            assert!(input
+                .response_failures
+                .iter()
+                .any(|failure| failure.kind == ResponseFailureKind::PromptEcho));
+            Ok(Some(crate::agents::CorrectionAgentOutput {
+                tool_calls: vec![ToolIntent {
+                    name: "read".to_string(),
+                    arguments: Some(json!({"path":"packages/ai/README.md"})),
+                    raw_arguments: r#"{"path":"packages/ai/README.md"}"#.to_string(),
+                    source: ToolIntentSource::CorrectionAgent,
+                    confidence: 0.96,
+                }],
+                content: None,
+                confidence: 0.96,
+                explanation: "recovered tool call from malformed tagged output".to_string(),
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn dsrs_contract_violation_routes_to_correction_agent_with_typed_failures() {
+        let normalized = request_with_named_tool(
+            "read",
+            "very cool. can you dive into each package and let me know more information about each?",
+            true,
+        );
+        let upstream = synthetic_response(
+            "qwen/qwen3.5-9b",
+            r#"I should inspect the package README files.
+
+[
+  {"name":"read","arguments":{"path":"packages/ai/README.md"}}
+]
+
+[[ ## system_context ## ]]
+Do not repeat this.
+
+[[ ## content ## ]]
+---
+[[ ## tool_calls ## ]]
+[]
+[[ ## completed ## ]]"#,
+        );
+        let interpreted =
+            crate::response_interpreter::interpret_response(&upstream, &normalized.tools);
+
+        assert!(interpreted.has_failure(ResponseFailureKind::DsrsContractViolation));
+        assert!(interpreted.has_failure(ResponseFailureKind::DsrsContentOutsideTaggedFields));
+        assert!(interpreted.has_failure(ResponseFailureKind::PromptEcho));
+
+        let outcome = repair_response(
+            &ProxyConfig::default(),
+            &normalized,
+            &ModelProfile::qwen(),
+            &upstream,
+            &interpreted,
+            &ContractViolationCorrectionAgent,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let calls = outcome.final_response.choices[0]
+            .message
+            .tool_calls
+            .as_ref()
+            .unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "read");
+        assert_eq!(
+            calls[0].function.arguments,
+            r#"{"path":"packages/ai/README.md"}"#
+        );
+        assert!(outcome
+            .actions
+            .iter()
+            .any(|action| action.action == "correction_agent_tool_recovery"));
+        assert!(outcome
+            .correction_attempts
+            .iter()
+            .any(|attempt| attempt.result == "tool_recovery" && attempt.accepted));
+        assert!(outcome.policy_decisions.iter().any(|decision| {
+            decision.decision == "attempt_correction_agent"
+                && decision
+                    .failure_kinds
+                    .contains(&ResponseFailureKind::DsrsContractViolation)
+        }));
+    }
+
     #[tokio::test]
     async fn replaces_reasoning_only_length_response_without_leaking_thoughts() {
         let normalized = request_with_tool_prompt("hey", false);
@@ -1318,6 +1693,7 @@ mod tests {
         });
         let interpreted =
             crate::response_interpreter::interpret_response(&upstream, &normalized.tools);
+        assert!(interpreted.has_failure(ResponseFailureKind::SchemaViolation));
 
         let outcome = repair_response(
             &ProxyConfig::default(),

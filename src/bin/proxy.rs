@@ -202,6 +202,15 @@ fn print_trace_summaries(summaries: &[TraceSummary]) {
         if !summary.parse_events.is_empty() {
             println!("    events: {}", summary.parse_events.join(" | "));
         }
+        if !summary.failure_kinds.is_empty() {
+            println!("    failures: {}", summary.failure_kinds.join(" | "));
+        }
+        if !summary.correction_attempts.is_empty() {
+            println!("  correction: {}", summary.correction_attempts.join(" | "));
+        }
+        if !summary.policy_decisions.is_empty() {
+            println!("  policy: {}", summary.policy_decisions.join(" | "));
+        }
         if !summary.repair_actions.is_empty() {
             println!("  repair: {}", summary.repair_actions.join(" | "));
         }
