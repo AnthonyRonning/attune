@@ -1,8 +1,12 @@
-use std::{fmt, sync::Arc};
+use std::{
+    fmt,
+    panic::{catch_unwind, AssertUnwindSafe},
+};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use dspy_rs::{example, Predict, Predictor, Signature, LM};
+use dspy_rs::{adapter::Adapter, example, ChatAdapter, Prediction, Signature, LM};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -50,9 +54,10 @@ pub struct CorrectionAgentError {
 }
 
 impl CorrectionAgentError {
-    fn non_json(raw_output: String) -> Self {
+    fn invalid_dsrs_output(raw_output: String, detail: impl Into<String>) -> Self {
+        let detail = detail.into();
         Self {
-            message: format!("correction agent returned non-JSON output: {raw_output}"),
+            message: format!("correction agent returned invalid DSRs output: {detail}"),
             raw_output: Some(raw_output),
         }
     }
@@ -111,14 +116,13 @@ impl DsrsCorrectionAgent {
 
 #[Signature]
 struct CorrectMalformedToolResponse {
-    /// You are a strict model-response correction agent. Recover a malformed
-    /// assistant response into the OpenAI-compatible result the client should have
-    /// received. Return valid JSON only, with no markdown and no prose outside the
-    /// JSON object. If clear tool calls were intended, put them in tool_calls and
-    /// leave content null. If no tool call was intended, put the user-facing text in
-    /// content and leave tool_calls empty. If the malformed response is ambiguous or
-    /// unsafe to repair, set possible to false.
-
+    /// You are a strict DSRs model-response correction agent. Recover a malformed
+    /// assistant response by filling exactly the requested DSRs output fields.
+    /// If clear tool calls were intended, put them in tool_calls and leave content
+    /// empty. If no tool call was intended, put the user-facing text in content and
+    /// use an empty tool_calls array. If the malformed response is ambiguous or unsafe
+    /// to repair, set possible to false. Do not invent tools, arguments, or facts. Do
+    /// not emit prose outside the DSRs field markers.
     #[input(desc = "OpenAI-compatible tool definitions")]
     pub available_tools: String,
 
@@ -134,93 +138,46 @@ struct CorrectMalformedToolResponse {
     #[input(desc = "Typed response failure diagnostics from deterministic parsing")]
     pub response_failures: String,
 
+    #[output(desc = "Whether a safe repair is possible. Emit true or false.")]
+    pub possible: bool,
+
+    #[output(desc = "Repair confidence as a number from 0.0 to 1.0.")]
+    pub confidence: f32,
+
+    #[output(desc = "Brief explanation of the repair decision.")]
+    pub explanation: String,
+
+    #[output(desc = "Plain user-facing content, or an empty string when using tools.")]
+    pub content: String,
+
     #[output(
-        desc = "A JSON object with possible, confidence, explanation, content, and tool_calls"
+        desc = "JSON array of {\"name\": string, \"arguments\": object}; [] when no tool call is intended."
     )]
-    pub corrected_json: String,
+    pub tool_calls: Vec<CorrectionSignatureToolCall>,
 }
 
-#[derive(Debug, Deserialize)]
-struct CorrectionEnvelope {
-    #[serde(default)]
-    possible: bool,
-    #[serde(default)]
-    confidence: f32,
-    #[serde(default)]
-    explanation: String,
-    #[serde(default)]
-    content: Option<Value>,
-    #[serde(default)]
-    tool_calls: Vec<CorrectionEnvelopeToolCall>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CorrectionEnvelopeToolCall {
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    arguments: Value,
-    #[serde(default)]
-    function: Option<CorrectionEnvelopeFunctionCall>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CorrectionEnvelopeFunctionCall {
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+struct CorrectionSignatureToolCall {
     name: String,
     #[serde(default)]
     arguments: Value,
 }
 
-impl CorrectionEnvelopeToolCall {
+impl CorrectionSignatureToolCall {
     fn into_tool_intent(self, confidence: f32) -> Option<ToolIntent> {
-        let (name, arguments) = if let Some(function) = self.function {
-            (function.name, normalize_arguments(function.arguments))
-        } else {
-            (self.name?, normalize_arguments(self.arguments))
-        };
+        let arguments = self.arguments;
         let raw_arguments = match &arguments {
             Value::String(raw) => raw.clone(),
             other => serde_json::to_string(other).unwrap_or_else(|_| "{}".to_string()),
         };
 
         Some(ToolIntent {
-            name,
+            name: self.name,
             arguments: Some(arguments),
             raw_arguments,
             source: ToolIntentSource::CorrectionAgent,
             confidence,
         })
-    }
-}
-
-impl CorrectionEnvelope {
-    fn content_text(&self) -> Option<String> {
-        self.content
-            .as_ref()
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-    }
-
-    fn into_tool_intents(self) -> Vec<ToolIntent> {
-        let confidence = self.confidence;
-        let mut calls = self.tool_calls;
-
-        if calls.is_empty() {
-            if let Some(Value::Object(mut object)) = self.content {
-                if let Some(tool_calls) = object.remove("tool_calls") {
-                    if let Ok(parsed) =
-                        serde_json::from_value::<Vec<CorrectionEnvelopeToolCall>>(tool_calls)
-                    {
-                        calls = parsed;
-                    }
-                }
-            }
-        }
-
-        calls
-            .into_iter()
-            .filter_map(|call| call.into_tool_intent(confidence))
-            .collect()
     }
 }
 
@@ -245,135 +202,97 @@ impl CorrectionAgent for DsrsCorrectionAgent {
             .await
             .context("failed to build DSRs correction LM")?;
 
-        let predictor = Predict::new(CorrectMalformedToolResponse::new());
+        let signature = CorrectMalformedToolResponse::new();
+        let adapter = ChatAdapter;
         let available_tools = serde_json::to_string_pretty(&input.tools)?;
         let recent_messages = serde_json::to_string_pretty(&input.recent_messages)?;
         let parser_events = input.parser_events.join("\n");
         let response_failures = serde_json::to_string_pretty(&input.response_failures)?;
 
-        let prediction = predictor
-            .forward_with_config(
-                example! {
-                    "available_tools": "input" => available_tools,
-                    "recent_messages": "input" => recent_messages,
-                    "malformed_response": "input" => input.malformed_response,
-                    "parser_events": "input" => parser_events,
-                    "response_failures": "input" => response_failures
-                },
-                Arc::new(lm),
-            )
+        let chat = adapter.format(
+            &signature,
+            example! {
+                "available_tools": "input" => available_tools,
+                "recent_messages": "input" => recent_messages,
+                "malformed_response": "input" => input.malformed_response,
+                "parser_events": "input" => parser_events,
+                "response_failures": "input" => response_failures
+            },
+        );
+        let response = lm
+            .call(chat, Vec::new())
             .await
-            .context("DSRs correction predictor failed")?;
-
-        let corrected = prediction
-            .get("corrected_json", None)
-            .as_str()
-            .unwrap_or_default()
-            .trim()
-            .to_string();
-
-        let envelope = parse_correction_envelope(&corrected)
-            .map_err(|_| CorrectionAgentError::non_json(corrected.clone()))?;
-
-        let possible = envelope.possible;
-        let confidence = envelope.confidence;
-        let explanation = envelope.explanation.clone();
-        let content = envelope.content_text();
-        let tool_calls = envelope.into_tool_intents();
-
-        Ok(Some(CorrectionAgentOutput {
-            tool_calls,
-            content,
-            possible,
-            confidence,
-            explanation,
-            raw_output: Some(corrected),
+            .context("DSRs correction LM call failed")?;
+        let raw_output = response.output.content().to_string();
+        let parsed = catch_unwind(AssertUnwindSafe(|| {
+            adapter.parse_response(&signature, response.output)
         }))
+        .map_err(|_| {
+            CorrectionAgentError::invalid_dsrs_output(
+                raw_output.clone(),
+                "typed DSRs fields could not be parsed",
+            )
+        })?;
+        let prediction = Prediction::new(parsed, response.usage);
+
+        correction_output_from_prediction(&prediction, raw_output).map(Some)
     }
 }
 
-fn normalize_arguments(arguments: Value) -> Value {
-    match arguments {
-        Value::String(raw) => serde_json::from_str(&raw)
-            .or_else(|_| json5::from_str(&raw))
-            .unwrap_or(Value::String(raw)),
-        other => other,
-    }
-}
-
-fn parse_correction_envelope(output: &str) -> Result<CorrectionEnvelope> {
-    let trimmed = output.trim();
-    let fenced = trimmed
-        .strip_prefix("```json")
-        .or_else(|| trimmed.strip_prefix("```"))
-        .and_then(|s| s.strip_suffix("```"))
-        .unwrap_or(trimmed)
-        .trim();
-    let dsrs_field = extract_dsrs_corrected_json(fenced);
-    let json_object = extract_json_object(fenced);
-
-    for candidate in [Some(fenced), dsrs_field, json_object.as_deref()]
+fn correction_output_from_prediction(
+    prediction: &Prediction,
+    raw_output: String,
+) -> Result<CorrectionAgentOutput> {
+    let possible = prediction
+        .data
+        .get("possible")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let confidence = prediction
+        .data
+        .get("confidence")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0)
+        .clamp(0.0, 1.0) as f32;
+    let explanation = prediction
+        .data
+        .get("explanation")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let content = prediction
+        .data
+        .get("content")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|content| !content.is_empty())
+        .map(str::to_string);
+    let tool_calls_value = prediction
+        .data
+        .get("tool_calls")
+        .cloned()
+        .unwrap_or_else(|| Value::Array(Vec::new()));
+    let signature_calls: Vec<CorrectionSignatureToolCall> =
+        serde_json::from_value(tool_calls_value).map_err(|error| {
+            CorrectionAgentError::invalid_dsrs_output(
+                raw_output.clone(),
+                format!("tool_calls field did not match the DSRs correction schema: {error}"),
+            )
+        })?;
+    let tool_calls = signature_calls
         .into_iter()
-        .flatten()
-    {
-        if let Ok(envelope) =
-            serde_json::from_str(candidate).or_else(|_| json5::from_str(candidate))
-        {
-            return Ok(envelope);
-        }
-    }
+        .filter_map(|call| call.into_tool_intent(confidence))
+        .collect();
 
-    anyhow::bail!("failed to parse correction envelope")
-}
-
-fn extract_dsrs_corrected_json(output: &str) -> Option<&str> {
-    let (_, after_marker) = output.split_once("[[ ## corrected_json ## ]]")?;
-    Some(
-        after_marker
-            .split("[[ ## completed ## ]]")
-            .next()
-            .unwrap_or(after_marker)
-            .trim(),
-    )
-}
-
-fn extract_json_object(output: &str) -> Option<String> {
-    let mut start = None;
-    let mut depth = 0usize;
-    let mut in_string = false;
-    let mut escaped = false;
-
-    for (index, ch) in output.char_indices() {
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == '"' {
-                in_string = false;
-            }
-            continue;
-        }
-
-        match ch {
-            '"' => in_string = true,
-            '{' => {
-                if start.is_none() {
-                    start = Some(index);
-                }
-                depth += 1;
-            }
-            '}' if depth > 0 => {
-                depth -= 1;
-                if depth == 0 {
-                    let start = start?;
-                    return Some(output[start..=index].to_string());
-                }
-            }
-            _ => {}
-        }
-    }
-    None
+    Ok(CorrectionAgentOutput {
+        tool_calls,
+        content,
+        possible,
+        confidence,
+        explanation,
+        raw_output: Some(raw_output),
+    })
 }
 
 pub fn recent_messages(messages: &[ChatMessage], max: usize) -> Vec<ChatMessage> {
@@ -387,102 +306,96 @@ pub fn recent_messages(messages: &[ChatMessage], max: usize) -> Vec<ChatMessage>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dspy_rs::{LmUsage, Message};
 
-    #[test]
-    fn parses_fenced_correction_envelope() {
-        let parsed = parse_correction_envelope(
-            r#"```json
-{"possible":true,"confidence":0.9,"tool_calls":[{"name":"read_file","arguments":{"path":"x"}}]}
-```"#,
-        )
-        .unwrap();
-
-        assert!(parsed.possible);
-        assert_eq!(parsed.tool_calls[0].name.as_deref(), Some("read_file"));
+    fn parse_dsrs_correction_output(raw_output: &str) -> Result<CorrectionAgentOutput> {
+        let signature = CorrectMalformedToolResponse::new();
+        let adapter = ChatAdapter;
+        let parsed = adapter.parse_response(&signature, Message::assistant(raw_output));
+        let prediction = Prediction::new(parsed, LmUsage::default());
+        correction_output_from_prediction(&prediction, raw_output.to_string())
     }
 
     #[test]
-    fn parses_openai_style_correction_tool_call() {
-        let parsed = parse_correction_envelope(
-            r#"{
-  "possible": true,
-  "confidence": 0.95,
-  "tool_calls": [
-    {
-      "id": "call_1",
-      "type": "function",
-      "function": {
-        "name": "bash",
-        "arguments": {"command": "find packages -maxdepth 1 -type d"}
-      }
-    }
-  ]
-}"#,
-        )
-        .unwrap();
-        let intent = parsed
-            .tool_calls
-            .into_iter()
-            .next()
-            .unwrap()
-            .into_tool_intent(parsed.confidence)
-            .unwrap();
+    fn parses_typed_dsrs_correction_tool_calls() {
+        let parsed = parse_dsrs_correction_output(
+            r#"[[ ## possible ## ]]
+true
 
-        assert_eq!(intent.name, "bash");
-        assert_eq!(
-            intent.arguments.as_ref().unwrap()["command"],
-            "find packages -maxdepth 1 -type d"
-        );
-    }
+[[ ## confidence ## ]]
+0.95
 
-    #[test]
-    fn parses_tool_calls_nested_in_content_object() {
-        let parsed = parse_correction_envelope(
-            r#"{
-  "possible": true,
-  "confidence": 0.95,
-  "content": {
-    "tool_calls": [
-      {
-        "name": "read",
-        "arguments": {"path": "Cargo.toml"}
-      }
-    ]
-  }
-}"#,
-        )
-        .unwrap();
+[[ ## explanation ## ]]
+Recovered a clear read call.
 
-        let intents = parsed.into_tool_intents();
+[[ ## content ## ]]
 
-        assert_eq!(intents.len(), 1);
-        assert_eq!(intents[0].name, "read");
-        assert_eq!(intents[0].arguments.as_ref().unwrap()["path"], "Cargo.toml");
-    }
 
-    #[test]
-    fn parses_correction_envelope_from_dsrs_field() {
-        let parsed = parse_correction_envelope(
-            r#"[[ ## corrected_json ## ]]
-{"possible":true,"confidence":0.91,"content":"Hello.","tool_calls":[]}
+[[ ## tool_calls ## ]]
+[{"name":"read","arguments":{"path":"README.md"}}]
+
 [[ ## completed ## ]]"#,
         )
         .unwrap();
 
         assert!(parsed.possible);
-        assert_eq!(parsed.content_text().as_deref(), Some("Hello."));
+        assert_eq!(parsed.confidence, 0.95);
+        assert_eq!(parsed.tool_calls[0].name, "read");
+        assert_eq!(
+            parsed.tool_calls[0].arguments.as_ref().unwrap()["path"],
+            "README.md"
+        );
+        assert!(parsed.content.is_none());
     }
 
     #[test]
-    fn parses_correction_envelope_embedded_in_prose() {
-        let parsed = parse_correction_envelope(
-            r#"Here is the corrected response:
-{"possible":true,"confidence":0.9,"tool_calls":[{"name":"read","arguments":{"path":"README.md"}}]}
-Done."#,
+    fn parses_typed_dsrs_correction_content() {
+        let parsed = parse_dsrs_correction_output(
+            r#"[[ ## possible ## ]]
+true
+
+[[ ## confidence ## ]]
+0.91
+
+[[ ## explanation ## ]]
+Recovered a text answer.
+
+[[ ## content ## ]]
+Hello.
+
+[[ ## tool_calls ## ]]
+[]
+
+[[ ## completed ## ]]"#,
         )
         .unwrap();
 
         assert!(parsed.possible);
-        assert_eq!(parsed.tool_calls[0].name.as_deref(), Some("read"));
+        assert_eq!(parsed.content.as_deref(), Some("Hello."));
+        assert!(parsed.tool_calls.is_empty());
+    }
+
+    #[test]
+    fn rejects_non_dsrs_correction_tool_call_shape() {
+        let parsed = parse_dsrs_correction_output(
+            r#"[[ ## possible ## ]]
+true
+
+[[ ## confidence ## ]]
+0.91
+
+[[ ## explanation ## ]]
+This used the wrong tool-call schema.
+
+[[ ## content ## ]]
+
+
+[[ ## tool_calls ## ]]
+[{"function":{"name":"read","arguments":{"path":"README.md"}}}]
+
+[[ ## completed ## ]]"#,
+        );
+
+        assert!(parsed.is_err());
     }
 }

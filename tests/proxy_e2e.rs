@@ -289,12 +289,14 @@ async fn proxy_e2e_routes_adjacent_json_violation_through_correction_agent() {
         .mock_async(|when, then| {
             when.method(POST)
                 .path("/v1/chat/completions")
-                .body_contains("corrected_json");
+                .body_contains("possible")
+                .body_contains("confidence")
+                .body_contains("tool_calls");
             then.status(200).json_body(chat_response(
                 "qwen/qwen3.5-9b",
                 json!({
                     "role": "assistant",
-                    "content": "[[ ## corrected_json ## ]]\n{\"possible\":true,\"confidence\":0.95,\"explanation\":\"recovered adjacent JSON tool calls\",\"content\":null,\"tool_calls\":[{\"name\":\"read\",\"arguments\":{\"path\":\"packages/ai/README.md\"}},{\"name\":\"read\",\"arguments\":{\"path\":\"packages/agent/README.md\"}}]}\n[[ ## completed ## ]]"
+                    "content": "[[ ## possible ## ]]\ntrue\n\n[[ ## confidence ## ]]\n0.95\n\n[[ ## explanation ## ]]\nrecovered adjacent JSON tool calls\n\n[[ ## content ## ]]\n\n[[ ## tool_calls ## ]]\n[{\"name\":\"read\",\"arguments\":{\"path\":\"packages/ai/README.md\"}},{\"name\":\"read\",\"arguments\":{\"path\":\"packages/agent/README.md\"}}]\n\n[[ ## completed ## ]]"
                 }),
                 "stop",
             ));
@@ -374,13 +376,14 @@ async fn proxy_e2e_routes_dsrs_contract_violation_through_correction_agent() {
         .mock_async(|when, then| {
             when.method(POST)
                 .path("/v1/chat/completions")
-                .body_contains("corrected_json")
+                .body_contains("possible")
+                .body_contains("tool_calls")
                 .body_contains("dsrs_content_outside_tagged_fields");
             then.status(200).json_body(chat_response(
                 "qwen/qwen3.5-9b",
                 json!({
                     "role": "assistant",
-                    "content": "[[ ## corrected_json ## ]]\n{\"possible\":true,\"confidence\":0.96,\"explanation\":\"recovered malformed DSRs contract output\",\"content\":null,\"tool_calls\":[{\"name\":\"read\",\"arguments\":{\"path\":\"packages/ai/README.md\"}}]}\n[[ ## completed ## ]]"
+                    "content": "[[ ## possible ## ]]\ntrue\n\n[[ ## confidence ## ]]\n0.96\n\n[[ ## explanation ## ]]\nrecovered malformed DSRs contract output\n\n[[ ## content ## ]]\n\n[[ ## tool_calls ## ]]\n[{\"name\":\"read\",\"arguments\":{\"path\":\"packages/ai/README.md\"}}]\n\n[[ ## completed ## ]]"
                 }),
                 "stop",
             ));
