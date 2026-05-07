@@ -31,7 +31,7 @@ The current implementation already has the core pipeline needed for this design:
 | Model profiles | `src/model_profile.rs` resolves by substring against code-defined profiles |
 | Tool modes | `ToolMode::ProxyOwned` strips native upstream tools; `ToolMode::PassThrough` keeps native tools |
 | Tool formats | `ToolFormat::Dsrs` is the primary path; XML and tagged JSON renderers still exist |
-| DSRs request adapter | `src/dsrs_contract.rs` renders system/developer context, conversation history, prior assistant tool calls, tool results, tools, `tool_choice`, and `parallel_tool_calls` into DSRs fields |
+| DSRs request adapter | `src/dsrs_contract.rs` renders system/developer context, tools, `tool_choice`, `parallel_tool_calls`, and profile-selected conversation history format into DSRs-compatible prompts |
 | Streaming behavior | Upstream is forced to `stream: false`; client streaming is synthesized after repair |
 | Token controls | Client `max_tokens` and `max_completion_tokens` pass through when present and remain unset when omitted |
 | Response interpretation | `src/response_interpreter.rs` detects native tool calls, DSRs, XML, tagged JSON, markdown JSON, direct JSON, and function-like known-tool calls |
@@ -44,7 +44,7 @@ The current implementation already has the core pipeline needed for this design:
 | Optimization | `src/optimization.rs` runs GEPA against correction-agent and request-adapter prompt programs and writes profile-aware artifacts |
 | Artifact promotion | `src/promotion.rs` validates a GEPA artifact and promotes it into the matching profile config field |
 
-The first configuration slice is implemented. `ProxyConfig` can now load TOML, JSON, or JSON5 files from `--config` / `MCP_CONFIG_PATH`; configured profiles override built-ins; profile revision/source/artifact metadata is written to traces; request-adapter and correction-agent instruction artifacts are loaded at startup; and correction-agent GEPA reports include artifact metadata.
+The first configuration slice is implemented. `ProxyConfig` can now load TOML, JSON, or JSON5 files from `--config` / `MCP_CONFIG_PATH`; configured profiles override built-ins; profile revision/source/history-format/artifact metadata is written to traces; request-adapter and correction-agent instruction artifacts are loaded at startup; and GEPA reports include profile, revision, artifact, and request-adapter history-format metadata.
 
 The remaining limitation is that not every planned per-model knob is exposed yet. Tool mode, tool format, model matching, profile guidance, correction model, correction passes, and prompt artifacts are configurable. Parser strictness, correction trigger policy, provider identity, and retry strategy still live mostly in shared code and coarse global config.
 
@@ -108,6 +108,7 @@ profiles:
     request_adapter:
       tool_mode: proxy_owned
       tool_format: dsrs
+      dsrs_history_format: append_only
       signature: openai_tool_use_contract/v1
       native_tools: strip
       instruction_artifact: builtins/default-dsrs-tool-instruction.txt
@@ -226,13 +227,18 @@ Configurable fields should include:
 - DSRs signature version
 - profile guidance artifact
 - examples or demonstrations
-- conversation-history rendering policy
-- tool-result rendering policy
+- conversation-history rendering policy through `dsrs_history_format`
+- tool-result rendering policy tied to the selected history format
 - parallel-tool instruction policy
 - stream policy
 - token-limit policy
 
 The token-limit policy should preserve caller intent: pass through limits that the client set, and leave them unset if the client did not set them.
+
+Implemented DSRs history formats:
+
+- `append_only`: default. Runtime context is sent first, then the original conversation is appended as chat messages. User turns remain normal user messages, prior assistant turns are rendered as DSRs `content` / `tool_calls` outputs, and tool results are rendered as observed tool-result messages.
+- `regenerated_context`: legacy format. The whole non-system conversation is regenerated into one serialized `conversation` field with `assistant_tool_calls` and tool-result text. This remains useful for models that respond better to a single compact transcript.
 
 ### Response Interpreter
 
@@ -298,6 +304,7 @@ Each artifact should record:
 - artifact ID
 - target model or model family
 - profile ID and revision it was trained against
+- request-adapter history format, when the artifact tunes request-adapter guidance
 - signature name and version
 - dataset path or dataset ID
 - optimizer model
@@ -310,7 +317,7 @@ Request-adapter prompts and correction-agent prompts should be optimized separat
 
 For example, a model that emits a valid DSRs envelope with empty `content` and `[]` tool calls has failed at the request-adapter prompt layer, not the correction-agent layer. That trace belongs in a model/profile-specific request-adapter dataset so GEPA can improve the profile guidance, while runtime policy should still route the empty response through correction or a future retry path.
 
-Promotion is now explicit rather than automatic. The optimizer writes JSON artifacts for review; `promote-artifact` then validates `artifact_type`, `profile`, and layer metadata, updates the appropriate profile config field, and increments the profile revision. That same command works for request-adapter artifacts and correction-agent artifacts, so every profile can follow the same dataset -> GEPA -> inspect -> promote loop.
+Promotion is now explicit rather than automatic. The optimizer writes JSON artifacts for review; `promote-artifact` then validates `artifact_type`, `profile`, and layer metadata, updates the appropriate profile config field, carries `dsrs_history_format` from request-adapter artifacts into the profile config, and increments the profile revision. That same command works for request-adapter artifacts and correction-agent artifacts, so every profile can follow the same dataset -> GEPA -> inspect -> promote loop. Formatter-comparison GEPA outputs are ignored by default until a specific artifact is reviewed and promoted.
 
 ### Traces and Datasets
 
@@ -329,6 +336,8 @@ Every trace should include enough profile metadata to explain why the proxy beha
 - correction-agent raw output and accepted state
 
 Dataset export should support filtering by model, profile, failure kind, repair action, and correction-agent result. That makes it practical to build model-specific GEPA datasets instead of mixing unrelated model behavior.
+
+The request-adapter dataset path now has its own trace-faithful exporter. `export-request-adapter-dataset` can select traces by `--trace-id`, model/profile, failure kind, repair action, or correction result. Rows preserve the original OpenAI request JSON from the trace, so GEPA can rehydrate the exact messages, tools, tool choice, parallel-tool setting, profile metadata, adapted request metadata, and observed upstream output. Labels stay explicit through `--expected-output-json`, `--expected-output-path`, or `--use-final-response`; unlabeled rows require `--allow-unlabeled` and should be treated as triage data, not optimization data.
 
 ## Implementation Plan
 
@@ -422,13 +431,13 @@ Status: partially implemented. Eval reports now include model/profile/revision/a
 
 After correction-agent artifact loading works, add artifact loading for request-adapter profile guidance. Keep the DSRs signature stable, and let artifacts tune wording, examples, and profile guidance.
 
-Status: artifact loading is implemented through `request_adapter_artifact`. A dedicated request-adapter GEPA optimizer is now available through `optimize-request-adapter-prompt`; `datasets/request-adapter/gemma-dsrs-conservative.jsonl` and `datasets/request-adapter/gemma-dsrs-conservative-gepa.json` are the first Gemma-specific prompt-adapter dataset and artifact.
+Status: artifact loading is implemented through `request_adapter_artifact`. A dedicated request-adapter GEPA optimizer is now available through `optimize-request-adapter-prompt`; it evaluates candidate profile guidance by rendering the real runtime DSRs request format selected by `--dsrs-history-format`. `export-request-adapter-dataset` converts trace IDs into trace-faithful request-adapter rows with explicit labels. `datasets/request-adapter/gemma-dsrs-conservative-trace-faithful.jsonl` is the first exact Gemma-specific prompt-adapter dataset. Separate append-only and regenerated-context GEPA artifacts can be generated for comparison, but trial outputs should stay ignored unless promoted.
 
 ### Step 8: Add explicit artifact promotion
 
 GEPA artifacts should not silently change runtime behavior. Promotion should be a deliberate command that can be inspected, reviewed, committed, reverted, and reproduced.
 
-Status: implemented through `promote-artifact`. The command supports request-adapter and correction-agent GEPA artifacts, preserves existing profile model patterns unless `--model-pattern` is supplied, records the previous and new artifact reference in its JSON report, and supports `--dry-run`.
+Status: implemented through `promote-artifact`. The command supports request-adapter and correction-agent GEPA artifacts, preserves existing profile model patterns unless `--model-pattern` is supplied, records the previous and new artifact reference in its JSON report, carries request-adapter `dsrs_history_format` into config, and supports `--dry-run`.
 
 ## Guardrails
 

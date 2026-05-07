@@ -234,7 +234,7 @@ fn default_correction_trace_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model_profile::{ToolFormat, ToolMode};
+    use crate::model_profile::{DsrsHistoryFormat, ToolFormat, ToolMode};
 
     #[test]
     fn parses_partial_toml_config_with_defaults() {
@@ -253,6 +253,10 @@ mod tests {
         assert_eq!(config.model_profiles.len(), 1);
         assert_eq!(config.model_profiles[0].tool_mode, ToolMode::ProxyOwned);
         assert_eq!(config.model_profiles[0].tool_format, ToolFormat::Dsrs);
+        assert_eq!(
+            config.model_profiles[0].dsrs_history_format,
+            DsrsHistoryFormat::AppendOnly
+        );
         assert!(config.model_profiles[0]
             .tool_instruction
             .contains("Tool calls are an application contract"));
@@ -283,6 +287,7 @@ mod tests {
                 name = "artifact-profile"
                 model_patterns = ["artifact-model"]
                 revision = 3
+                dsrs_history_format = "regenerated_context"
                 request_adapter_artifact = "request.json"
                 correction_agent_artifact = "correction.json"
             "#,
@@ -295,6 +300,10 @@ mod tests {
 
         assert_eq!(profile.source, "config");
         assert_eq!(profile.revision, 3);
+        assert_eq!(
+            profile.dsrs_history_format,
+            DsrsHistoryFormat::RegeneratedContext
+        );
         assert_eq!(profile.tool_instruction, "REQUEST ARTIFACT INSTRUCTION");
         assert_eq!(
             profile.correction_instruction.as_deref(),

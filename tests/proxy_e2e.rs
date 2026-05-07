@@ -291,11 +291,11 @@ async fn proxy_e2e_translates_multiturn_tool_history_into_dsrs_context() {
 
     assert!(body.contains("proxy for correcting model responses"));
     assert!(
-        trace.contains("assistant_tool_calls"),
-        "trace did not include translated assistant tool history: {trace}"
+        trace.contains("[[ ## tool_calls ## ]]"),
+        "trace did not include DSRs assistant tool history: {trace}"
     );
     assert!(trace.contains("\\\"name\\\": \\\"read\\\""));
-    assert!(trace.contains("role: tool"));
+    assert!(trace.contains("[[ ## tool_result ## ]]"));
     assert!(trace.contains("A proxy for correcting model responses."));
     assert!(trace.contains("\"summary\""));
 }

@@ -1,3 +1,5 @@
+use std::{fmt, str::FromStr};
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -13,6 +15,38 @@ pub enum ToolFormat {
     Dsrs,
     Xml,
     TaggedJson,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DsrsHistoryFormat {
+    AppendOnly,
+    RegeneratedContext,
+}
+
+impl fmt::Display for DsrsHistoryFormat {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DsrsHistoryFormat::AppendOnly => formatter.write_str("append_only"),
+            DsrsHistoryFormat::RegeneratedContext => formatter.write_str("regenerated_context"),
+        }
+    }
+}
+
+impl FromStr for DsrsHistoryFormat {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "append_only" | "append-only" | "appendonly" => Ok(DsrsHistoryFormat::AppendOnly),
+            "regenerated_context" | "regenerated-context" | "regeneratedcontext" | "legacy" => {
+                Ok(DsrsHistoryFormat::RegeneratedContext)
+            }
+            other => Err(format!(
+                "unsupported DSRs history format {other:?}; expected append_only or regenerated_context"
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,6 +68,8 @@ pub struct ModelProfile {
     pub tool_mode: ToolMode,
     #[serde(default = "default_tool_format")]
     pub tool_format: ToolFormat,
+    #[serde(default = "default_dsrs_history_format")]
+    pub dsrs_history_format: DsrsHistoryFormat,
     #[serde(default)]
     pub correction_model: Option<String>,
     #[serde(default)]
@@ -51,6 +87,8 @@ pub struct ProfileMetadata {
     pub profile_id: String,
     pub profile_revision: u32,
     pub profile_source: String,
+    #[serde(default = "default_dsrs_history_format")]
+    pub dsrs_history_format: DsrsHistoryFormat,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_adapter_artifact: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -69,6 +107,7 @@ impl ModelProfile {
             correction_instruction: None,
             tool_mode: ToolMode::ProxyOwned,
             tool_format: ToolFormat::Dsrs,
+            dsrs_history_format: default_dsrs_history_format(),
             correction_model: None,
             judge_model: None,
             max_correction_passes: 1,
@@ -88,6 +127,7 @@ impl ModelProfile {
             correction_instruction: None,
             tool_mode: ToolMode::ProxyOwned,
             tool_format: ToolFormat::Dsrs,
+            dsrs_history_format: default_dsrs_history_format(),
             correction_model: None,
             judge_model: None,
             max_correction_passes: 1,
@@ -107,6 +147,7 @@ impl ModelProfile {
             correction_instruction: None,
             tool_mode: ToolMode::ProxyOwned,
             tool_format: ToolFormat::Dsrs,
+            dsrs_history_format: default_dsrs_history_format(),
             correction_model: None,
             judge_model: None,
             max_correction_passes: 1,
@@ -129,6 +170,7 @@ impl ModelProfile {
             correction_instruction: None,
             tool_mode: ToolMode::ProxyOwned,
             tool_format: ToolFormat::Dsrs,
+            dsrs_history_format: default_dsrs_history_format(),
             correction_model: None,
             judge_model: None,
             max_correction_passes: 1,
@@ -148,6 +190,7 @@ impl ModelProfile {
             correction_instruction: None,
             tool_mode: ToolMode::ProxyOwned,
             tool_format: ToolFormat::Dsrs,
+            dsrs_history_format: default_dsrs_history_format(),
             correction_model: None,
             judge_model: None,
             max_correction_passes: 1,
@@ -167,6 +210,7 @@ impl ModelProfile {
             correction_instruction: None,
             tool_mode: ToolMode::ProxyOwned,
             tool_format: ToolFormat::Dsrs,
+            dsrs_history_format: default_dsrs_history_format(),
             correction_model: None,
             judge_model: None,
             max_correction_passes: 1,
@@ -189,6 +233,7 @@ impl ModelProfile {
             correction_instruction: None,
             tool_mode: ToolMode::PassThrough,
             tool_format: ToolFormat::TaggedJson,
+            dsrs_history_format: default_dsrs_history_format(),
             correction_model: None,
             judge_model: None,
             max_correction_passes: 1,
@@ -202,6 +247,7 @@ impl ModelProfile {
             profile_id: self.name.clone(),
             profile_revision: self.revision,
             profile_source: self.source.clone(),
+            dsrs_history_format: self.dsrs_history_format,
             request_adapter_artifact: self.request_adapter_artifact.clone(),
             correction_agent_artifact: self.correction_agent_artifact.clone(),
         }
@@ -262,6 +308,10 @@ fn default_tool_format() -> ToolFormat {
     ToolFormat::Dsrs
 }
 
+fn default_dsrs_history_format() -> DsrsHistoryFormat {
+    DsrsHistoryFormat::AppendOnly
+}
+
 fn default_max_correction_passes() -> usize {
     1
 }
@@ -307,6 +357,7 @@ mod tests {
         assert_eq!(profile.name, "balanced-default");
         assert_eq!(profile.tool_mode, ToolMode::ProxyOwned);
         assert_eq!(profile.tool_format, ToolFormat::Dsrs);
+        assert_eq!(profile.dsrs_history_format, DsrsHistoryFormat::AppendOnly);
         assert_eq!(profile.source, "builtin");
     }
 
@@ -323,6 +374,7 @@ mod tests {
         assert_eq!(metadata.profile_id, "qwen-dsrs");
         assert_eq!(metadata.profile_revision, 7);
         assert_eq!(metadata.profile_source, "config");
+        assert_eq!(metadata.dsrs_history_format, DsrsHistoryFormat::AppendOnly);
         assert_eq!(
             metadata.request_adapter_artifact.as_deref(),
             Some("profiles/qwen/request.json")

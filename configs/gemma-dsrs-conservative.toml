@@ -1,9 +1,10 @@
 [[model_profiles]]
 name = "gemma-dsrs-conservative"
 model_patterns = ["google/gemma-4-26b-a4b-it"]
-revision = 2
+revision = 3
 request_adapter_artifact = "../datasets/request-adapter/gemma-dsrs-conservative-gepa.json"
 tool_mode = "proxy_owned"
 tool_format = "dsrs"
+dsrs_history_format = "append_only"
 max_correction_passes = 1
 supports_parallel_tool_calls = false

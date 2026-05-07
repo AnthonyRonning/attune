@@ -5,6 +5,9 @@
 !/datasets/request-adapter/
 !/datasets/request-adapter/*.json
 !/datasets/request-adapter/*.jsonl
+/datasets/request-adapter/*-append-only-gepa.json
+/datasets/request-adapter/*-regenerated-context-gepa.json
+/datasets/request-adapter/*-trace-faithful-*-gepa.json
 /eval/*.local.jsonl
 *.log
 *.env

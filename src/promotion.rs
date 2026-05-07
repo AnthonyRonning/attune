@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use toml_edit::{value, Array, ArrayOfTables, DocumentMut, Item, Table};
 
+use crate::model_profile::DsrsHistoryFormat;
 use crate::optimization::GepaOptimizationReport;
 
 #[derive(Debug, Clone)]
@@ -33,6 +34,10 @@ pub struct ArtifactPromotionReport {
     pub new_revision: u32,
     pub previous_artifact: Option<String>,
     pub new_artifact: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_dsrs_history_format: Option<DsrsHistoryFormat>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_dsrs_history_format: Option<DsrsHistoryFormat>,
     pub created_profile: bool,
     pub dry_run: bool,
 }
@@ -84,6 +89,7 @@ pub async fn promote_artifact(config: ArtifactPromotionConfig) -> Result<Artifac
         artifact.target_model.as_deref(),
         promoted_field,
         &artifact_reference,
+        artifact.dsrs_history_format,
     )?;
 
     if !config.dry_run {
@@ -111,6 +117,8 @@ pub async fn promote_artifact(config: ArtifactPromotionConfig) -> Result<Artifac
         new_revision: outcome.new_revision,
         previous_artifact: outcome.previous_artifact,
         new_artifact,
+        previous_dsrs_history_format: outcome.previous_dsrs_history_format,
+        new_dsrs_history_format: outcome.new_dsrs_history_format,
         created_profile: outcome.created_profile,
         dry_run: config.dry_run,
     })
@@ -141,6 +149,7 @@ fn promote_profile_in_document(
     fallback_target_model: Option<&str>,
     promoted_field: &str,
     artifact_reference: &str,
+    artifact_history_format: Option<DsrsHistoryFormat>,
 ) -> Result<PromotionOutcome> {
     ensure_profiles_array(document)?;
     let profiles = document["model_profiles"]
@@ -165,6 +174,8 @@ fn promote_profile_in_document(
 
     let previous_revision = table_u32(profile, "revision");
     let previous_artifact = table_string(profile, promoted_field).map(str::to_string);
+    let previous_dsrs_history_format =
+        table_string(profile, "dsrs_history_format").and_then(|value| value.parse().ok());
     let model_patterns = selected_model_patterns(
         profile,
         requested_model_patterns,
@@ -176,11 +187,23 @@ fn promote_profile_in_document(
     profile.insert("model_patterns", value(string_array(&model_patterns)));
     profile.insert("revision", value(i64::from(new_revision)));
     profile.insert(promoted_field, value(artifact_reference));
+    let new_dsrs_history_format = if promoted_field == "request_adapter_artifact" {
+        if let Some(history_format) = artifact_history_format {
+            profile.insert("dsrs_history_format", value(history_format.to_string()));
+            Some(history_format)
+        } else {
+            previous_dsrs_history_format
+        }
+    } else {
+        previous_dsrs_history_format
+    };
 
     Ok(PromotionOutcome {
         previous_revision,
         new_revision,
         previous_artifact,
+        previous_dsrs_history_format,
+        new_dsrs_history_format,
         model_patterns,
         created_profile,
     })
@@ -191,6 +214,8 @@ struct PromotionOutcome {
     previous_revision: Option<u32>,
     new_revision: u32,
     previous_artifact: Option<String>,
+    previous_dsrs_history_format: Option<DsrsHistoryFormat>,
+    new_dsrs_history_format: Option<DsrsHistoryFormat>,
     model_patterns: Vec<String>,
     created_profile: bool,
 }
@@ -344,6 +369,8 @@ request_adapter_artifact = "../datasets/old.json"
                 "signature": "openai_tool_use_contract_profile_guidance/v1",
                 "target_model": "google/gemma-4-26b-a4b-it",
                 "profile": "gemma-dsrs-conservative",
+                "profile_revision": 3,
+                "dsrs_history_format": "append_only",
                 "optimizer_model": "google/gemma-4-26b-a4b-it",
                 "created_at": "2026-05-07T00:00:00Z",
                 "examples_loaded": 2,
@@ -373,6 +400,10 @@ request_adapter_artifact = "../datasets/old.json"
         assert_eq!(report.previous_revision, Some(2));
         assert_eq!(report.new_revision, 3);
         assert_eq!(
+            report.new_dsrs_history_format,
+            Some(DsrsHistoryFormat::AppendOnly)
+        );
+        assert_eq!(
             report.previous_artifact.as_deref(),
             Some("../datasets/old.json")
         );
@@ -380,6 +411,7 @@ request_adapter_artifact = "../datasets/old.json"
         assert_eq!(report.model_patterns, vec!["gemma", "gemma-4"]);
         let config = tokio::fs::read_to_string(config_path).await.unwrap();
         assert!(config.contains("revision = 3"));
+        assert!(config.contains("dsrs_history_format = \"append_only\""));
         assert!(config.contains("request_adapter_artifact"));
         assert!(config.contains("../datasets/gemma-request.json"));
     }

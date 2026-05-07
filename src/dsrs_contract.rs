@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::{
-    model_profile::ModelProfile,
+    model_profile::{DsrsHistoryFormat, ModelProfile},
     normalizer::NormalizedRequest,
     openai::ChatMessage,
     response_interpreter::{
@@ -69,6 +69,18 @@ pub fn format_tool_contract(
     normalized: &NormalizedRequest,
     profile: &ModelProfile,
 ) -> Result<FormattedDsrsContract> {
+    match profile.dsrs_history_format {
+        DsrsHistoryFormat::AppendOnly => format_tool_contract_append_only(normalized, profile),
+        DsrsHistoryFormat::RegeneratedContext => {
+            format_tool_contract_regenerated_context(normalized, profile)
+        }
+    }
+}
+
+fn format_tool_contract_regenerated_context(
+    normalized: &NormalizedRequest,
+    profile: &ModelProfile,
+) -> Result<FormattedDsrsContract> {
     let adapter = ChatAdapter;
     let signature = OpenAiToolUseContract::new();
     let (system_messages, conversation_messages): (Vec<_>, Vec<_>) = normalized
@@ -114,6 +126,88 @@ pub fn format_tool_contract(
         messages,
         instruction,
     })
+}
+
+fn format_tool_contract_append_only(
+    normalized: &NormalizedRequest,
+    profile: &ModelProfile,
+) -> Result<FormattedDsrsContract> {
+    let (system_messages, conversation_messages): (Vec<_>, Vec<_>) = normalized
+        .messages
+        .iter()
+        .cloned()
+        .partition(|message| message.role == "system" || message.role == "developer");
+    let system_context = render_system_context(&system_messages)?;
+    let available_tools = serde_json::to_string_pretty(&normalized.tools)?;
+    let tool_choice = normalized
+        .tool_choice
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()?
+        .unwrap_or_else(|| "auto".to_string());
+    let instruction = dsrs_instruction(
+        profile,
+        &system_context,
+        "Append-only conversation follows as chat messages.",
+        &available_tools,
+        &tool_choice,
+        normalized.parallel_tool_calls,
+    )?;
+
+    let mut messages = vec![
+        ChatMessage::new("system", instruction.clone()),
+        ChatMessage::new(
+            "user",
+            render_append_only_runtime_context(
+                profile,
+                &system_context,
+                &available_tools,
+                &tool_choice,
+                normalized.parallel_tool_calls,
+            )?,
+        ),
+    ];
+    for message in &conversation_messages {
+        if let Some(rendered) = render_append_only_conversation_message(message)? {
+            messages.push(rendered);
+        }
+    }
+
+    Ok(FormattedDsrsContract {
+        messages,
+        instruction,
+    })
+}
+
+fn dsrs_instruction(
+    profile: &ModelProfile,
+    system_context: &str,
+    conversation: &str,
+    available_tools: &str,
+    tool_choice: &str,
+    parallel_tool_calls: bool,
+) -> Result<String> {
+    let adapter = ChatAdapter;
+    let signature = OpenAiToolUseContract::new();
+    let chat = adapter.format(
+        &signature,
+        example! {
+            "profile_guidance": "input" => profile.tool_instruction.clone(),
+            "system_context": "input" => system_context.to_string(),
+            "conversation": "input" => conversation.to_string(),
+            "available_tools": "input" => available_tools.to_string(),
+            "tool_choice": "input" => tool_choice.to_string(),
+            "parallel_tool_calls": "input" => parallel_tool_calls,
+        },
+    );
+    Ok(chat
+        .messages
+        .into_iter()
+        .find_map(|message| match message {
+            Message::System { content } => Some(content),
+            _ => None,
+        })
+        .unwrap_or_default())
 }
 
 pub fn parse_tool_contract_response(content: &str) -> Option<ParsedDsrsContract> {
@@ -671,6 +765,126 @@ fn render_conversation(messages: &[ChatMessage]) -> Result<String> {
     Ok(out.trim_end().to_string())
 }
 
+fn render_append_only_runtime_context(
+    profile: &ModelProfile,
+    system_context: &str,
+    available_tools: &str,
+    tool_choice: &str,
+    parallel_tool_calls: bool,
+) -> Result<String> {
+    let mut out = String::new();
+    writeln!(&mut out, "[[ ## profile_guidance ## ]]")?;
+    writeln!(&mut out, "{}", profile.tool_instruction)?;
+    writeln!(&mut out)?;
+    writeln!(&mut out, "[[ ## system_context ## ]]")?;
+    writeln!(&mut out, "{system_context}")?;
+    writeln!(&mut out)?;
+    writeln!(&mut out, "[[ ## conversation ## ]]")?;
+    writeln!(
+        &mut out,
+        "Append-only conversation follows as chat messages."
+    )?;
+    writeln!(&mut out)?;
+    writeln!(&mut out, "[[ ## available_tools ## ]]")?;
+    writeln!(&mut out, "{available_tools}")?;
+    writeln!(&mut out)?;
+    writeln!(&mut out, "[[ ## tool_choice ## ]]")?;
+    writeln!(&mut out, "{tool_choice}")?;
+    writeln!(&mut out)?;
+    writeln!(&mut out, "[[ ## parallel_tool_calls ## ]]")?;
+    writeln!(&mut out, "{parallel_tool_calls}")?;
+    writeln!(&mut out)?;
+    writeln!(
+        &mut out,
+        "The remaining chat messages are append-only conversation history. Prior assistant messages use the same DSRs content/tool_calls output format you must use now. Tool-result messages may use a tool_result field marker and are observations, not an output field you should emit."
+    )?;
+    Ok(out.trim_end().to_string())
+}
+
+fn render_append_only_conversation_message(message: &ChatMessage) -> Result<Option<ChatMessage>> {
+    match message.role.as_str() {
+        "user" => Ok(Some(render_append_only_user_message(message))),
+        "assistant" => Ok(Some(ChatMessage::new(
+            "assistant",
+            render_assistant_as_dsrs_history(message)?,
+        ))),
+        "tool" => Ok(Some(ChatMessage::new(
+            "user",
+            render_tool_result_as_dsrs_history(message)?,
+        ))),
+        _ => Ok(Some(ChatMessage::new(
+            "user",
+            render_observed_message_as_history(message)?,
+        ))),
+    }
+}
+
+fn render_append_only_user_message(message: &ChatMessage) -> ChatMessage {
+    ChatMessage {
+        role: "user".to_string(),
+        content: message.content.clone(),
+        name: message.name.clone(),
+        extra: message.extra.clone(),
+        ..ChatMessage::default()
+    }
+}
+
+fn render_assistant_as_dsrs_history(message: &ChatMessage) -> Result<String> {
+    let mut out = String::new();
+    writeln!(&mut out, "[[ ## content ## ]]")?;
+    writeln!(&mut out, "{}", render_message_content(message)?)?;
+    writeln!(&mut out, "[[ ## tool_calls ## ]]")?;
+    writeln!(
+        &mut out,
+        "{}",
+        serde_json::to_string_pretty(&render_tool_calls_for_dsrs_history(message)?)?
+    )?;
+    writeln!(&mut out, "[[ ## completed ## ]]")?;
+    Ok(out.trim_end().to_string())
+}
+
+fn render_tool_calls_for_dsrs_history(message: &ChatMessage) -> Result<Vec<Value>> {
+    let Some(tool_calls) = &message.tool_calls else {
+        return Ok(Vec::new());
+    };
+
+    tool_calls
+        .iter()
+        .map(|call| {
+            Ok(json!({
+                "name": call.function.name,
+                "arguments": parse_jsonish(&call.function.arguments)
+                    .unwrap_or_else(|| Value::String(call.function.arguments.clone()))
+            }))
+        })
+        .collect()
+}
+
+fn render_tool_result_as_dsrs_history(message: &ChatMessage) -> Result<String> {
+    let mut out = String::new();
+    writeln!(&mut out, "[[ ## tool_result ## ]]")?;
+    if let Some(tool_call_id) = &message.tool_call_id {
+        writeln!(&mut out, "tool_call_id: {tool_call_id}")?;
+    }
+    writeln!(&mut out, "content:")?;
+    writeln!(&mut out, "{}", render_message_content(message)?)?;
+    writeln!(&mut out, "[[ ## completed ## ]]")?;
+    Ok(out.trim_end().to_string())
+}
+
+fn render_observed_message_as_history(message: &ChatMessage) -> Result<String> {
+    let mut out = String::new();
+    writeln!(&mut out, "[[ ## observed_message ## ]]")?;
+    writeln!(&mut out, "role: {}", message.role)?;
+    if let Some(name) = &message.name {
+        writeln!(&mut out, "name: {name}")?;
+    }
+    writeln!(&mut out, "content:")?;
+    writeln!(&mut out, "{}", render_message_content(message)?)?;
+    writeln!(&mut out, "[[ ## completed ## ]]")?;
+    Ok(out.trim_end().to_string())
+}
+
 fn render_message_content(message: &ChatMessage) -> Result<String> {
     match &message.content {
         Some(Value::String(text)) => Ok(text.clone()),
@@ -769,6 +983,57 @@ mod tests {
         ];
 
         let formatted = format_tool_contract(&request, &ModelProfile::qwen()).unwrap();
+        let assistant_message = formatted
+            .messages
+            .iter()
+            .find(|message| message.role == "assistant")
+            .and_then(ChatMessage::content_text)
+            .unwrap();
+        let tool_result_message = formatted
+            .messages
+            .iter()
+            .find(|message| {
+                message.role == "user"
+                    && message
+                        .content_text()
+                        .is_some_and(|content| content.contains("[[ ## tool_result ## ]]"))
+            })
+            .and_then(ChatMessage::content_text)
+            .unwrap();
+
+        assert!(assistant_message.contains("[[ ## content ## ]]"));
+        assert!(assistant_message.contains("[[ ## tool_calls ## ]]"));
+        assert!(assistant_message.contains("\"name\": \"read\""));
+        assert!(assistant_message.contains("\"path\": \"README.md\""));
+        assert!(!assistant_message.contains("assistant_tool_calls"));
+        assert!(tool_result_message.contains("tool_call_id:"));
+        assert!(tool_result_message.contains("README contents"));
+    }
+
+    #[test]
+    fn regenerated_context_history_format_preserves_legacy_transcript() {
+        let mut assistant = ChatMessage::new("assistant", "");
+        assistant.tool_calls = Some(vec![OpenAiToolCall::function(
+            "read",
+            r#"{"path":"README.md"}"#,
+        )]);
+        let mut tool = ChatMessage::new("tool", "README contents");
+        tool.tool_call_id = assistant
+            .tool_calls
+            .as_ref()
+            .map(|calls| calls[0].id.clone());
+        let mut request = normalized_request();
+        request.messages = vec![
+            ChatMessage::new("system", "Do not repeat this."),
+            ChatMessage::new("user", "read README"),
+            assistant,
+            tool,
+            ChatMessage::new("user", "summarize it"),
+        ];
+        let mut profile = ModelProfile::qwen();
+        profile.dsrs_history_format = DsrsHistoryFormat::RegeneratedContext;
+
+        let formatted = format_tool_contract(&request, &profile).unwrap();
         let user_message = formatted.messages[1].content_text().unwrap();
 
         assert!(user_message.contains("assistant_tool_calls"));

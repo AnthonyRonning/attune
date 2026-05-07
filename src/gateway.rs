@@ -219,6 +219,7 @@ async fn chat_completions(
         correction_agent_artifact = ?profile.correction_agent_artifact,
         tool_mode = ?profile.tool_mode,
         tool_format = ?profile.tool_format,
+        dsrs_history_format = ?profile.dsrs_history_format,
         supports_parallel_tool_calls = profile.supports_parallel_tool_calls,
         max_correction_passes = profile.max_correction_passes,
         "model profile selected"

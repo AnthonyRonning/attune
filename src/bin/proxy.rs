@@ -4,9 +4,13 @@ use anyhow::Context;
 use clap::{Parser, Subcommand};
 use model_correction_proxy::{
     config::ProxyConfig,
-    dataset::{export_dataset, DatasetExportConfig, DatasetExportFilter},
+    dataset::{
+        export_dataset, export_request_adapter_dataset, DatasetExportConfig, DatasetExportFilter,
+        RequestAdapterDatasetExportConfig,
+    },
     eval::{run_regression_suite, RegressionConfig, RegressionFilter},
     gateway::Gateway,
+    model_profile::DsrsHistoryFormat,
     optimization::{
         optimize_correction_prompt, optimize_request_adapter_prompt, GepaOptimizationConfig,
     },
@@ -46,6 +50,8 @@ enum Command {
         trace_path: String,
         #[arg(long, default_value = "datasets/corrections.jsonl")]
         output_path: String,
+        #[arg(long = "trace-id")]
+        trace_ids: Vec<String>,
         #[arg(long)]
         model: Option<String>,
         #[arg(long)]
@@ -56,6 +62,40 @@ enum Command {
         repair_actions: Vec<String>,
         #[arg(long = "correction-result")]
         correction_results: Vec<String>,
+    },
+    ExportRequestAdapterDataset {
+        #[arg(long, default_value = "traces/model-correction-proxy.jsonl")]
+        trace_path: String,
+        #[arg(long, default_value = "datasets/request-adapter/request-adapter.jsonl")]
+        output_path: String,
+        #[arg(long = "trace-id")]
+        trace_ids: Vec<String>,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        profile: Option<String>,
+        #[arg(long = "failure-kind")]
+        failure_kinds: Vec<String>,
+        #[arg(long = "repair-action")]
+        repair_actions: Vec<String>,
+        #[arg(long = "correction-result")]
+        correction_results: Vec<String>,
+        #[arg(long)]
+        expected_output_json: Option<String>,
+        #[arg(long)]
+        expected_output_path: Option<String>,
+        #[arg(long)]
+        use_final_response: bool,
+        #[arg(long)]
+        allow_unlabeled: bool,
+        #[arg(long)]
+        append: bool,
+        #[arg(long)]
+        observed_failure_kind: Option<String>,
+        #[arg(long)]
+        observed_problem: Option<String>,
+        #[arg(long)]
+        prompt_goal: Option<String>,
     },
     Replay {
         #[arg(long, default_value = "traces/model-correction-proxy.jsonl")]
@@ -95,6 +135,8 @@ enum Command {
         #[arg(long)]
         profile: Option<String>,
         #[arg(long)]
+        profile_revision: Option<u32>,
+        #[arg(long)]
         artifact_id: Option<String>,
         #[arg(long, default_value_t = 3)]
         iterations: usize,
@@ -128,6 +170,10 @@ enum Command {
         target_model: Option<String>,
         #[arg(long)]
         profile: Option<String>,
+        #[arg(long)]
+        profile_revision: Option<u32>,
+        #[arg(long)]
+        dsrs_history_format: Option<DsrsHistoryFormat>,
         #[arg(long)]
         artifact_id: Option<String>,
         #[arg(long, default_value_t = 3)]
@@ -184,6 +230,7 @@ async fn main() -> anyhow::Result<()> {
         Command::ExportDataset {
             trace_path,
             output_path,
+            trace_ids,
             model,
             profile,
             failure_kinds,
@@ -194,12 +241,54 @@ async fn main() -> anyhow::Result<()> {
                 trace_path: trace_path.into(),
                 output_path: output_path.into(),
                 filter: DatasetExportFilter {
+                    trace_ids,
                     model,
                     profile,
                     failure_kinds,
                     repair_actions,
                     correction_results,
                 },
+            })
+            .await
+        }
+        Command::ExportRequestAdapterDataset {
+            trace_path,
+            output_path,
+            trace_ids,
+            model,
+            profile,
+            failure_kinds,
+            repair_actions,
+            correction_results,
+            expected_output_json,
+            expected_output_path,
+            use_final_response,
+            allow_unlabeled,
+            append,
+            observed_failure_kind,
+            observed_problem,
+            prompt_goal,
+        } => {
+            let expected_output =
+                read_optional_json_value(expected_output_json, expected_output_path).await?;
+            export_request_adapter_dataset(RequestAdapterDatasetExportConfig {
+                trace_path: trace_path.into(),
+                output_path: output_path.into(),
+                filter: DatasetExportFilter {
+                    trace_ids,
+                    model,
+                    profile,
+                    failure_kinds,
+                    repair_actions,
+                    correction_results,
+                },
+                expected_output,
+                use_final_response,
+                allow_unlabeled,
+                append,
+                observed_failure_kind,
+                observed_problem,
+                prompt_goal,
             })
             .await
         }
@@ -246,6 +335,7 @@ async fn main() -> anyhow::Result<()> {
             model,
             target_model,
             profile,
+            profile_revision,
             artifact_id,
             iterations,
             max_examples,
@@ -258,6 +348,8 @@ async fn main() -> anyhow::Result<()> {
                 model,
                 target_model,
                 profile,
+                profile_revision,
+                dsrs_history_format: None,
                 artifact_id,
                 iterations,
                 max_examples,
@@ -273,6 +365,8 @@ async fn main() -> anyhow::Result<()> {
             model,
             target_model,
             profile,
+            profile_revision,
+            dsrs_history_format,
             artifact_id,
             iterations,
             max_examples,
@@ -285,6 +379,8 @@ async fn main() -> anyhow::Result<()> {
                 model,
                 target_model,
                 profile,
+                profile_revision,
+                dsrs_history_format,
                 artifact_id,
                 iterations,
                 max_examples,
@@ -388,6 +484,29 @@ fn print_trace_summaries(summaries: &[TraceSummary]) {
             println!("  error: {error}");
         }
         println!();
+    }
+}
+
+async fn read_optional_json_value(
+    inline_json: Option<String>,
+    json_path: Option<String>,
+) -> anyhow::Result<Option<serde_json::Value>> {
+    match (inline_json, json_path) {
+        (Some(_), Some(_)) => {
+            anyhow::bail!("pass only one of --expected-output-json or --expected-output-path")
+        }
+        (Some(value), None) => serde_json::from_str(&value)
+            .map(Some)
+            .context("failed to parse --expected-output-json"),
+        (None, Some(path)) => {
+            let content = tokio::fs::read_to_string(&path)
+                .await
+                .with_context(|| format!("failed to read {path}"))?;
+            serde_json::from_str(&content)
+                .map(Some)
+                .with_context(|| format!("failed to parse {path}"))
+        }
+        (None, None) => Ok(None),
     }
 }
 

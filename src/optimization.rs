@@ -1,9 +1,9 @@
-use std::path::PathBuf;
+use std::{collections::HashMap, path::PathBuf};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use dspy_rs::{
-    configure, example, ChatAdapter, Evaluator, Example, FeedbackEvaluator, FeedbackMetric,
+    configure, example, Chat, ChatAdapter, Evaluator, Example, FeedbackEvaluator, FeedbackMetric,
     GEPAResult, Module, Optimizable, Predict, Prediction, Predictor, Signature, GEPA, LM,
 };
 use futures::FutureExt;
@@ -11,6 +11,13 @@ use indexmap::IndexMap;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+
+use crate::{
+    dsrs_contract::{format_tool_contract, parse_tool_contract_response},
+    model_profile::{DsrsHistoryFormat, ModelProfile},
+    normalizer::normalize_request,
+    openai::{ChatCompletionRequest, ChatMessage, OpenAiFunctionTool, OpenAiTool},
+};
 
 #[derive(Debug, Clone)]
 pub struct GepaOptimizationConfig {
@@ -21,6 +28,8 @@ pub struct GepaOptimizationConfig {
     pub model: String,
     pub target_model: Option<String>,
     pub profile: Option<String>,
+    pub profile_revision: Option<u32>,
+    pub dsrs_history_format: Option<DsrsHistoryFormat>,
     pub artifact_id: Option<String>,
     pub iterations: usize,
     pub max_examples: usize,
@@ -33,6 +42,10 @@ pub struct GepaOptimizationReport {
     pub signature: String,
     pub target_model: Option<String>,
     pub profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_revision: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dsrs_history_format: Option<DsrsHistoryFormat>,
     pub optimizer_model: String,
     pub created_at: DateTime<Utc>,
     pub examples_loaded: usize,
@@ -46,17 +59,30 @@ pub struct GepaOptimizationReport {
 #[Signature]
 struct RequestAdapterPromptSignature {
     /// Tool calls are an application contract. You are adapting OpenAI-compatible
-    /// tool use into DSRs output fields for a coding-agent model. Read the
-    /// serialized conversation, obey system_context without copying it, and produce
-    /// exactly one completed DSRs response. If the user asks about a project,
-    /// repository, package, docs, code, or filesystem state and the answer is not
-    /// already present in the conversation, call an available inspection tool
-    /// instead of guessing. A completed response must never be blank or placeholder
-    /// content. Empty content with [] tool_calls is invalid. Literal [], {}, null,
-    /// content_value, tool_calls_value, or completed_marker in content are invalid
-    /// answers. When using tools, leave content empty and put valid calls in
-    /// tool_calls. When no tool is needed, put a real user-facing answer in content
-    /// and set tool_calls to [].
+    /// tool use into DSRs output fields for a coding-agent model. This instruction
+    /// becomes profile_guidance inside the real runtime DSRs formatter during
+    /// optimization. Obey system_context without copying it, honor the selected
+    /// dsrs_history_format, and produce exactly one completed DSRs response. If
+    /// the user asks about a project, repository, package, docs, code, or
+    /// filesystem state and the answer is not already present in the conversation,
+    /// call an available inspection tool instead of guessing. A completed response
+    /// must never be blank or placeholder content. Empty content with [] tool_calls
+    /// is invalid. Literal [], {}, null, content_value, tool_calls_value, or
+    /// completed_marker in content are invalid answers. When using tools, leave
+    /// content empty and put valid calls in tool_calls. When no tool is needed, put
+    /// a real user-facing answer in content and set tool_calls to [].
+    #[input(desc = "Model profile name being optimized")]
+    pub profile: String,
+
+    #[input(desc = "Selected DSRs history formatter: append_only or regenerated_context")]
+    pub dsrs_history_format: String,
+
+    #[input(desc = "Exact original OpenAI chat completion request JSON when available")]
+    pub request: String,
+
+    #[input(desc = "Original OpenAI messages JSON when available")]
+    pub messages: String,
+
     #[input(desc = "Serialized system/developer instructions to obey but never repeat")]
     pub system_context: String,
 
@@ -88,18 +114,99 @@ struct RequestAdapterPromptToolCall {
 
 pub struct RequestAdapterPromptProgram {
     predictor: Predict,
+    lm: Option<LM>,
 }
 
 impl Default for RequestAdapterPromptProgram {
     fn default() -> Self {
         Self {
             predictor: Predict::new(RequestAdapterPromptSignature::new()),
+            lm: None,
         }
+    }
+}
+
+impl RequestAdapterPromptProgram {
+    fn runtime(lm: LM) -> Self {
+        Self {
+            predictor: Predict::new(RequestAdapterPromptSignature::new()),
+            lm: Some(lm),
+        }
+    }
+
+    async fn forward_runtime(&self, inputs: Example, lm: &LM) -> Result<Prediction> {
+        let mut profile = ModelProfile::default_balanced();
+        profile.name = string_input(&inputs, "profile", "request-adapter-gepa");
+        profile.revision = u32_input(&inputs, "profile_revision").unwrap_or(1);
+        profile.source = "gepa".to_string();
+        profile.tool_instruction = self.predictor.signature.instruction();
+        profile.dsrs_history_format =
+            dsrs_history_format_input(&inputs).unwrap_or(DsrsHistoryFormat::AppendOnly);
+
+        let request = chat_completion_request_from_adapter_example(&inputs)?;
+        let normalized = normalize_request(request)?;
+        let formatted = format_tool_contract(&normalized, &profile)?;
+        let mut chat = Chat::new(Vec::new());
+        for message in formatted.messages {
+            let role = match message.role.as_str() {
+                "system" | "assistant" | "user" => message.role.as_str(),
+                _ => "user",
+            };
+            chat.push(role, &message.content_text().unwrap_or_default());
+        }
+
+        let response = lm.call(chat, Vec::new()).await?;
+        let raw_output = response.output.content();
+        let parsed = parse_tool_contract_response(&raw_output);
+        let (content, tool_calls, parser_events) = match parsed {
+            Some(parsed) => {
+                let calls = parsed
+                    .tool_intents
+                    .into_iter()
+                    .map(|intent| {
+                        json!({
+                            "name": intent.name,
+                            "arguments": intent.arguments.unwrap_or_else(|| json!({}))
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                (
+                    parsed.content.unwrap_or_default(),
+                    Value::Array(normalize_tool_calls(&calls)),
+                    Value::Array(
+                        parsed
+                            .events
+                            .into_iter()
+                            .map(Value::String)
+                            .collect::<Vec<_>>(),
+                    ),
+                )
+            }
+            None => (
+                String::new(),
+                Value::Array(Vec::new()),
+                json!(["assistant output did not contain DSRs markers"]),
+            ),
+        };
+
+        Ok(Prediction::new(
+            HashMap::from([
+                ("content".to_string(), Value::String(content)),
+                ("tool_calls".to_string(), tool_calls),
+                ("raw_output".to_string(), Value::String(raw_output)),
+                ("parser_events".to_string(), parser_events),
+            ]),
+            response.usage,
+        ))
     }
 }
 
 impl Module for RequestAdapterPromptProgram {
     async fn forward(&self, inputs: Example) -> Result<Prediction> {
+        if let Some(lm) = &self.lm {
+            return self.forward_runtime(inputs, lm).await;
+        }
+
         match std::panic::AssertUnwindSafe(self.predictor.forward(inputs))
             .catch_unwind()
             .await
@@ -263,7 +370,7 @@ pub async fn optimize_correction_prompt(
         .minibatch_size(examples.len().clamp(1, 3))
         .temperature(0.7)
         .track_stats(true)
-        .maybe_prompt_model(Some(lm))
+        .maybe_prompt_model(Some(lm.clone()))
         .maybe_max_lm_calls(Some((config.iterations.max(1) * 16) + 16))
         .build();
 
@@ -289,6 +396,8 @@ pub async fn optimize_correction_prompt(
         signature: "correct_malformed_tool_response/v1".to_string(),
         target_model: config.target_model.clone(),
         profile: config.profile.clone(),
+        profile_revision: config.profile_revision,
+        dsrs_history_format: None,
         optimizer_model: config.model.clone(),
         created_at: Utc::now(),
         examples_loaded: examples.len(),
@@ -315,7 +424,12 @@ pub async fn optimize_request_adapter_prompt(
 
     let rows = read_dataset_rows(&config.dataset_path).await?;
     let rows: Vec<Value> = rows.into_iter().take(config.max_examples).collect();
-    let examples = request_adapter_rows_to_gepa_examples(&rows);
+    let examples = request_adapter_rows_to_gepa_examples_with_format(
+        &rows,
+        config.dsrs_history_format,
+        config.profile.as_deref(),
+        config.profile_revision,
+    );
     if examples.is_empty() {
         anyhow::bail!("dataset contained no request-adapter optimization examples");
     }
@@ -335,11 +449,11 @@ pub async fn optimize_request_adapter_prompt(
         .minibatch_size(examples.len().clamp(1, 3))
         .temperature(0.7)
         .track_stats(true)
-        .maybe_prompt_model(Some(lm))
+        .maybe_prompt_model(Some(lm.clone()))
         .maybe_max_lm_calls(Some((config.iterations.max(1) * 16) + 16))
         .build();
 
-    let mut program = RequestAdapterPromptProgram::default();
+    let mut program = RequestAdapterPromptProgram::runtime(lm);
     let result: GEPAResult = gepa
         .compile_with_feedback(&mut program, examples.clone())
         .await
@@ -361,6 +475,8 @@ pub async fn optimize_request_adapter_prompt(
         signature: "openai_tool_use_contract_profile_guidance/v1".to_string(),
         target_model: config.target_model.clone(),
         profile: config.profile.clone(),
+        profile_revision: config.profile_revision,
+        dsrs_history_format: config.dsrs_history_format,
         optimizer_model: config.model.clone(),
         created_at: Utc::now(),
         examples_loaded: examples.len(),
@@ -413,6 +529,15 @@ pub fn traces_to_gepa_examples(dataset_rows: &[Value]) -> Vec<Example> {
 }
 
 pub fn request_adapter_rows_to_gepa_examples(dataset_rows: &[Value]) -> Vec<Example> {
+    request_adapter_rows_to_gepa_examples_with_format(dataset_rows, None, None, None)
+}
+
+pub fn request_adapter_rows_to_gepa_examples_with_format(
+    dataset_rows: &[Value],
+    dsrs_history_format: Option<DsrsHistoryFormat>,
+    profile_override: Option<&str>,
+    profile_revision_override: Option<u32>,
+) -> Vec<Example> {
     dataset_rows
         .iter()
         .filter(|row| {
@@ -421,6 +546,28 @@ pub fn request_adapter_rows_to_gepa_examples(dataset_rows: &[Value]) -> Vec<Exam
                 .is_none_or(|kind| kind == "request_adapter_prompt_gepa/v1")
         })
         .map(|row| {
+            let history_format = dsrs_history_format
+                .or_else(|| {
+                    row.get("dsrs_history_format")
+                        .and_then(Value::as_str)
+                        .and_then(|value| value.parse().ok())
+                })
+                .unwrap_or(DsrsHistoryFormat::AppendOnly);
+            let profile = profile_override
+                .map(str::to_string)
+                .or_else(|| {
+                    row.get("profile")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
+                .unwrap_or_else(|| "request-adapter-gepa".to_string());
+            let profile_revision = profile_revision_override
+                .or_else(|| {
+                    row.get("profile_revision")
+                        .and_then(Value::as_u64)
+                        .and_then(|value| u32::try_from(value).ok())
+                })
+                .unwrap_or(1);
             let expected = row.get("expected_output").cloned().unwrap_or_else(|| {
                 json!({
                     "content": "",
@@ -429,6 +576,16 @@ pub fn request_adapter_rows_to_gepa_examples(dataset_rows: &[Value]) -> Vec<Exam
             });
             let expected_fields = expected_adapter_output_fields(&expected);
             example! {
+                "model": "input" => row
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .unwrap_or("request-adapter-gepa")
+                    .to_string(),
+                "profile": "input" => profile,
+                "profile_revision": "input" => profile_revision,
+                "dsrs_history_format": "input" => history_format.to_string(),
+                "request": "input" => stringify_field(row.get("request")),
+                "messages": "input" => stringify_field(row.get("messages")),
                 "system_context": "input" => stringify_field(row.get("system_context")),
                 "conversation": "input" => stringify_field(row.get("conversation")),
                 "available_tools": "input" => stringify_field(row.get("available_tools")),
@@ -473,6 +630,208 @@ fn stringify_field(value: Option<&Value>) -> String {
         Some(Value::String(text)) => text.clone(),
         Some(value) => serde_json::to_string(value).unwrap_or_else(|_| "null".to_string()),
         None => "null".to_string(),
+    }
+}
+
+fn string_input(example: &Example, key: &str, default: &str) -> String {
+    example
+        .get(key, Some(default))
+        .as_str()
+        .unwrap_or(default)
+        .to_string()
+}
+
+fn u32_input(example: &Example, key: &str) -> Option<u32> {
+    example
+        .get(key, None)
+        .as_u64()
+        .and_then(|value| u32::try_from(value).ok())
+}
+
+fn dsrs_history_format_input(example: &Example) -> Option<DsrsHistoryFormat> {
+    example
+        .get("dsrs_history_format", None)
+        .as_str()
+        .and_then(|value| value.parse().ok())
+}
+
+fn chat_completion_request_from_adapter_example(
+    example: &Example,
+) -> Result<ChatCompletionRequest> {
+    let request_value = parse_maybe_json_string(example.get("request", None));
+    if request_value.is_object() {
+        if let Ok(request) = serde_json::from_value::<ChatCompletionRequest>(request_value) {
+            if !request.messages.is_empty() {
+                return Ok(request);
+            }
+        }
+    }
+
+    let model = string_input(example, "model", "request-adapter-gepa");
+    let messages = request_adapter_messages(example)?;
+    let tools = request_adapter_tools(example)?;
+    let parallel_tool_calls = example
+        .get("parallel_tool_calls", None)
+        .as_bool()
+        .unwrap_or(true);
+    Ok(ChatCompletionRequest {
+        model,
+        messages,
+        tools: Some(tools),
+        tool_choice: request_adapter_tool_choice(example),
+        parallel_tool_calls: Some(parallel_tool_calls),
+        stream: Some(false),
+        temperature: None,
+        top_p: None,
+        max_tokens: None,
+        max_completion_tokens: None,
+        response_format: None,
+        extra: serde_json::Map::new(),
+    })
+}
+
+fn request_adapter_messages(example: &Example) -> Result<Vec<ChatMessage>> {
+    let messages_value = parse_maybe_json_string(example.get("messages", None));
+    if let Value::Array(_) = messages_value {
+        let messages = serde_json::from_value::<Vec<ChatMessage>>(messages_value)
+            .context("failed to parse request-adapter dataset messages")?;
+        if !messages.is_empty() {
+            return Ok(messages);
+        }
+    }
+
+    let system_context = string_input(
+        example,
+        "system_context",
+        "No system or developer messages.",
+    );
+    let conversation = string_input(
+        example,
+        "conversation",
+        "No non-system conversation messages.",
+    );
+    let mut messages = Vec::new();
+    if !system_context.trim().is_empty() && system_context.trim() != "null" {
+        messages.push(ChatMessage::new("system", system_context));
+    }
+    let conversation_messages = parse_rendered_conversation(&conversation);
+    if conversation_messages.is_empty() {
+        messages.push(ChatMessage::new("user", conversation));
+    } else {
+        messages.extend(conversation_messages);
+    }
+    Ok(messages)
+}
+
+fn parse_rendered_conversation(conversation: &str) -> Vec<ChatMessage> {
+    let trimmed = conversation.trim();
+    if trimmed.is_empty() || trimmed == "null" || trimmed == "No non-system conversation messages."
+    {
+        return Vec::new();
+    }
+
+    let mut messages = Vec::new();
+    let mut current_role: Option<String> = None;
+    let mut current_content = String::new();
+    let mut in_content = false;
+
+    for line in trimmed.lines() {
+        if line.starts_with('[') && line.contains("] role: ") {
+            if let Some(role) = current_role.take() {
+                messages.push(ChatMessage::new(
+                    role,
+                    current_content.trim_end().to_string(),
+                ));
+                current_content.clear();
+            }
+            current_role = line
+                .split_once("] role: ")
+                .map(|(_, role)| role.trim().to_string());
+            in_content = false;
+            continue;
+        }
+        if line == "content:" {
+            in_content = true;
+            continue;
+        }
+        if in_content {
+            current_content.push_str(line);
+            current_content.push('\n');
+        }
+    }
+
+    if let Some(role) = current_role {
+        messages.push(ChatMessage::new(
+            role,
+            current_content.trim_end().to_string(),
+        ));
+    }
+    messages
+}
+
+fn request_adapter_tools(example: &Example) -> Result<Vec<OpenAiTool>> {
+    let tools_value = parse_maybe_json_string(example.get("available_tools", None));
+    parse_openai_tools(tools_value)
+}
+
+fn parse_openai_tools(value: Value) -> Result<Vec<OpenAiTool>> {
+    let Value::Array(items) = value else {
+        return Ok(Vec::new());
+    };
+
+    items
+        .into_iter()
+        .map(|item| {
+            if let Ok(tool) = serde_json::from_value::<OpenAiTool>(item.clone()) {
+                return Ok(tool);
+            }
+
+            let function = item
+                .get("function")
+                .cloned()
+                .unwrap_or_else(|| item.clone());
+            let name = function
+                .get("name")
+                .and_then(Value::as_str)
+                .context("request-adapter tool was missing function.name")?;
+            let description = function
+                .get("description")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let parameters = function
+                .get("parameters")
+                .cloned()
+                .unwrap_or_else(|| json!({ "type": "object", "properties": {} }));
+
+            Ok(OpenAiTool {
+                tool_type: item
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .unwrap_or("function")
+                    .to_string(),
+                function: OpenAiFunctionTool {
+                    name: name.to_string(),
+                    description,
+                    parameters,
+                },
+            })
+        })
+        .collect()
+}
+
+fn request_adapter_tool_choice(example: &Example) -> Option<Value> {
+    let value = parse_maybe_json_string(example.get("tool_choice", None));
+    match value {
+        Value::Null => None,
+        Value::String(text) if text.trim().is_empty() || text == "auto" => None,
+        other => Some(other),
+    }
+}
+
+fn parse_maybe_json_string(value: Value) -> Value {
+    match value {
+        Value::String(text) => serde_json::from_str(&text).unwrap_or(Value::String(text)),
+        other => other,
     }
 }
 
@@ -811,7 +1170,24 @@ mod tests {
     fn converts_request_adapter_rows_to_gepa_examples() {
         let rows = vec![json!({
             "dataset_type": "request_adapter_prompt_gepa/v1",
+            "model": "google/gemma-4-26b-a4b-it",
+            "profile": "gemma-dsrs-conservative",
+            "profile_revision": 3,
+            "dsrs_history_format": "append_only",
             "system_context": "Use tools for project questions.",
+            "messages": [
+                {"role": "system", "content": "Use tools for project questions."},
+                {"role": "user", "content": "can you tell me more about this project?"}
+            ],
+            "request": {
+                "model": "google/gemma-4-26b-a4b-it",
+                "messages": [
+                    {"role": "system", "content": "Use tools for project questions."},
+                    {"role": "user", "content": "can you tell me more about this project?"}
+                ],
+                "tools": [{"type":"function","function":{"name":"read","parameters":{"type":"object"}}}],
+                "parallel_tool_calls": true
+            },
             "conversation": "[0] role: user\ncontent:\ncan you tell me more about this project?",
             "available_tools": [{"function":{"name":"read"}}],
             "tool_choice": "auto",
@@ -825,6 +1201,13 @@ mod tests {
         let examples = request_adapter_rows_to_gepa_examples(&rows);
 
         assert_eq!(examples.len(), 1);
+        assert_eq!(
+            examples[0].get("dsrs_history_format", None),
+            json!("append_only")
+        );
+        assert_eq!(examples[0].get("profile_revision", None), json!(3));
+        assert!(examples[0].get("request", None).as_str().is_some());
+        assert!(examples[0].get("messages", None).as_str().is_some());
         assert_eq!(examples[0].get("parallel_tool_calls", None), json!(true));
         assert_eq!(
             examples[0].get("tool_calls", None),
