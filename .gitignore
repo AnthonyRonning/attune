@@ -8,6 +8,7 @@
 /datasets/request-adapter/*-append-only-gepa.json
 /datasets/request-adapter/*-regenerated-context-gepa.json
 /datasets/request-adapter/*-trace-faithful-*-gepa.json
+/datasets/request-adapter/*-trace-harness-*-gepa.json
 /eval/*.local.jsonl
 /eval/trace-harness/raw/
 /eval/trace-harness/scenarios/*.local.jsonl
