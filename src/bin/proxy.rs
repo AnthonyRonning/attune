@@ -10,6 +10,7 @@ use model_correction_proxy::{
     optimization::{
         optimize_correction_prompt, optimize_request_adapter_prompt, GepaOptimizationConfig,
     },
+    promotion::{promote_artifact, ArtifactPromotionConfig},
     replay::{replay_traces, ReplayConfig},
     trace::{read_trace_records, trace_summaries, TraceSummary},
 };
@@ -134,6 +135,20 @@ enum Command {
         #[arg(long, default_value_t = 12)]
         max_examples: usize,
     },
+    PromoteArtifact {
+        #[arg(long)]
+        config_path: Option<String>,
+        #[arg(long)]
+        artifact_path: String,
+        #[arg(long)]
+        artifact_reference: Option<String>,
+        #[arg(long)]
+        profile: Option<String>,
+        #[arg(long = "model-pattern")]
+        model_patterns: Vec<String>,
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[tokio::main]
@@ -147,10 +162,11 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let cli = Cli::parse();
-    let config_path = cli.config.as_deref().map(PathBuf::from);
+    let runtime_config_path = cli.config.as_deref().map(PathBuf::from);
     match cli.command.unwrap_or(Command::Serve) {
         Command::Serve => {
-            let mut config = ProxyConfig::from_optional_path(config_path.as_deref()).await?;
+            let mut config =
+                ProxyConfig::from_optional_path(runtime_config_path.as_deref()).await?;
             if let Some(base_url) = cli.upstream_base_url {
                 config.upstream.base_url = base_url;
             }
@@ -212,7 +228,8 @@ async fn main() -> anyhow::Result<()> {
             model,
             profile,
         } => {
-            let proxy_config = ProxyConfig::from_optional_path(config_path.as_deref()).await?;
+            let proxy_config =
+                ProxyConfig::from_optional_path(runtime_config_path.as_deref()).await?;
             let report = run_regression_suite(RegressionConfig {
                 suite_path: suite_path.into(),
                 proxy_config,
@@ -271,6 +288,30 @@ async fn main() -> anyhow::Result<()> {
                 artifact_id,
                 iterations,
                 max_examples,
+            })
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(())
+        }
+        Command::PromoteArtifact {
+            config_path,
+            artifact_path,
+            artifact_reference,
+            profile,
+            model_patterns,
+            dry_run,
+        } => {
+            let config_path = config_path
+                .map(PathBuf::from)
+                .or_else(|| runtime_config_path.clone())
+                .unwrap_or_else(|| PathBuf::from("configs/model-profiles.toml"));
+            let report = promote_artifact(ArtifactPromotionConfig {
+                config_path,
+                artifact_path: artifact_path.into(),
+                artifact_reference,
+                profile,
+                model_patterns,
+                dry_run,
             })
             .await?;
             println!("{}", serde_json::to_string_pretty(&report)?);

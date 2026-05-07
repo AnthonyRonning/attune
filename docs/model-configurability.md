@@ -41,7 +41,8 @@ The current implementation already has the core pipeline needed for this design:
 | Correction traces | `src/trace.rs` writes correction-agent sidecar records with input, raw output, accepted state, confidence, explanation, content, and tool calls |
 | Dataset flow | `src/dataset.rs` exports main traces into correction datasets |
 | Replay and eval | `src/replay.rs` and `src/eval.rs` replay traces and run regression suites |
-| Optimization | `src/optimization.rs` runs GEPA against the correction-prompt program and writes an artifact, but runtime hot-loading is not implemented |
+| Optimization | `src/optimization.rs` runs GEPA against correction-agent and request-adapter prompt programs and writes profile-aware artifacts |
+| Artifact promotion | `src/promotion.rs` validates a GEPA artifact and promotes it into the matching profile config field |
 
 The first configuration slice is implemented. `ProxyConfig` can now load TOML, JSON, or JSON5 files from `--config` / `MCP_CONFIG_PATH`; configured profiles override built-ins; profile revision/source/artifact metadata is written to traces; request-adapter and correction-agent instruction artifacts are loaded at startup; and correction-agent GEPA reports include artifact metadata.
 
@@ -309,6 +310,8 @@ Request-adapter prompts and correction-agent prompts should be optimized separat
 
 For example, a model that emits a valid DSRs envelope with empty `content` and `[]` tool calls has failed at the request-adapter prompt layer, not the correction-agent layer. That trace belongs in a model/profile-specific request-adapter dataset so GEPA can improve the profile guidance, while runtime policy should still route the empty response through correction or a future retry path.
 
+Promotion is now explicit rather than automatic. The optimizer writes JSON artifacts for review; `promote-artifact` then validates `artifact_type`, `profile`, and layer metadata, updates the appropriate profile config field, and increments the profile revision. That same command works for request-adapter artifacts and correction-agent artifacts, so every profile can follow the same dataset -> GEPA -> inspect -> promote loop.
+
 ### Traces and Datasets
 
 Every trace should include enough profile metadata to explain why the proxy behaved as it did:
@@ -421,6 +424,12 @@ After correction-agent artifact loading works, add artifact loading for request-
 
 Status: artifact loading is implemented through `request_adapter_artifact`. A dedicated request-adapter GEPA optimizer is now available through `optimize-request-adapter-prompt`; `datasets/request-adapter/gemma-dsrs-conservative.jsonl` and `datasets/request-adapter/gemma-dsrs-conservative-gepa.json` are the first Gemma-specific prompt-adapter dataset and artifact.
 
+### Step 8: Add explicit artifact promotion
+
+GEPA artifacts should not silently change runtime behavior. Promotion should be a deliberate command that can be inspected, reviewed, committed, reverted, and reproduced.
+
+Status: implemented through `promote-artifact`. The command supports request-adapter and correction-agent GEPA artifacts, preserves existing profile model patterns unless `--model-pattern` is supplied, records the previous and new artifact reference in its JSON report, and supports `--dry-run`.
+
 ## Guardrails
 
 - Do not make every parser behavior a model-specific branch.
@@ -434,6 +443,6 @@ Status: artifact loading is implemented through `request_adapter_artifact`. A de
 
 ## Near-Term Target
 
-The next practical milestone is deeper profile schema validation and parser/repair policy configuration. The config file, profile revision trace metadata, and correction-agent GEPA artifact loading are now in place.
+The next practical milestone is deeper profile schema validation and parser/repair policy configuration. The config file, profile revision trace metadata, prompt artifact loading, and explicit artifact promotion path are now in place.
 
 That gets the project closer to the original intent: any OpenAI-compatible application can request any model, and the proxy can select the right behavior profile, collect traces, build datasets, optimize prompts, and improve reliability without requiring the application to change.

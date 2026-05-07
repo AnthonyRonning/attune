@@ -24,7 +24,7 @@ Implemented scope currently covers the first three phases, with the runtime cent
 
 - **Phase 1:** OpenAI-compatible chat proxy, request normalization, upstream OpenAI-compatible calls, deterministic repair, DSRs correction agent path, JSONL traces
 - **Phase 2:** proxy-owned DSRs tool rendering, model profiles, multi-tool parsing, parallel-tool enforcement, schema-guided repair, inbound auth passthrough, `/v1/models` proxying, buffered client SSE responses
-- **Phase 3:** trace-to-dataset export, replay harness, regression evaluation, typed DSRs correction-agent traces, profile-aware config loading, DSRs/GEPA correction-agent prompt artifacts
+- **Phase 3:** trace-to-dataset export, replay harness, regression evaluation, typed DSRs correction-agent traces, profile-aware config loading, DSRs/GEPA prompt artifacts, explicit artifact promotion into model-profile config
 
 The proxy intentionally buffers upstream chat completions so it can interpret and repair the complete output before returning a client-compatible response. If the client requests `stream: true`, the proxy returns a corrected SSE response after buffering and repair; it does not yet proxy upstream tokens incrementally.
 
@@ -60,7 +60,8 @@ Client application
 | Dataset export | `src/dataset.rs` | Converts traces into correction dataset rows |
 | Replay | `src/replay.rs` | Replays recorded traces through the repair pipeline |
 | Evaluation | `src/eval.rs` | Runs regression suites and reports correction metrics |
-| Optimization | `src/optimization.rs` | DSRs/GEPA correction-prompt optimization artifacts for profile-loaded correction-agent instructions |
+| Optimization | `src/optimization.rs` | DSRs/GEPA optimization for correction-agent and request-adapter prompt artifacts |
+| Artifact promotion | `src/promotion.rs` | Validates GEPA artifacts and promotes request-adapter or correction-agent instructions into profile config |
 
 ## Tool-calling model
 
@@ -461,6 +462,17 @@ nix develop --command cargo run -- \
 
 This writes a `request_adapter_instruction` artifact that can be loaded through `request_adapter_artifact`. See `configs/gemma-dsrs-conservative.toml` for the Gemma profile wired to the optimized artifact.
 
+After inspecting a GEPA artifact, promote it into a model-profile config explicitly:
+
+```sh
+nix develop --command cargo run -- \
+  promote-artifact \
+  --config-path configs/gemma-dsrs-conservative.toml \
+  --artifact-path datasets/request-adapter/gemma-dsrs-conservative-gepa.json
+```
+
+The promotion command reads the artifact metadata, validates the artifact layer, updates either `request_adapter_artifact` or `correction_agent_artifact`, preserves existing model patterns unless `--model-pattern` is provided, and bumps the profile revision. Use `--dry-run` to print the promotion report without writing the config.
+
 ## Local mock upstream
 
 For manual proxy tests without a real model provider:
@@ -533,6 +545,7 @@ nix flake check
     ├── openai.rs
     ├── optimization.rs
     ├── policy.rs
+    ├── promotion.rs
     ├── prompt_adapter.rs
     ├── repair.rs
     ├── replay.rs
@@ -599,7 +612,7 @@ Prefer regression cases based on real traces. A good case should include:
 - API coverage is intentionally small: `/health`, `/v1/models`, and `/v1/chat/completions`.
 - Runtime configuration now supports config files and prompt artifacts, but the parser/repair policy schema is still a first pass and not every future per-model knob is exposed yet.
 - Retry/continue policy is represented in configuration but not implemented as an upstream retry loop yet.
-- GEPA optimization now covers the correction agent and request-adapter profile guidance, but automated dataset curation and artifact promotion are still manual.
+- GEPA optimization now covers the correction agent and request-adapter profile guidance, and artifacts can be promoted into profile config with `promote-artifact`; automated dataset curation is still manual.
 - Provider-specific adapters beyond generic OpenAI-compatible HTTP are not implemented yet.
 
 ## Roadmap
@@ -608,6 +621,7 @@ Near-term directions:
 
 - richer config-file schema for parser strictness, repair policy, and provider metadata
 - profile validation and migration tooling
+- model/profile-specific GEPA artifact promotion in CI or release workflows
 - richer correction-agent/judge routing
 - replay-driven regression suites from real traces
 - richer request-adapter GEPA datasets across more model families

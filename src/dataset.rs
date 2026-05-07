@@ -423,7 +423,8 @@ mod tests {
 
         assert_eq!(report.rows_written, 1);
         let exported = tokio::fs::read_to_string(output_path).await.unwrap();
-        assert!(exported.contains("\"profile_revision\":1"));
-        assert!(exported.contains("\"profile_source\":\"builtin\""));
+        let exported_row: Value = serde_json::from_str(exported.lines().next().unwrap()).unwrap();
+        assert_eq!(exported_row["profile_revision"], json!(1));
+        assert_eq!(exported_row["profile_source"], json!("builtin"));
     }
 }

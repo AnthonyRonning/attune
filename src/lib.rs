@@ -9,6 +9,7 @@ pub mod normalizer;
 pub mod openai;
 pub mod optimization;
 pub mod policy;
+pub mod promotion;
 pub mod prompt_adapter;
 pub mod repair;
 pub mod replay;
