@@ -40,6 +40,7 @@ The current implementation already has the core pipeline needed for this design:
 | Correction agent | `src/agents.rs` uses a typed DSRs signature with `possible`, `confidence`, `explanation`, `content`, and `tool_calls` fields |
 | Correction traces | `src/trace.rs` writes correction-agent sidecar records with input, raw output, accepted state, confidence, explanation, content, and tool calls |
 | Dataset flow | `src/dataset.rs` exports main traces into correction datasets |
+| Trace harness | `eval/trace-harness` imports third-party agent traces into neutral scenarios and runs sampled live structural checks through the proxy |
 | Replay and eval | `src/replay.rs` and `src/eval.rs` replay traces and run regression suites |
 | Optimization | `src/optimization.rs` runs GEPA against correction-agent and request-adapter prompt programs and writes profile-aware artifacts |
 | Artifact promotion | `src/promotion.rs` validates a GEPA artifact and promotes it into the matching profile config field |
@@ -324,6 +325,23 @@ For example, a model that emits a valid DSRs envelope with empty `content` and `
 
 Promotion is now explicit rather than automatic. The optimizer writes JSON artifacts for review; `promote-artifact` then validates `artifact_type`, `profile`, and layer metadata, updates the appropriate profile config field, carries `dsrs_history_format` from request-adapter artifacts into the profile config, and increments the profile revision. That same command works for request-adapter artifacts and correction-agent artifacts, so every profile can follow the same dataset -> GEPA -> inspect -> promote loop. Formatter-comparison GEPA outputs are ignored by default until a specific artifact is reviewed and promoted.
 
+The latest reviewed request-adapter matrix used 14 Gemma-focused examples from:
+
+- `datasets/request-adapter/gemma-dsrs-conservative.jsonl`
+- `datasets/request-adapter/gemma-dsrs-conservative-trace-faithful.jsonl`
+- `datasets/request-adapter/gemma-dsrs-conservative-trace-harness-curated.jsonl`
+
+Results:
+
+| Target model | History format | Score | Promotion decision |
+| --- | --- | ---: | --- |
+| `google/gemma-4-26b-a4b-it` | `append_only` | `0.8714286` | promoted |
+| `google/gemma-4-26b-a4b-it` | `regenerated_context` | `0.8000001` | experiment only |
+| `qwen/qwen3.5-9b` | `append_only` | `0.7000001` | not promoted; showed Pi/path-specific overfit |
+| `qwen/qwen3.5-9b` | `regenerated_context` | `0.6642858` | not promoted |
+
+The promoted Gemma artifact is `datasets/request-adapter/gemma-dsrs-conservative-r3-append-only-gepa.json`; `configs/gemma-dsrs-conservative.toml` now references it and carries profile revision 4. This makes the Gemma config the current best-known path, while the Qwen built-in profile remains intentionally unpromoted until it has a cleaner Qwen-specific dataset.
+
 ### Traces and Datasets
 
 Every trace should include enough profile metadata to explain why the proxy behaved as it did:
@@ -343,6 +361,8 @@ Every trace should include enough profile metadata to explain why the proxy beha
 Dataset export should support filtering by model, profile, failure kind, repair action, and correction-agent result. That makes it practical to build model-specific GEPA datasets instead of mixing unrelated model behavior.
 
 The request-adapter dataset path now has its own trace-faithful exporter. `export-request-adapter-dataset` can select traces by `--trace-id`, model/profile, failure kind, repair action, or correction result. Rows preserve the original OpenAI request JSON from the trace, so GEPA can rehydrate the exact messages, tools, tool choice, parallel-tool setting, profile metadata, adapted request metadata, and observed upstream output. Labels stay explicit through `--expected-output-json`, `--expected-output-path`, or `--use-final-response`; unlabeled rows require `--allow-unlabeled` and should be treated as triage data, not optimization data.
+
+The trace harness extends this flow for non-local traces. It imports third-party datasets such as Pi Mono and Hermes agent reasoning traces into neutral scenario JSONL, runs small live samples through the proxy, and produces reports that can be inspected before any example is copied into a GEPA dataset. These harness traces should be curated by edge case, not bulk-added just because a run passed.
 
 ## Implementation Plan
 
@@ -436,7 +456,7 @@ Status: partially implemented. Eval reports now include model/profile/revision/a
 
 After correction-agent artifact loading works, add artifact loading for request-adapter profile guidance. Keep the DSRs signature stable, and let artifacts tune wording, examples, and profile guidance.
 
-Status: artifact loading is implemented through `request_adapter_artifact`. A dedicated request-adapter GEPA optimizer is now available through `optimize-request-adapter-prompt`; it evaluates candidate profile guidance by rendering the real runtime DSRs request format selected by `--dsrs-history-format`. `export-request-adapter-dataset` converts trace IDs into trace-faithful request-adapter rows with explicit labels. `datasets/request-adapter/gemma-dsrs-conservative-trace-faithful.jsonl` is the first exact Gemma-specific prompt-adapter dataset. Separate append-only and regenerated-context GEPA artifacts can be generated for comparison, but trial outputs should stay ignored unless promoted.
+Status: artifact loading is implemented through `request_adapter_artifact`. A dedicated request-adapter GEPA optimizer is now available through `optimize-request-adapter-prompt`; it evaluates candidate profile guidance by rendering the real runtime DSRs request format selected by `--dsrs-history-format`. `export-request-adapter-dataset` converts trace IDs into trace-faithful request-adapter rows with explicit labels. The current Gemma dataset combines hand-labeled rows, exact trace exports, and curated trace-harness examples. Separate append-only and regenerated-context GEPA artifacts can be generated for comparison. The reviewed append-only Gemma artifact has been promoted to `configs/gemma-dsrs-conservative.toml`; trial outputs should stay ignored unless promoted.
 
 ### Step 8: Add explicit artifact promotion
 
@@ -457,6 +477,8 @@ Status: implemented through `promote-artifact`. The command supports request-ada
 
 ## Near-Term Target
 
-The next practical milestone is deeper profile schema validation and parser/repair policy configuration. The config file, profile revision trace metadata, prompt artifact loading, and explicit artifact promotion path are now in place.
+The next practical milestone is making "best produced defaults" easier to use without losing review discipline. Today promoted artifacts load from config files, so `cargo run -- --config configs/gemma-dsrs-conservative.toml` is the current best Gemma path while plain `cargo run` uses compiled built-ins. A durable default story should make reviewed profile configs discoverable, validate promoted artifacts, and still keep promotion explicit.
+
+After that, the next technical milestone is deeper profile schema validation and parser/repair policy configuration. The config file, profile revision trace metadata, prompt artifact loading, trace-harness curation flow, and explicit artifact promotion path are now in place.
 
 That gets the project closer to the original intent: any OpenAI-compatible application can request any model, and the proxy can select the right behavior profile, collect traces, build datasets, optimize prompts, and improve reliability without requiring the application to change.

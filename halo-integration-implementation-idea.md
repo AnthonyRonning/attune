@@ -64,6 +64,14 @@ correction-agent triggers?" is yes, if we integrate it as a disciplined feedback
 loop rather than another live repair step. It should make the proxy smarter
 between runs, not busier during a single user request.
 
+Current related work in this repo: `eval/trace-harness` now provides a smaller
+version of the same feedback-loop idea without pulling HALO into the runtime. It
+imports third-party agent traces, such as Pi Mono and Hermes agent-reasoning
+samples, converts them into neutral OpenAI-compatible scenarios, runs sampled
+live structural checks through the proxy, and lets reviewed edge cases flow into
+request-adapter GEPA datasets. That is not HALO integration, but it is useful
+groundwork for a later HALO-style trace-analysis loop.
+
 ## What HALO Is
 
 HALO stands for Hierarchical Agent Loop Optimization. Its README describes it as

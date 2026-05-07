@@ -99,6 +99,8 @@ Profiles support revision/source metadata plus request-adapter and correction-ag
 
 DSRs profiles also support `dsrs_history_format`. The default is `append_only`, which keeps user turns as chat messages and renders prior assistant turns in the same DSRs `content` / `tool_calls` shape expected for the next answer. The previous single regenerated transcript format is still available as `regenerated_context` for models that perform better with one serialized conversation block.
 
+The best reviewed Gemma profile currently lives in [`configs/gemma-dsrs-conservative.toml`](configs/gemma-dsrs-conservative.toml). That config pins the promoted request-adapter GEPA artifact for the append-only DSRs history format. Use `cargo run -- --config configs/gemma-dsrs-conservative.toml` when you want that promoted Gemma behavior; plain `cargo run` still uses the compiled built-in defaults unless a config path is provided.
+
 ## What the repair engine handles
 
 Current deterministic and schema-guided repairs include:
@@ -236,11 +238,14 @@ With OpenRouter:
 export OPENROUTER_API_KEY="..."
 
 nix develop --command cargo run -- \
+  --config configs/gemma-dsrs-conservative.toml \
   --bind 127.0.0.1:8080 \
   --upstream-base-url https://openrouter.ai/api/v1 \
   --trace-path traces/model-correction-proxy.jsonl \
   serve
 ```
+
+Drop `--config configs/gemma-dsrs-conservative.toml` when you want only built-in defaults. Keep it when testing the current promoted Gemma request-adapter profile.
 
 The server listens on:
 
@@ -283,6 +288,8 @@ Run any command through Nix as `nix develop --command cargo run -- <command> ...
 | `promote-artifact` | Deliberately promote a reviewed GEPA artifact into a model-profile config and bump the profile revision. |
 | `trace-harness` | Import third-party harness traces into neutral scenarios, inspect them, and run sampled live structural checks through the proxy. |
 
+The `trace-harness` subcommands currently include `import-pi`, `import-hermes-rows`, `inspect`, and `run`. Use `import-*` commands to build local scenario JSONL from downloaded datasets, `inspect` to review the scenario shape before spending API calls, and `run` to sample live proxy/model behavior.
+
 The normal reliability loop is:
 
 1. Use `inspect-traces` to find a failing trace ID.
@@ -301,6 +308,7 @@ nix develop --command cargo run -- \
   --max-scenarios 12
 
 nix develop --command cargo run -- \
+  --config configs/gemma-dsrs-conservative.toml \
   trace-harness run \
   --scenarios-path eval/trace-harness/scenarios/pi-mono.local.jsonl \
   --output-path eval/trace-harness/results/gemma-pi.local.json \
@@ -309,6 +317,8 @@ nix develop --command cargo run -- \
 ```
 
 Trace-harness scenarios preserve the source conversation prefix and tool definitions, then ask the live proxy/model for the next assistant turn. They do not execute source harness tools and they do not grade whether the model made the best engineering choice. They only check whether the final proxy response stays structurally usable for an OpenAI-compatible agent loop. See [`eval/trace-harness/README.md`](eval/trace-harness/README.md).
+
+The harness writes downloaded source traces, converted scenarios, and run reports under `eval/trace-harness/raw/`, `eval/trace-harness/scenarios/`, and `eval/trace-harness/results/`. Those local files are ignored by default. Reviewed edge cases can be copied into request-adapter datasets only after inspection.
 
 ## Example request
 
@@ -514,7 +524,7 @@ This preserves the exact original OpenAI request from the trace in the dataset r
 nix develop --command cargo run -- \
   optimize-request-adapter-prompt \
   --dataset-path datasets/request-adapter/gemma-dsrs-conservative.jsonl \
-  --output-path datasets/request-adapter/gemma-dsrs-conservative-gepa.json \
+  --output-path datasets/request-adapter/gemma-dsrs-conservative-draft-gepa.json \
   --base-url https://openrouter.ai/api/v1 \
   --model google/gemma-4-26b-a4b-it \
   --target-model google/gemma-4-26b-a4b-it \
@@ -523,7 +533,8 @@ nix develop --command cargo run -- \
   --dsrs-history-format append_only \
   --artifact-id request-adapter/gemma-dsrs-conservative/append-only \
   --iterations 3 \
-  --max-examples 3
+  --max-examples 3 \
+  --lm-max-tokens 100000
 ```
 
 This optimizer uses the same runtime DSRs formatter as the proxy. GEPA mutates the profile guidance, the runner installs that candidate guidance into a model profile, renders the request through the selected `dsrs_history_format`, calls the target model, parses the DSRs response, and scores the result against the request-adapter dataset. Exact labeled tool calls or content score highest, but structurally valid different tool calls and real non-placeholder content receive strong partial credit so the optimizer does not overfit to one trace's arbitrary next action. To compare formatter behavior, run the same dataset twice with different `--dsrs-history-format` values and separate artifact IDs.
@@ -534,13 +545,35 @@ GEPA comparison artifacts are treated as disposable until promoted. Files such a
 
 `datasets/request-adapter/gemma-dsrs-conservative-trace-harness-curated.jsonl` contains a small reviewed set from live trace-harness runs. It is intentionally narrow: exact tool-shape positives plus correction-needed request-adapter failures where the final clean output is a clear label.
 
+The current reviewed Gemma request-adapter GEPA run combines the hand-labeled profile dataset, exact trace-faithful exports, and curated trace-harness examples:
+
+```sh
+jq -c . \
+  datasets/request-adapter/gemma-dsrs-conservative.jsonl \
+  datasets/request-adapter/gemma-dsrs-conservative-trace-faithful.jsonl \
+  datasets/request-adapter/gemma-dsrs-conservative-trace-harness-curated.jsonl \
+  > /tmp/gemma-request-adapter-all.jsonl
+```
+
+The latest full matrix used 14 reviewed rows and tested both DSRs history formats:
+
+| Target model | History format | Score | Result |
+| --- | --- | ---: | --- |
+| `google/gemma-4-26b-a4b-it` | `append_only` | `0.8714286` | promoted |
+| `google/gemma-4-26b-a4b-it` | `regenerated_context` | `0.8000001` | kept as an experiment only |
+| `qwen/qwen3.5-9b` | `append_only` | `0.7000001` | not promoted; showed Pi/path-specific overfit |
+| `qwen/qwen3.5-9b` | `regenerated_context` | `0.6642858` | not promoted |
+
+The promoted Gemma artifact is `datasets/request-adapter/gemma-dsrs-conservative-r3-append-only-gepa.json`, and [`configs/gemma-dsrs-conservative.toml`](configs/gemma-dsrs-conservative.toml) now references it at profile revision 4. Higher GEPA scores are not enough by themselves; artifacts still need human review for overfit, brittle one-off rules, and prompt drift before promotion.
+
 After inspecting a GEPA artifact, promote it into a model-profile config explicitly:
 
 ```sh
 nix develop --command cargo run -- \
   promote-artifact \
   --config-path configs/gemma-dsrs-conservative.toml \
-  --artifact-path datasets/request-adapter/gemma-dsrs-conservative-gepa.json
+  --artifact-path datasets/request-adapter/gemma-dsrs-conservative-r3-append-only-gepa.json \
+  --profile gemma-dsrs-conservative
 ```
 
 The promotion command reads the artifact metadata, validates the artifact layer, updates either `request_adapter_artifact` or `correction_agent_artifact`, preserves existing model patterns unless `--model-pattern` is provided, and bumps the profile revision. Use `--dry-run` to print the promotion report without writing the config.
@@ -602,6 +635,10 @@ nix flake check
 ├── intent.md
 ├── docs/
 │   └── model-configurability.md
+├── configs/
+│   └── gemma-dsrs-conservative.toml
+├── datasets/
+│   └── request-adapter/
 ├── eval/
 │   └── trace-harness/
 │       └── README.md
@@ -687,6 +724,7 @@ Prefer regression cases based on real traces. A good case should include:
 - Upstream token streaming is not implemented. Upstream responses are buffered, then optionally returned to streaming clients as corrected SSE.
 - API coverage is intentionally small: `/health`, `/v1/models`, and `/v1/chat/completions`.
 - Runtime configuration now supports config files and prompt artifacts, but the parser/repair policy schema is still a first pass and not every future per-model knob is exposed yet.
+- Promoted artifacts are loaded from config files today. Plain `cargo run` still uses compiled built-in defaults unless a config file is passed or `MCP_CONFIG_PATH` is set.
 - Retry/continue policy is represented in configuration but not implemented as an upstream retry loop yet.
 - GEPA optimization now covers the correction agent and request-adapter profile guidance, and artifacts can be promoted into profile config with `promote-artifact`; label quality and dataset curation are still deliberate review steps.
 - Provider-specific adapters beyond generic OpenAI-compatible HTTP are not implemented yet.
