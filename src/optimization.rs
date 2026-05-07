@@ -1020,7 +1020,7 @@ fn score_request_adapter_prediction(expected: &Value, predicted: &Value) -> Feed
         }
         if predicted_norm.iter().any(valid_adapter_tool_call) {
             return FeedbackMetric::new(
-                0.65,
+                0.8,
                 format!(
                     "Predicted a valid tool call, but not the expected one. Expected {}; predicted {}",
                     json!(expected_norm),
@@ -1060,7 +1060,7 @@ fn score_request_adapter_prediction(expected: &Value, predicted: &Value) -> Feed
     if !expected_content.is_empty() && predicted_content == expected_content {
         FeedbackMetric::new(1.0, "Predicted expected content exactly")
     } else if !adapter_content_is_noop(predicted_content) && predicted_norm.is_empty() {
-        FeedbackMetric::new(0.7, "Predicted non-placeholder user-facing content")
+        FeedbackMetric::new(0.8, "Predicted non-placeholder user-facing content")
     } else {
         FeedbackMetric::new(
             0.0,
@@ -1229,5 +1229,37 @@ mod tests {
         let feedback = score_request_adapter_prediction(&expected, &predicted);
 
         assert_eq!(feedback.score, 0.0);
+    }
+
+    #[test]
+    fn scores_request_adapter_valid_different_tool_call_as_strong_partial() {
+        let expected = json!({
+            "content": "",
+            "tool_calls": [{"name":"read","arguments":{"path":"README.md"}}]
+        });
+        let predicted = json!({
+            "content": "",
+            "tool_calls": [{"name":"bash","arguments":{"command":"ls packages"}}]
+        });
+
+        let feedback = score_request_adapter_prediction(&expected, &predicted);
+
+        assert_eq!(feedback.score, 0.8);
+    }
+
+    #[test]
+    fn scores_request_adapter_real_different_content_as_strong_partial() {
+        let expected = json!({
+            "content": "The regex matched three examples and rejected invalid.",
+            "tool_calls": []
+        });
+        let predicted = json!({
+            "content": "1.2.3, v2.0.0, and 3.1.4-beta match; invalid does not.",
+            "tool_calls": []
+        });
+
+        let feedback = score_request_adapter_prediction(&expected, &predicted);
+
+        assert_eq!(feedback.score, 0.8);
     }
 }

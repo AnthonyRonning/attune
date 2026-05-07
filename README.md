@@ -522,11 +522,13 @@ nix develop --command cargo run -- \
   --max-examples 3
 ```
 
-This optimizer uses the same runtime DSRs formatter as the proxy. GEPA mutates the profile guidance, the runner installs that candidate guidance into a model profile, renders the request through the selected `dsrs_history_format`, calls the target model, parses the DSRs response, and scores the result against the request-adapter dataset. To compare formatter behavior, run the same dataset twice with different `--dsrs-history-format` values and separate artifact IDs.
+This optimizer uses the same runtime DSRs formatter as the proxy. GEPA mutates the profile guidance, the runner installs that candidate guidance into a model profile, renders the request through the selected `dsrs_history_format`, calls the target model, parses the DSRs response, and scores the result against the request-adapter dataset. Exact labeled tool calls or content score highest, but structurally valid different tool calls and real non-placeholder content receive strong partial credit so the optimizer does not overfit to one trace's arbitrary next action. To compare formatter behavior, run the same dataset twice with different `--dsrs-history-format` values and separate artifact IDs.
 
 This writes a `request_adapter_instruction` artifact that records the target profile, profile revision, and history format. It can be loaded through `request_adapter_artifact`; promotion can also carry the artifact's `dsrs_history_format` into the profile config. See `configs/gemma-dsrs-conservative.toml` for a Gemma profile wired to an optimized artifact.
 
 GEPA comparison artifacts are treated as disposable until promoted. Files such as `*-append-only-gepa.json`, `*-regenerated-context-gepa.json`, and `*-trace-faithful-*-gepa.json` are ignored by default; keep or force-add only artifacts that have been reviewed and intentionally promoted.
+
+`datasets/request-adapter/gemma-dsrs-conservative-trace-harness-curated.jsonl` contains a small reviewed set from live trace-harness runs. It is intentionally narrow: exact tool-shape positives plus correction-needed request-adapter failures where the final clean output is a clear label.
 
 After inspecting a GEPA artifact, promote it into a model-profile config explicitly:
 
