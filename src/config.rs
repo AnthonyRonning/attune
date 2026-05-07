@@ -5,9 +5,11 @@ use std::{
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
-use crate::{model_profile::ModelProfile, policy::PolicyConfig};
+use crate::{
+    artifacts::extract_instruction_from_path, builtin_defaults, model_profile::ModelProfile,
+    policy::PolicyConfig,
+};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProxyConfig {
@@ -130,26 +132,26 @@ fn parse_config_content(path: &Path, content: &str) -> Result<ProxyConfig> {
 async fn hydrate_profile_artifacts(config: &mut ProxyConfig, base_dir: &Path) -> Result<()> {
     for profile in &mut config.model_profiles {
         if let Some(artifact) = profile.request_adapter_artifact.clone() {
-            let path = resolve_artifact_path(base_dir, &artifact);
-            let instruction = read_instruction_artifact(&path).await.with_context(|| {
-                format!(
-                    "failed to load request adapter artifact {} for profile {}",
-                    path.display(),
-                    profile.name
-                )
-            })?;
+            let instruction = read_instruction_artifact(base_dir, &artifact)
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to load request adapter artifact {} for profile {}",
+                        artifact, profile.name
+                    )
+                })?;
             profile.tool_instruction = instruction;
         }
 
         if let Some(artifact) = profile.correction_agent_artifact.clone() {
-            let path = resolve_artifact_path(base_dir, &artifact);
-            let instruction = read_instruction_artifact(&path).await.with_context(|| {
-                format!(
-                    "failed to load correction agent artifact {} for profile {}",
-                    path.display(),
-                    profile.name
-                )
-            })?;
+            let instruction = read_instruction_artifact(base_dir, &artifact)
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to load correction agent artifact {} for profile {}",
+                        artifact, profile.name
+                    )
+                })?;
             profile.correction_instruction = Some(instruction);
         }
     }
@@ -165,38 +167,16 @@ fn resolve_artifact_path(base_dir: &Path, artifact: &str) -> PathBuf {
     }
 }
 
-async fn read_instruction_artifact(path: &Path) -> Result<String> {
-    let content = tokio::fs::read_to_string(path)
-        .await
-        .with_context(|| format!("failed to read instruction artifact {}", path.display()))?;
-    extract_instruction_artifact(path, &content)
-}
-
-fn extract_instruction_artifact(path: &Path, content: &str) -> Result<String> {
-    if path.extension().and_then(|extension| extension.to_str()) == Some("json") {
-        let value: Value = serde_json::from_str(content)
-            .with_context(|| format!("failed to parse JSON artifact {}", path.display()))?;
-        return json_instruction_field(&value)
-            .map(str::to_string)
-            .filter(|instruction| !instruction.trim().is_empty())
-            .with_context(|| {
-                format!(
-                    "JSON artifact {} did not contain best_instruction, instruction, prompt, or content",
-                    path.display()
-                )
-            });
+async fn read_instruction_artifact(base_dir: &Path, artifact: &str) -> Result<String> {
+    if let Some(instruction) = builtin_defaults::instruction_for_reference(artifact)? {
+        return Ok(instruction);
     }
 
-    Ok(content.trim().to_string())
-}
-
-fn json_instruction_field(value: &Value) -> Option<&str> {
-    value
-        .get("best_instruction")
-        .or_else(|| value.get("instruction"))
-        .or_else(|| value.get("prompt"))
-        .or_else(|| value.get("content"))
-        .and_then(Value::as_str)
+    let path = resolve_artifact_path(base_dir, artifact);
+    let content = tokio::fs::read_to_string(&path)
+        .await
+        .with_context(|| format!("failed to read instruction artifact {}", path.display()))?;
+    extract_instruction_from_path(&path, &content)
 }
 
 fn default_upstream_base_url() -> String {
@@ -308,6 +288,37 @@ mod tests {
         assert_eq!(
             profile.correction_instruction.as_deref(),
             Some("CORRECTION ARTIFACT INSTRUCTION")
+        );
+    }
+
+    #[tokio::test]
+    async fn loads_builtin_artifact_references_from_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("proxy.toml");
+        tokio::fs::write(
+            &config_path,
+            r#"
+                [[model_profiles]]
+                name = "gemma-dsrs-conservative"
+                model_patterns = ["gemma"]
+                revision = 4
+                request_adapter_artifact = "builtin:request-adapter/gemma-dsrs-conservative/r3-append-only-json-meta"
+            "#,
+        )
+        .await
+        .unwrap();
+
+        let config = ProxyConfig::from_path(&config_path).await.unwrap();
+        let profile = &config.model_profiles[0];
+
+        assert_eq!(profile.source, "config");
+        assert_eq!(profile.revision, 4);
+        assert!(profile
+            .tool_instruction
+            .contains("MANDATORY INSPECTION FIRST"));
+        assert_eq!(
+            profile.request_adapter_artifact.as_deref(),
+            Some("builtin:request-adapter/gemma-dsrs-conservative/r3-append-only-json-meta")
         );
     }
 }

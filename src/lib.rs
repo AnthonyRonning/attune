@@ -1,4 +1,6 @@
 pub mod agents;
+pub mod artifacts;
+pub mod builtin_defaults;
 pub mod config;
 pub mod dataset;
 pub mod dsrs_contract;

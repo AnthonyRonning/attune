@@ -1,0 +1,19 @@
+# Built-in profile defaults compiled into the shipped binary.
+#
+# This manifest is the final promotion step after a GEPA artifact has already
+# been reviewed and promoted into a config profile. Artifacts listed here must
+# be checked into the repository because build.rs embeds their contents with
+# include_str!.
+
+[[artifacts]]
+id = "request-adapter/gemma-dsrs-conservative/r3-append-only-json-meta"
+artifact_type = "request_adapter_instruction"
+path = "datasets/request-adapter/gemma-dsrs-conservative-r3-append-only-gepa.json"
+profile = "gemma-dsrs-conservative"
+
+[[profiles]]
+name = "gemma-dsrs-conservative"
+revision = 4
+model_patterns = ["gemma"]
+dsrs_history_format = "append_only"
+request_adapter_artifact = "request-adapter/gemma-dsrs-conservative/r3-append-only-json-meta"

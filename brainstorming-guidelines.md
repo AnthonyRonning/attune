@@ -104,13 +104,14 @@ What exists now:
 - Request-adapter GEPA optimization using the same runtime DSRs formatter as the proxy.
 - A local JSON GEPA meta-adapter so optimizer reflection/proposal calls do not collide with literal DSRs bracket examples in generated instructions.
 - Explicit `promote-artifact` flow for reviewed request-adapter and correction-agent GEPA artifacts.
+- Explicit `promote-default-artifact` flow plus `profiles/builtin-defaults.toml` and `build.rs` validation for artifacts that should ship inside the binary.
 - `eval/trace-harness` for importing third-party agent traces, sampling live proxy runs, and curating structural edge cases into request-adapter datasets.
-- A promoted Gemma append-only request-adapter artifact in `configs/gemma-dsrs-conservative.toml`.
+- A promoted Gemma append-only request-adapter artifact in both `configs/gemma-dsrs-conservative.toml` and the embedded built-in defaults manifest.
 
 What is still missing:
 
 - Full parser/repair policy configurability per model profile.
-- A cleaner "best produced defaults" story so reviewed profile configs can be used without manual config-path friction.
+- Broader promoted default coverage for more model families.
 - Profile validation and migration tooling.
 - Provider-specific adapters beyond generic OpenAI-compatible HTTP.
 - An implemented retry/continue upstream loop.
@@ -698,7 +699,7 @@ This is where DSPy-style workflows, dsrs, and GEPA become central. The proxy can
 
 Internal agents should be built as DSPy/dsrs-style agents where possible, not ad hoc prompts scattered through the codebase. Correction agents, judges, and retry/continue decision agents should have their own datasets, evaluation loops, and GEPA optimization paths. These are controlled agents inside the system, so they are the right place to apply the full DSPy/dsrs stack aggressively.
 
-Current implementation note: prompt optimization is now split by layer. Correction-agent GEPA works on malformed-response repair datasets. Request-adapter GEPA works on exact OpenAI request traces, selected profile metadata, and explicit expected output labels. The trace harness can import Pi Mono and Hermes-style third-party traces into neutral scenarios, run small live structural checks through the proxy, and contribute only reviewed edge cases to request-adapter datasets. The latest reviewed Gemma run favored append-only DSRs history and promoted its artifact into the Gemma config; a Qwen comparison run was intentionally not promoted because its higher-scoring instruction showed source-trace overfit.
+Current implementation note: prompt optimization is now split by layer. Correction-agent GEPA works on malformed-response repair datasets. Request-adapter GEPA works on exact OpenAI request traces, selected profile metadata, and explicit expected output labels. The trace harness can import Pi Mono and Hermes-style third-party traces into neutral scenarios, run small live structural checks through the proxy, and contribute only reviewed edge cases to request-adapter datasets. The latest reviewed Gemma run favored append-only DSRs history and promoted its artifact first into the Gemma config and then into embedded built-in defaults. A Qwen comparison run was intentionally not promoted because its higher-scoring instruction showed source-trace overfit.
 
 ## Model profiles as first-class product surface
 
@@ -1026,6 +1027,7 @@ That makes the proxy harder, but also much more generally useful.
 - GEPA-optimized prompts per model
 - profile-selectable DSRs history renderers
 - explicit GEPA artifact promotion
+- embedded built-in defaults generated from reviewed artifacts
 
 ### Phase 3: datasets and evaluation
 

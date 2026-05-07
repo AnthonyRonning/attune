@@ -95,11 +95,13 @@ Built-in profiles are selected by model-name substring:
 
 Profiles can be provided in TOML, JSON, or JSON5 through `--config` or `MCP_CONFIG_PATH`. Configured profiles are matched before built-ins, so users can tune or replace a built-in profile without recompiling. Unknown models still fall back to `balanced-default`.
 
-Profiles support revision/source metadata plus request-adapter and correction-agent artifact IDs. When `request_adapter_artifact` or `correction_agent_artifact` points at a JSON GEPA report or text prompt file, the proxy loads the instruction at startup and records the artifact IDs in traces. See [`docs/model-configurability.md`](docs/model-configurability.md).
+Profiles support revision/source metadata plus request-adapter and correction-agent artifact IDs. When `request_adapter_artifact` or `correction_agent_artifact` points at a JSON GEPA report, text prompt file, or `builtin:<artifact-id>` reference, the proxy loads the instruction and records the artifact IDs in traces. See [`docs/model-configurability.md`](docs/model-configurability.md).
 
 DSRs profiles also support `dsrs_history_format`. The default is `append_only`, which keeps user turns as chat messages and renders prior assistant turns in the same DSRs `content` / `tool_calls` shape expected for the next answer. The previous single regenerated transcript format is still available as `regenerated_context` for models that perform better with one serialized conversation block.
 
-The best reviewed Gemma profile currently lives in [`configs/gemma-dsrs-conservative.toml`](configs/gemma-dsrs-conservative.toml). That config pins the promoted request-adapter GEPA artifact for the append-only DSRs history format. Use `cargo run -- --config configs/gemma-dsrs-conservative.toml` when you want that promoted Gemma behavior; plain `cargo run` still uses the compiled built-in defaults unless a config path is provided.
+Built-in defaults are generated from [`profiles/builtin-defaults.toml`](profiles/builtin-defaults.toml) at build time. Reviewed artifacts listed there are validated by `build.rs` and embedded into the binary, so shipped binaries do not need local dataset files for their default profile prompts. Runtime config profiles still match before built-ins and can override the embedded defaults.
+
+The current Gemma built-in default embeds `datasets/request-adapter/gemma-dsrs-conservative-r3-append-only-gepa.json` as `builtin:request-adapter/gemma-dsrs-conservative/r3-append-only-json-meta` at profile revision 4. [`configs/gemma-dsrs-conservative.toml`](configs/gemma-dsrs-conservative.toml) remains a filesystem-artifact example and local override path, but plain `cargo run` now gets the same reviewed Gemma request-adapter instruction through the embedded built-in default.
 
 ## What the repair engine handles
 
@@ -245,7 +247,7 @@ nix develop --command cargo run -- \
   serve
 ```
 
-Drop `--config configs/gemma-dsrs-conservative.toml` when you want only built-in defaults. Keep it when testing the current promoted Gemma request-adapter profile.
+Drop `--config configs/gemma-dsrs-conservative.toml` when you want only embedded built-in defaults. Keep it when testing config-file overrides or filesystem artifact loading.
 
 The server listens on:
 
@@ -286,6 +288,7 @@ Run any command through Nix as `nix develop --command cargo run -- <command> ...
 | `optimize-prompts` | Run GEPA for the correction-agent DSRs prompt using a correction dataset. |
 | `optimize-request-adapter-prompt` | Run GEPA for request-adapter profile guidance using the runtime DSRs formatter and selected `dsrs_history_format`. |
 | `promote-artifact` | Deliberately promote a reviewed GEPA artifact into a model-profile config and bump the profile revision. |
+| `promote-default-artifact` | Deliberately promote a reviewed GEPA artifact into `profiles/builtin-defaults.toml` so it is embedded into shipped binaries. |
 | `trace-harness` | Import third-party harness traces into neutral scenarios, inspect them, and run sampled live structural checks through the proxy. |
 
 The `trace-harness` subcommands currently include `import-pi`, `import-hermes-rows`, `inspect`, and `run`. Use `import-*` commands to build local scenario JSONL from downloaded datasets, `inspect` to review the scenario shape before spending API calls, and `run` to sample live proxy/model behavior.
@@ -296,7 +299,8 @@ The normal reliability loop is:
 2. Use `export-request-adapter-dataset` or `export-dataset` to create the right labeled dataset row.
 3. Run the relevant GEPA optimizer.
 4. Inspect the generated artifact.
-5. Use `promote-artifact --dry-run`, then promote only if the artifact is worth adopting.
+5. Use `promote-artifact --dry-run`, then promote to config only if the artifact is worth adopting.
+6. After config-level testing, use `promote-default-artifact --dry-run`, then promote to built-in defaults only if the artifact should ship.
 
 For broader live checks that are not tied to a local failing trace, use the trace harness:
 
@@ -564,9 +568,9 @@ The latest full matrix used 14 reviewed rows and tested both DSRs history format
 | `qwen/qwen3.5-9b` | `append_only` | `0.7000001` | not promoted; showed Pi/path-specific overfit |
 | `qwen/qwen3.5-9b` | `regenerated_context` | `0.6642858` | not promoted |
 
-The promoted Gemma artifact is `datasets/request-adapter/gemma-dsrs-conservative-r3-append-only-gepa.json`, and [`configs/gemma-dsrs-conservative.toml`](configs/gemma-dsrs-conservative.toml) now references it at profile revision 4. Higher GEPA scores are not enough by themselves; artifacts still need human review for overfit, brittle one-off rules, and prompt drift before promotion.
+The promoted Gemma artifact is `datasets/request-adapter/gemma-dsrs-conservative-r3-append-only-gepa.json`. [`configs/gemma-dsrs-conservative.toml`](configs/gemma-dsrs-conservative.toml) references it at profile revision 4, and [`profiles/builtin-defaults.toml`](profiles/builtin-defaults.toml) embeds it into the shipped Gemma built-in default. Higher GEPA scores are not enough by themselves; artifacts still need human review for overfit, brittle one-off rules, and prompt drift before promotion.
 
-After inspecting a GEPA artifact, promote it into a model-profile config explicitly:
+After inspecting a GEPA artifact, first promote it into a model-profile config explicitly:
 
 ```sh
 nix develop --command cargo run -- \
@@ -577,6 +581,18 @@ nix develop --command cargo run -- \
 ```
 
 The promotion command reads the artifact metadata, validates the artifact layer, updates either `request_adapter_artifact` or `correction_agent_artifact`, preserves existing model patterns unless `--model-pattern` is provided, and bumps the profile revision. Use `--dry-run` to print the promotion report without writing the config.
+
+After the config path has been tested, promote the same artifact into built-in defaults if it should ship inside the binary:
+
+```sh
+nix develop --command cargo run -- \
+  promote-default-artifact \
+  --artifact-path datasets/request-adapter/gemma-dsrs-conservative-r3-append-only-gepa.json \
+  --profile gemma-dsrs-conservative \
+  --model-pattern gemma
+```
+
+`promote-default-artifact` updates `profiles/builtin-defaults.toml`. The next build validates the manifest and embeds the artifact content with `include_str!`. See [`profiles/README.md`](profiles/README.md) for the built-in default promotion rules.
 
 ## Local mock upstream
 
@@ -630,11 +646,15 @@ nix flake check
 ```text
 .
 ├── Cargo.toml
+├── build.rs
 ├── flake.nix
 ├── brainstorming-guidelines.md
 ├── intent.md
 ├── docs/
 │   └── model-configurability.md
+├── profiles/
+│   ├── README.md
+│   └── builtin-defaults.toml
 ├── configs/
 │   └── gemma-dsrs-conservative.toml
 ├── datasets/
@@ -724,9 +744,9 @@ Prefer regression cases based on real traces. A good case should include:
 - Upstream token streaming is not implemented. Upstream responses are buffered, then optionally returned to streaming clients as corrected SSE.
 - API coverage is intentionally small: `/health`, `/v1/models`, and `/v1/chat/completions`.
 - Runtime configuration now supports config files and prompt artifacts, but the parser/repair policy schema is still a first pass and not every future per-model knob is exposed yet.
-- Promoted artifacts are loaded from config files today. Plain `cargo run` still uses compiled built-in defaults unless a config file is passed or `MCP_CONFIG_PATH` is set.
+- Built-in default artifacts are embedded at build time, but promotion is still a manual review step and currently covers only the reviewed Gemma request-adapter artifact.
 - Retry/continue policy is represented in configuration but not implemented as an upstream retry loop yet.
-- GEPA optimization now covers the correction agent and request-adapter profile guidance, and artifacts can be promoted into profile config with `promote-artifact`; label quality and dataset curation are still deliberate review steps.
+- GEPA optimization now covers the correction agent and request-adapter profile guidance, and artifacts can be promoted into profile config with `promote-artifact` or shipped defaults with `promote-default-artifact`; label quality and dataset curation are still deliberate review steps.
 - Provider-specific adapters beyond generic OpenAI-compatible HTTP are not implemented yet.
 
 ## Roadmap

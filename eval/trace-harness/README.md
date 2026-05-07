@@ -140,3 +140,5 @@ cargo run -- optimize-request-adapter-prompt \
 ```
 
 Run the same dataset with `--dsrs-history-format regenerated_context` and a separate output path when comparing history renderers. Promote only after reading the artifact and confirming it improves the profile without overfitting to source-harness paths or one-off commands.
+
+Promotion has two stages. `promote-artifact` moves a reviewed artifact into a config profile for local testing. `promote-default-artifact` moves a fully reviewed and tested artifact into `profiles/builtin-defaults.toml`, where `build.rs` validates and embeds it into shipped binaries.

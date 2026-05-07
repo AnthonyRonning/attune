@@ -649,7 +649,7 @@ async fn proxy_e2e_routes_empty_dsrs_output_through_correction_agent() {
             when.method(POST)
                 .path("/v1/chat/completions")
                 .body_contains("[[ ## profile_guidance ## ]]")
-                .body_contains("Never emit both empty content and [] tool_calls");
+                .body_contains("MANDATORY INSPECTION FIRST");
             then.status(200).json_body(chat_response(
                 "google/gemma-4-26b-a4b-it",
                 json!({

@@ -2,6 +2,8 @@ use std::{fmt, str::FromStr};
 
 use serde::{Deserialize, Serialize};
 
+use crate::builtin_defaults;
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolMode {
@@ -200,7 +202,7 @@ impl ModelProfile {
     }
 
     pub fn gemma() -> Self {
-        Self {
+        apply_builtin_profile_default(Self {
             name: "gemma-dsrs-conservative".to_string(),
             model_patterns: vec!["gemma".to_string()],
             revision: default_profile_revision(),
@@ -219,7 +221,7 @@ impl ModelProfile {
                 "{}\nPrefer a single item in the tool_calls field. Do not emit multiple tool calls unless explicitly required.",
                 default_dsrs_instruction()
             ),
-        }
+        })
     }
 
     pub fn pass_through() -> Self {
@@ -276,6 +278,41 @@ pub fn builtin_profiles() -> Vec<ModelProfile> {
         ModelProfile::llama(),
         ModelProfile::gemma(),
     ]
+    .into_iter()
+    .map(apply_builtin_profile_default)
+    .collect()
+}
+
+fn apply_builtin_profile_default(mut profile: ModelProfile) -> ModelProfile {
+    let Some(default) = builtin_defaults::profile_default(&profile.name) else {
+        return profile;
+    };
+
+    profile.revision = default.revision;
+    if !default.model_patterns.is_empty() {
+        profile.model_patterns = default
+            .model_patterns
+            .iter()
+            .map(|pattern| (*pattern).to_string())
+            .collect();
+    }
+    if let Some(format) = default.dsrs_history_format {
+        profile.dsrs_history_format = format;
+    }
+    if let Some(artifact_id) = default.request_adapter_artifact {
+        profile.request_adapter_artifact = Some(builtin_defaults::artifact_reference(artifact_id));
+        profile.tool_instruction = builtin_defaults::instruction_for_id(artifact_id)
+            .expect("built-in request adapter artifact must contain an instruction");
+    }
+    if let Some(artifact_id) = default.correction_agent_artifact {
+        profile.correction_agent_artifact = Some(builtin_defaults::artifact_reference(artifact_id));
+        profile.correction_instruction = Some(
+            builtin_defaults::instruction_for_id(artifact_id)
+                .expect("built-in correction agent artifact must contain an instruction"),
+        );
+    }
+
+    profile
 }
 
 fn profile_matches(lower_model: &str, profile: &ModelProfile) -> bool {
@@ -359,6 +396,22 @@ mod tests {
         assert_eq!(profile.tool_format, ToolFormat::Dsrs);
         assert_eq!(profile.dsrs_history_format, DsrsHistoryFormat::AppendOnly);
         assert_eq!(profile.source, "builtin");
+    }
+
+    #[test]
+    fn gemma_builtin_profile_uses_embedded_promoted_default() {
+        let profile = resolve_profile("google/gemma-4-26b-a4b-it", &[]);
+
+        assert_eq!(profile.name, "gemma-dsrs-conservative");
+        assert_eq!(profile.revision, 4);
+        assert_eq!(profile.dsrs_history_format, DsrsHistoryFormat::AppendOnly);
+        assert_eq!(
+            profile.request_adapter_artifact.as_deref(),
+            Some("builtin:request-adapter/gemma-dsrs-conservative/r3-append-only-json-meta")
+        );
+        assert!(profile
+            .tool_instruction
+            .contains("MANDATORY INSPECTION FIRST"));
     }
 
     #[test]

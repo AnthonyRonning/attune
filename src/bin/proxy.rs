@@ -15,7 +15,10 @@ use model_correction_proxy::{
         optimize_correction_prompt, optimize_request_adapter_prompt, GepaOptimizationConfig,
         DEFAULT_GEPA_LM_MAX_TOKENS,
     },
-    promotion::{promote_artifact, ArtifactPromotionConfig},
+    promotion::{
+        promote_artifact, promote_default_artifact, ArtifactPromotionConfig,
+        DefaultArtifactPromotionConfig,
+    },
     replay::{replay_traces, ReplayConfig},
     trace::{read_trace_records, trace_summaries, TraceSummary},
     trace_harness::{
@@ -197,6 +200,18 @@ enum Command {
         artifact_path: String,
         #[arg(long)]
         artifact_reference: Option<String>,
+        #[arg(long)]
+        profile: Option<String>,
+        #[arg(long = "model-pattern")]
+        model_patterns: Vec<String>,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    PromoteDefaultArtifact {
+        #[arg(long)]
+        manifest_path: Option<String>,
+        #[arg(long)]
+        artifact_path: String,
         #[arg(long)]
         profile: Option<String>,
         #[arg(long = "model-pattern")]
@@ -488,6 +503,27 @@ async fn main() -> anyhow::Result<()> {
                 config_path,
                 artifact_path: artifact_path.into(),
                 artifact_reference,
+                profile,
+                model_patterns,
+                dry_run,
+            })
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(())
+        }
+        Command::PromoteDefaultArtifact {
+            manifest_path,
+            artifact_path,
+            profile,
+            model_patterns,
+            dry_run,
+        } => {
+            let manifest_path = manifest_path
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("profiles/builtin-defaults.toml"));
+            let report = promote_default_artifact(DefaultArtifactPromotionConfig {
+                manifest_path,
+                artifact_path: artifact_path.into(),
                 profile,
                 model_patterns,
                 dry_run,

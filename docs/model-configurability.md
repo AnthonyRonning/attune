@@ -29,6 +29,7 @@ The current implementation already has the core pipeline needed for this design:
 | Upstream | Generic OpenAI-compatible `/chat/completions` and `/models` through `src/upstream.rs` |
 | Request normalization | `src/normalizer.rs` produces `NormalizedRequest` with messages, tools, tool choice, and parallel-tool setting |
 | Model profiles | `src/model_profile.rs` resolves by substring against code-defined profiles |
+| Built-in defaults | `profiles/builtin-defaults.toml` is validated by `build.rs` and embedded into the binary as reviewed default artifacts |
 | Tool modes | `ToolMode::ProxyOwned` strips native upstream tools; `ToolMode::PassThrough` keeps native tools |
 | Tool formats | `ToolFormat::Dsrs` is the primary path; XML and tagged JSON renderers still exist |
 | DSRs request adapter | `src/dsrs_contract.rs` renders system/developer context, tools, `tool_choice`, `parallel_tool_calls`, and profile-selected conversation history format into DSRs-compatible prompts |
@@ -45,7 +46,7 @@ The current implementation already has the core pipeline needed for this design:
 | Optimization | `src/optimization.rs` runs GEPA against correction-agent and request-adapter prompt programs and writes profile-aware artifacts |
 | Artifact promotion | `src/promotion.rs` validates a GEPA artifact and promotes it into the matching profile config field |
 
-The first configuration slice is implemented. `ProxyConfig` can now load TOML, JSON, or JSON5 files from `--config` / `MCP_CONFIG_PATH`; configured profiles override built-ins; profile revision/source/history-format/artifact metadata is written to traces; request-adapter and correction-agent instruction artifacts are loaded at startup; and GEPA reports include profile, revision, artifact, and request-adapter history-format metadata.
+The first configuration slice is implemented. `ProxyConfig` can now load TOML, JSON, or JSON5 files from `--config` / `MCP_CONFIG_PATH`; configured profiles override built-ins; profile revision/source/history-format/artifact metadata is written to traces; request-adapter and correction-agent instruction artifacts are loaded from filesystem paths or `builtin:<artifact-id>` references; and GEPA reports include profile, revision, artifact, and request-adapter history-format metadata.
 
 The remaining limitation is that not every planned per-model knob is exposed yet. Tool mode, tool format, model matching, profile guidance, correction model, correction passes, and prompt artifacts are configurable. Parser strictness, correction trigger policy, provider identity, and retry strategy still live mostly in shared code and coarse global config.
 
@@ -323,7 +324,7 @@ Request-adapter GEPA uses a local JSON adapter for the optimizer's own reflectio
 
 For example, a model that emits a valid DSRs envelope with empty `content` and `[]` tool calls has failed at the request-adapter prompt layer, not the correction-agent layer. That trace belongs in a model/profile-specific request-adapter dataset so GEPA can improve the profile guidance, while runtime policy should still route the empty response through correction or a future retry path.
 
-Promotion is now explicit rather than automatic. The optimizer writes JSON artifacts for review; `promote-artifact` then validates `artifact_type`, `profile`, and layer metadata, updates the appropriate profile config field, carries `dsrs_history_format` from request-adapter artifacts into the profile config, and increments the profile revision. That same command works for request-adapter artifacts and correction-agent artifacts, so every profile can follow the same dataset -> GEPA -> inspect -> promote loop. Formatter-comparison GEPA outputs are ignored by default until a specific artifact is reviewed and promoted.
+Promotion is now explicit rather than automatic. The optimizer writes JSON artifacts for review; `promote-artifact` then validates `artifact_type`, `profile`, and layer metadata, updates the appropriate profile config field, carries `dsrs_history_format` from request-adapter artifacts into the profile config, and increments the profile revision. `promote-default-artifact` is the next promotion step: it updates `profiles/builtin-defaults.toml` so a reviewed artifact is validated by `build.rs` and embedded into shipped binaries. Both commands work for request-adapter artifacts and correction-agent artifacts, so every profile can follow the same dataset -> GEPA -> inspect -> config promotion -> default promotion loop. Formatter-comparison GEPA outputs are ignored by default until a specific artifact is reviewed and promoted.
 
 The latest reviewed request-adapter matrix used 14 Gemma-focused examples from:
 
@@ -340,7 +341,7 @@ Results:
 | `qwen/qwen3.5-9b` | `append_only` | `0.7000001` | not promoted; showed Pi/path-specific overfit |
 | `qwen/qwen3.5-9b` | `regenerated_context` | `0.6642858` | not promoted |
 
-The promoted Gemma artifact is `datasets/request-adapter/gemma-dsrs-conservative-r3-append-only-gepa.json`; `configs/gemma-dsrs-conservative.toml` now references it and carries profile revision 4. This makes the Gemma config the current best-known path, while the Qwen built-in profile remains intentionally unpromoted until it has a cleaner Qwen-specific dataset.
+The promoted Gemma artifact is `datasets/request-adapter/gemma-dsrs-conservative-r3-append-only-gepa.json`; `configs/gemma-dsrs-conservative.toml` references it and carries profile revision 4, and `profiles/builtin-defaults.toml` embeds it as `builtin:request-adapter/gemma-dsrs-conservative/r3-append-only-json-meta`. That makes plain built-in Gemma resolution use the reviewed instruction without requiring local artifact files. The Qwen built-in profile remains intentionally unpromoted until it has a cleaner Qwen-specific dataset.
 
 ### Traces and Datasets
 
@@ -464,6 +465,12 @@ GEPA artifacts should not silently change runtime behavior. Promotion should be 
 
 Status: implemented through `promote-artifact`. The command supports request-adapter and correction-agent GEPA artifacts, preserves existing profile model patterns unless `--model-pattern` is supplied, records the previous and new artifact reference in its JSON report, carries request-adapter `dsrs_history_format` into config, and supports `--dry-run`.
 
+### Step 9: Add embedded built-in default promotion
+
+Config promotion is not enough for a shipped binary because config artifacts are filesystem paths. Add a final promotion layer that embeds reviewed artifacts into the binary while preserving their original JSON reports for audit.
+
+Status: implemented through `profiles/builtin-defaults.toml`, `build.rs`, and `promote-default-artifact`. The manifest lists reviewed artifacts and profile defaults. The build script validates artifact existence, JSON shape, `artifact_id`, `artifact_type`, profile ownership, and instruction presence, then generates an embedded registry with `include_str!`. Built-in profiles can use those artifacts through `builtin:<artifact-id>` references, and runtime config can also point at the same embedded references when desired.
+
 ## Guardrails
 
 - Do not make every parser behavior a model-specific branch.
@@ -477,8 +484,8 @@ Status: implemented through `promote-artifact`. The command supports request-ada
 
 ## Near-Term Target
 
-The next practical milestone is making "best produced defaults" easier to use without losing review discipline. Today promoted artifacts load from config files, so `cargo run -- --config configs/gemma-dsrs-conservative.toml` is the current best Gemma path while plain `cargo run` uses compiled built-ins. A durable default story should make reviewed profile configs discoverable, validate promoted artifacts, and still keep promotion explicit.
+The durable default story is now in place: reviewed artifacts can move from GEPA output, to config promotion, to embedded built-in defaults. The next practical milestone is deeper profile schema validation and parser/repair policy configuration, followed by adding more model families to the same artifact and dataset flow.
 
-After that, the next technical milestone is deeper profile schema validation and parser/repair policy configuration. The config file, profile revision trace metadata, prompt artifact loading, trace-harness curation flow, and explicit artifact promotion path are now in place.
+The config file, profile revision trace metadata, prompt artifact loading, trace-harness curation flow, explicit artifact promotion path, and embedded built-in default promotion path are now in place.
 
 That gets the project closer to the original intent: any OpenAI-compatible application can request any model, and the proxy can select the right behavior profile, collect traces, build datasets, optimize prompts, and improve reliability without requiring the application to change.
