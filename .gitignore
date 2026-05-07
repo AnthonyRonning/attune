@@ -9,6 +9,10 @@
 /datasets/request-adapter/*-regenerated-context-gepa.json
 /datasets/request-adapter/*-trace-faithful-*-gepa.json
 /eval/*.local.jsonl
+/eval/trace-harness/raw/
+/eval/trace-harness/scenarios/*.local.jsonl
+/eval/trace-harness/results/*.local.json
+/eval/trace-harness/results/*.local.jsonl
 *.log
 *.env
 .codex

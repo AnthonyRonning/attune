@@ -15,6 +15,7 @@ pub mod repair;
 pub mod replay;
 pub mod response_interpreter;
 pub mod trace;
+pub mod trace_harness;
 pub mod upstream;
 
 pub use config::ProxyConfig;

@@ -281,6 +281,7 @@ Run any command through Nix as `nix develop --command cargo run -- <command> ...
 | `optimize-prompts` | Run GEPA for the correction-agent DSRs prompt using a correction dataset. |
 | `optimize-request-adapter-prompt` | Run GEPA for request-adapter profile guidance using the runtime DSRs formatter and selected `dsrs_history_format`. |
 | `promote-artifact` | Deliberately promote a reviewed GEPA artifact into a model-profile config and bump the profile revision. |
+| `trace-harness` | Import third-party harness traces into neutral scenarios, inspect them, and run sampled live structural checks through the proxy. |
 
 The normal reliability loop is:
 
@@ -289,6 +290,25 @@ The normal reliability loop is:
 3. Run the relevant GEPA optimizer.
 4. Inspect the generated artifact.
 5. Use `promote-artifact --dry-run`, then promote only if the artifact is worth adopting.
+
+For broader live checks that are not tied to a local failing trace, use the trace harness:
+
+```sh
+nix develop --command cargo run -- \
+  trace-harness import-pi \
+  --input-path eval/trace-harness/raw/pi-mono \
+  --output-path eval/trace-harness/scenarios/pi-mono.local.jsonl \
+  --max-scenarios 12
+
+nix develop --command cargo run -- \
+  trace-harness run \
+  --scenarios-path eval/trace-harness/scenarios/pi-mono.local.jsonl \
+  --output-path eval/trace-harness/results/gemma-pi.local.json \
+  --model google/gemma-4-26b-a4b-it \
+  --limit 12
+```
+
+Trace-harness scenarios preserve the source conversation prefix and tool definitions, then ask the live proxy/model for the next assistant turn. They do not execute source harness tools and they do not grade whether the model made the best engineering choice. They only check whether the final proxy response stays structurally usable for an OpenAI-compatible agent loop. See [`eval/trace-harness/README.md`](eval/trace-harness/README.md).
 
 ## Example request
 
@@ -576,6 +596,9 @@ nix flake check
 ├── intent.md
 ├── docs/
 │   └── model-configurability.md
+├── eval/
+│   └── trace-harness/
+│       └── README.md
 ├── examples/
 │   └── mock_upstream.rs
 └── src/

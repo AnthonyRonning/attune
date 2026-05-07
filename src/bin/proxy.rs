@@ -17,6 +17,10 @@ use model_correction_proxy::{
     promotion::{promote_artifact, ArtifactPromotionConfig},
     replay::{replay_traces, ReplayConfig},
     trace::{read_trace_records, trace_summaries, TraceSummary},
+    trace_harness::{
+        import_hermes_rows_scenarios, import_pi_trace_scenarios, inspect_trace_harness_scenarios,
+        run_trace_harness, TraceHarnessImportConfig, TraceHarnessRunConfig,
+    },
 };
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
@@ -194,6 +198,76 @@ enum Command {
         model_patterns: Vec<String>,
         #[arg(long)]
         dry_run: bool,
+    },
+    TraceHarness {
+        #[command(subcommand)]
+        command: TraceHarnessCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum TraceHarnessCommand {
+    ImportPi {
+        #[arg(long)]
+        input_path: String,
+        #[arg(
+            long,
+            default_value = "eval/trace-harness/scenarios/pi-mono.local.jsonl"
+        )]
+        output_path: String,
+        #[arg(long, default_value = "google/gemma-4-26b-a4b-it")]
+        model: String,
+        #[arg(long, default_value_t = 24)]
+        max_scenarios: usize,
+        #[arg(long, default_value_t = 13)]
+        seed: u64,
+        #[arg(long)]
+        append: bool,
+        #[arg(long, default_value_t = 24)]
+        max_messages: usize,
+        #[arg(long, default_value_t = 60000)]
+        max_request_chars: usize,
+    },
+    ImportHermesRows {
+        #[arg(long)]
+        input_path: String,
+        #[arg(
+            long,
+            default_value = "eval/trace-harness/scenarios/hermes.local.jsonl"
+        )]
+        output_path: String,
+        #[arg(long, default_value = "google/gemma-4-26b-a4b-it")]
+        model: String,
+        #[arg(long, default_value_t = 24)]
+        max_scenarios: usize,
+        #[arg(long, default_value_t = 13)]
+        seed: u64,
+        #[arg(long)]
+        append: bool,
+        #[arg(long, default_value_t = 24)]
+        max_messages: usize,
+        #[arg(long, default_value_t = 60000)]
+        max_request_chars: usize,
+    },
+    Inspect {
+        #[arg(long)]
+        scenarios_path: String,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    Run {
+        #[arg(long)]
+        scenarios_path: String,
+        #[arg(long, default_value = "eval/trace-harness/results/run.local.json")]
+        output_path: String,
+        #[arg(long)]
+        proxy_url: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long, default_value_t = 24)]
+        limit: usize,
     },
 }
 
@@ -413,6 +487,101 @@ async fn main() -> anyhow::Result<()> {
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(())
         }
+        Command::TraceHarness { command } => match command {
+            TraceHarnessCommand::ImportPi {
+                input_path,
+                output_path,
+                model,
+                max_scenarios,
+                seed,
+                append,
+                max_messages,
+                max_request_chars,
+            } => {
+                let report = import_pi_trace_scenarios(TraceHarnessImportConfig {
+                    input_path: input_path.into(),
+                    output_path: output_path.into(),
+                    model,
+                    max_scenarios,
+                    seed,
+                    append,
+                    max_messages,
+                    max_request_chars,
+                })
+                .await?;
+                println!("{}", serde_json::to_string_pretty(&report)?);
+                Ok(())
+            }
+            TraceHarnessCommand::ImportHermesRows {
+                input_path,
+                output_path,
+                model,
+                max_scenarios,
+                seed,
+                append,
+                max_messages,
+                max_request_chars,
+            } => {
+                let report = import_hermes_rows_scenarios(TraceHarnessImportConfig {
+                    input_path: input_path.into(),
+                    output_path: output_path.into(),
+                    model,
+                    max_scenarios,
+                    seed,
+                    append,
+                    max_messages,
+                    max_request_chars,
+                })
+                .await?;
+                println!("{}", serde_json::to_string_pretty(&report)?);
+                Ok(())
+            }
+            TraceHarnessCommand::Inspect {
+                scenarios_path,
+                limit,
+                json,
+            } => {
+                let previews =
+                    inspect_trace_harness_scenarios(&PathBuf::from(scenarios_path), limit).await?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&previews)?);
+                } else {
+                    for preview in previews {
+                        println!(
+                            "{} [{}] messages={} tools={} observed={} latest_user={}",
+                            preview.id,
+                            preview.dataset,
+                            preview.messages,
+                            preview.tools,
+                            preview.observed_kind,
+                            preview.latest_user.unwrap_or_default()
+                        );
+                    }
+                }
+                Ok(())
+            }
+            TraceHarnessCommand::Run {
+                scenarios_path,
+                output_path,
+                proxy_url,
+                model,
+                limit,
+            } => {
+                let proxy_config =
+                    ProxyConfig::from_optional_path(runtime_config_path.as_deref()).await?;
+                let report = run_trace_harness(TraceHarnessRunConfig {
+                    scenarios_path: scenarios_path.into(),
+                    output_path: output_path.into(),
+                    proxy_url,
+                    model,
+                    limit,
+                    proxy_config,
+                })
+                .await?;
+                println!("{}", serde_json::to_string_pretty(&report)?);
+                Ok(())
+            }
+        },
     }
 }
 
