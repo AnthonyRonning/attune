@@ -797,6 +797,39 @@ mod tests {
     }
 
     #[test]
+    fn marks_dsrs_content_with_tool_calls_as_contract_violation() {
+        let response = ChatCompletionResponse {
+            id: "1".to_string(),
+            object: "chat.completion".to_string(),
+            created: 0,
+            model: "m".to_string(),
+            choices: vec![ChatChoice {
+                index: 0,
+                message: ChatMessage::new(
+                    "assistant",
+                    r#"[[ ## content ## ]]
+I will inspect the repository first.
+
+[[ ## tool_calls ## ]]
+[{"name":"bash","arguments":{"command":"ls packages"}}]
+[[ ## completed ## ]]"#,
+                ),
+                finish_reason: Some("stop".to_string()),
+                logprobs: None,
+                extra: Map::new(),
+            }],
+            usage: None,
+            extra: Map::new(),
+        };
+
+        let interpreted = interpret_response(&response, &[tool("bash")]);
+
+        assert_eq!(interpreted.content, None);
+        assert_eq!(interpreted.tool_intents.len(), 1);
+        assert!(interpreted.has_failure(ResponseFailureKind::DsrsContractViolation));
+    }
+
+    #[test]
     fn strips_dsrs_content_when_no_tool_call_is_needed() {
         let response = ChatCompletionResponse {
             id: "1".to_string(),

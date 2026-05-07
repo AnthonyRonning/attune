@@ -262,6 +262,17 @@ pub fn parse_tool_contract_response(content: &str) -> Option<ParsedDsrsContract>
     let tool_calls_field = raw_tool_calls_field.trim();
 
     let tool_intents = parse_tool_calls_field(tool_calls_field, &mut events, &mut failures);
+    if parsed_content
+        .as_deref()
+        .is_some_and(|content| !content.trim().is_empty())
+        && !tool_intents.is_empty()
+    {
+        push_failure(
+            &mut failures,
+            ResponseFailureKind::DsrsContractViolation,
+            "DSRs output contained user-facing content while also emitting tool calls",
+        );
+    }
 
     Some(ParsedDsrsContract {
         content: parsed_content,
@@ -1105,6 +1116,30 @@ tool_calls: [
             parsed.tool_intents[1].arguments.as_ref().unwrap()["path"],
             "packages/ai/README.md"
         );
+    }
+
+    #[test]
+    fn reports_content_and_tool_calls_as_contract_violation() {
+        let parsed = parse_tool_contract_response(
+            r#"[[ ## content ## ]]
+I will inspect the package list first.
+
+[[ ## tool_calls ## ]]
+[{"name":"bash","arguments":{"command":"ls packages"}}]
+[[ ## completed ## ]]"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            parsed.content.as_deref(),
+            Some("I will inspect the package list first.")
+        );
+        assert_eq!(parsed.tool_intents.len(), 1);
+        assert!(parsed.failures.iter().any(|failure| failure.kind
+            == ResponseFailureKind::DsrsContractViolation
+            && failure
+                .detail
+                .contains("content while also emitting tool calls")));
     }
 
     #[test]
