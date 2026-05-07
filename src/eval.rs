@@ -18,6 +18,14 @@ use crate::{
 #[derive(Debug, Clone)]
 pub struct RegressionConfig {
     pub suite_path: PathBuf,
+    pub proxy_config: ProxyConfig,
+    pub filter: RegressionFilter,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RegressionFilter {
+    pub model: Option<String>,
+    pub profile: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,7 +53,11 @@ pub struct RegressionReport {
     pub failed: usize,
     pub failures: Vec<RegressionFailure>,
     pub metrics: CorrectionMetrics,
+    pub by_model: BTreeMap<String, ProfileMetrics>,
     pub by_profile: BTreeMap<String, ProfileMetrics>,
+    pub by_profile_revision: BTreeMap<String, ProfileMetrics>,
+    pub by_request_adapter_artifact: BTreeMap<String, ProfileMetrics>,
+    pub by_correction_agent_artifact: BTreeMap<String, ProfileMetrics>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,23 +86,39 @@ pub async fn run_regression_suite(config: RegressionConfig) -> Result<Regression
         .with_context(|| format!("failed to read {}", config.suite_path.display()))?;
     let cases = parse_cases(&content)
         .with_context(|| format!("failed to parse {}", config.suite_path.display()))?;
-    evaluate_cases(cases).await
+    evaluate_cases_with_config(cases, config.proxy_config, config.filter).await
 }
 
 pub async fn evaluate_cases(cases: Vec<RegressionCase>) -> Result<RegressionReport> {
-    let proxy_config = ProxyConfig::default();
+    evaluate_cases_with_config(cases, ProxyConfig::default(), RegressionFilter::default()).await
+}
+
+pub async fn evaluate_cases_with_config(
+    cases: Vec<RegressionCase>,
+    proxy_config: ProxyConfig,
+    filter: RegressionFilter,
+) -> Result<RegressionReport> {
     let correction_agent = NoopCorrectionAgent;
     let mut failures = Vec::new();
+    let mut by_model = BTreeMap::<String, ProfileMetrics>::new();
     let mut by_profile = BTreeMap::<String, ProfileMetrics>::new();
+    let mut by_profile_revision = BTreeMap::<String, ProfileMetrics>::new();
+    let mut by_request_adapter_artifact = BTreeMap::<String, ProfileMetrics>::new();
+    let mut by_correction_agent_artifact = BTreeMap::<String, ProfileMetrics>::new();
     let mut deterministic_repair_count = 0usize;
     let mut correction_agent_count = 0usize;
     let mut recovered_tool_cases = 0usize;
     let mut expected_tool_cases = 0usize;
     let mut schema_valid = 0usize;
+    let mut total = 0usize;
 
     for case in &cases {
         let normalized = normalize_request(case.request.clone())?;
-        let profile = resolve_profile(&normalized.model, &[]);
+        let profile = resolve_profile(&normalized.model, &proxy_config.model_profiles);
+        if !filter.matches(&normalized.model, &profile.name) {
+            continue;
+        }
+        total += 1;
         let interpreted = interpret_response(&case.upstream_response, &normalized.tools);
         let outcome = repair_response(
             &proxy_config,
@@ -118,8 +146,24 @@ pub async fn evaluate_cases(cases: Vec<RegressionCase>) -> Result<RegressionRepo
             .filter(|action| action.action.contains("correction_agent"))
             .count();
 
-        let profile_metrics = by_profile.entry(profile.name.clone()).or_default();
-        profile_metrics.total += 1;
+        by_model.entry(normalized.model.clone()).or_default().total += 1;
+        by_profile.entry(profile.name.clone()).or_default().total += 1;
+        by_profile_revision
+            .entry(format!("{}@{}", profile.name, profile.revision))
+            .or_default()
+            .total += 1;
+        if let Some(artifact) = &profile.request_adapter_artifact {
+            by_request_adapter_artifact
+                .entry(artifact.clone())
+                .or_default()
+                .total += 1;
+        }
+        if let Some(artifact) = &profile.correction_agent_artifact {
+            by_correction_agent_artifact
+                .entry(artifact.clone())
+                .or_default()
+                .total += 1;
+        }
 
         let validation = validate_case(case, &outcome.final_response);
         if let Err(reason) = validation {
@@ -128,7 +172,24 @@ pub async fn evaluate_cases(cases: Vec<RegressionCase>) -> Result<RegressionRepo
                 reason,
             });
         } else {
-            profile_metrics.passed += 1;
+            by_model.entry(normalized.model.clone()).or_default().passed += 1;
+            by_profile.entry(profile.name.clone()).or_default().passed += 1;
+            by_profile_revision
+                .entry(format!("{}@{}", profile.name, profile.revision))
+                .or_default()
+                .passed += 1;
+            if let Some(artifact) = &profile.request_adapter_artifact {
+                by_request_adapter_artifact
+                    .entry(artifact.clone())
+                    .or_default()
+                    .passed += 1;
+            }
+            if let Some(artifact) = &profile.correction_agent_artifact {
+                by_correction_agent_artifact
+                    .entry(artifact.clone())
+                    .or_default()
+                    .passed += 1;
+            }
         }
 
         if !case.expected_tool_calls.is_empty() {
@@ -149,7 +210,6 @@ pub async fn evaluate_cases(cases: Vec<RegressionCase>) -> Result<RegressionRepo
         }
     }
 
-    let total = cases.len();
     let failed = failures.len();
     let passed = total.saturating_sub(failed);
     Ok(RegressionReport {
@@ -163,8 +223,29 @@ pub async fn evaluate_cases(cases: Vec<RegressionCase>) -> Result<RegressionRepo
             deterministic_repair_count,
             correction_agent_count,
         },
+        by_model,
         by_profile,
+        by_profile_revision,
+        by_request_adapter_artifact,
+        by_correction_agent_artifact,
     })
+}
+
+impl RegressionFilter {
+    fn matches(&self, model: &str, profile: &str) -> bool {
+        matches_optional_text_filter(model, self.model.as_deref())
+            && matches_optional_text_filter(profile, self.profile.as_deref())
+    }
+}
+
+fn matches_optional_text_filter(actual: &str, filter: Option<&str>) -> bool {
+    filter
+        .map(|filter| {
+            actual
+                .to_ascii_lowercase()
+                .contains(&filter.to_ascii_lowercase())
+        })
+        .unwrap_or(true)
 }
 
 pub fn correction_gepa_config() -> GEPA {

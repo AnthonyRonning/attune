@@ -209,9 +209,14 @@ async fn chat_completions(
 
     let profile = resolve_profile(&normalized.model, &state.config.model_profiles);
     trace.profile = Some(profile.clone());
+    trace.profile_metadata = Some(profile.metadata());
     tracing::info!(
         %trace_id,
         profile = %profile.name,
+        profile_revision = profile.revision,
+        profile_source = %profile.source,
+        request_adapter_artifact = ?profile.request_adapter_artifact,
+        correction_agent_artifact = ?profile.correction_agent_artifact,
         tool_mode = ?profile.tool_mode,
         tool_format = ?profile.tool_format,
         supports_parallel_tool_calls = profile.supports_parallel_tool_calls,

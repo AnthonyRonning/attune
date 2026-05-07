@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use dspy_rs::{
     configure, example, ChatAdapter, Evaluator, Example, FeedbackEvaluator, FeedbackMetric,
     GEPAResult, Module, Optimizable, Predict, Prediction, Predictor, Signature, GEPA, LM,
@@ -18,12 +19,22 @@ pub struct GepaOptimizationConfig {
     pub base_url: String,
     pub api_key: Option<String>,
     pub model: String,
+    pub target_model: Option<String>,
+    pub profile: Option<String>,
+    pub artifact_id: Option<String>,
     pub iterations: usize,
     pub max_examples: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GepaOptimizationReport {
+    pub artifact_id: String,
+    pub artifact_type: String,
+    pub signature: String,
+    pub target_model: Option<String>,
+    pub profile: Option<String>,
+    pub optimizer_model: String,
+    pub created_at: DateTime<Utc>,
     pub examples_loaded: usize,
     pub best_instruction: String,
     pub best_average_score: f32,
@@ -33,11 +44,105 @@ pub struct GepaOptimizationReport {
 }
 
 #[Signature]
+struct RequestAdapterPromptSignature {
+    /// Tool calls are an application contract. You are adapting OpenAI-compatible
+    /// tool use into DSRs output fields for a coding-agent model. Read the
+    /// serialized conversation, obey system_context without copying it, and produce
+    /// exactly one completed DSRs response. If the user asks about a project,
+    /// repository, package, docs, code, or filesystem state and the answer is not
+    /// already present in the conversation, call an available inspection tool
+    /// instead of guessing. A completed response must never be blank or placeholder
+    /// content. Empty content with [] tool_calls is invalid. Literal [], {}, null,
+    /// content_value, tool_calls_value, or completed_marker in content are invalid
+    /// answers. When using tools, leave content empty and put valid calls in
+    /// tool_calls. When no tool is needed, put a real user-facing answer in content
+    /// and set tool_calls to [].
+    #[input(desc = "Serialized system/developer instructions to obey but never repeat")]
+    pub system_context: String,
+
+    #[input(desc = "Serialized non-system OpenAI messages to answer")]
+    pub conversation: String,
+
+    #[input(desc = "Serialized OpenAI tool definitions")]
+    pub available_tools: String,
+
+    #[input(desc = "Original OpenAI tool_choice")]
+    pub tool_choice: String,
+
+    #[input(desc = "Whether multiple tool calls may be emitted")]
+    pub parallel_tool_calls: bool,
+
+    #[output(desc = "Plain user-facing reply text without labels; empty when using tools.")]
+    pub content: String,
+
+    #[output(desc = "JSON array of {\"name\": string, \"arguments\": object} tool calls")]
+    pub tool_calls: Vec<RequestAdapterPromptToolCall>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+struct RequestAdapterPromptToolCall {
+    name: String,
+    #[serde(default)]
+    arguments: Value,
+}
+
+pub struct RequestAdapterPromptProgram {
+    predictor: Predict,
+}
+
+impl Default for RequestAdapterPromptProgram {
+    fn default() -> Self {
+        Self {
+            predictor: Predict::new(RequestAdapterPromptSignature::new()),
+        }
+    }
+}
+
+impl Module for RequestAdapterPromptProgram {
+    async fn forward(&self, inputs: Example) -> Result<Prediction> {
+        match std::panic::AssertUnwindSafe(self.predictor.forward(inputs))
+            .catch_unwind()
+            .await
+        {
+            Ok(result) => result,
+            Err(_) => Ok(Prediction::default()),
+        }
+    }
+}
+
+impl Optimizable for RequestAdapterPromptProgram {
+    fn parameters(&mut self) -> IndexMap<String, &mut dyn Optimizable> {
+        let mut parameters = IndexMap::new();
+        parameters.insert(
+            "request_adapter_prompt".to_string(),
+            &mut self.predictor as &mut dyn Optimizable,
+        );
+        parameters
+    }
+}
+
+impl Evaluator for RequestAdapterPromptProgram {
+    async fn metric(&self, example: &Example, prediction: &Prediction) -> f32 {
+        self.feedback_metric(example, prediction).await.score
+    }
+}
+
+impl FeedbackEvaluator for RequestAdapterPromptProgram {
+    async fn feedback_metric(&self, example: &Example, prediction: &Prediction) -> FeedbackMetric {
+        let expected = example.get("expected_output", None);
+        let predicted = prediction_to_adapter_value(prediction);
+        score_request_adapter_prediction(&expected, &predicted)
+    }
+}
+
+#[Signature]
 struct CorrectionPromptSignature {
     /// You are a strict DSRs model-response correction agent. Recover only clear
     /// tool-call intent or user-facing content by filling the requested DSRs output
     /// fields. Do not invent tools, arguments, or facts. If a safe repair is not
-    /// possible, set possible to false.
+    /// possible, set possible to false. Treat empty DSRs output with empty content
+    /// and [] tool_calls as malformed; recover only when the conversation and tools
+    /// make the next action or answer clear.
     #[input(desc = "OpenAI-compatible tool definitions")]
     pub available_tools: String,
 
@@ -174,6 +279,18 @@ pub async fn optimize_correction_prompt(
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
     let report = GepaOptimizationReport {
+        artifact_id: config.artifact_id.clone().unwrap_or_else(|| {
+            default_correction_artifact_id(
+                config.profile.as_deref(),
+                config.target_model.as_deref(),
+            )
+        }),
+        artifact_type: "correction_agent_instruction".to_string(),
+        signature: "correct_malformed_tool_response/v1".to_string(),
+        target_model: config.target_model.clone(),
+        profile: config.profile.clone(),
+        optimizer_model: config.model.clone(),
+        created_at: Utc::now(),
         examples_loaded: examples.len(),
         best_instruction: result.best_candidate.instruction.clone(),
         best_average_score: result.best_candidate.average_score(),
@@ -185,6 +302,91 @@ pub async fn optimize_correction_prompt(
         .await
         .with_context(|| format!("failed to write {}", config.output_path.display()))?;
     Ok(report)
+}
+
+pub async fn optimize_request_adapter_prompt(
+    config: GepaOptimizationConfig,
+) -> Result<GepaOptimizationReport> {
+    let Some(api_key) = config.api_key.clone() else {
+        anyhow::bail!(
+            "OPENROUTER_API_KEY or --api-key equivalent is required for GEPA optimization"
+        );
+    };
+
+    let rows = read_dataset_rows(&config.dataset_path).await?;
+    let rows: Vec<Value> = rows.into_iter().take(config.max_examples).collect();
+    let examples = request_adapter_rows_to_gepa_examples(&rows);
+    if examples.is_empty() {
+        anyhow::bail!("dataset contained no request-adapter optimization examples");
+    }
+
+    let lm = LM::builder()
+        .base_url(config.base_url.clone())
+        .api_key(api_key)
+        .model(config.model.clone())
+        .temperature(0.2)
+        .build()
+        .await
+        .context("failed to build request-adapter GEPA LM")?;
+    configure(lm.clone(), ChatAdapter);
+
+    let gepa = GEPA::builder()
+        .num_iterations(config.iterations)
+        .minibatch_size(examples.len().clamp(1, 3))
+        .temperature(0.7)
+        .track_stats(true)
+        .maybe_prompt_model(Some(lm))
+        .maybe_max_lm_calls(Some((config.iterations.max(1) * 16) + 16))
+        .build();
+
+    let mut program = RequestAdapterPromptProgram::default();
+    let result: GEPAResult = gepa
+        .compile_with_feedback(&mut program, examples.clone())
+        .await
+        .context("GEPA request-adapter prompt optimization failed")?;
+
+    if let Some(parent) = config.output_path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let report = GepaOptimizationReport {
+        artifact_id: config.artifact_id.clone().unwrap_or_else(|| {
+            default_request_adapter_artifact_id(
+                config.profile.as_deref(),
+                config.target_model.as_deref(),
+            )
+        }),
+        artifact_type: "request_adapter_instruction".to_string(),
+        signature: "openai_tool_use_contract_profile_guidance/v1".to_string(),
+        target_model: config.target_model.clone(),
+        profile: config.profile.clone(),
+        optimizer_model: config.model.clone(),
+        created_at: Utc::now(),
+        examples_loaded: examples.len(),
+        best_instruction: result.best_candidate.instruction.clone(),
+        best_average_score: result.best_candidate.average_score(),
+        total_rollouts: result.total_rollouts,
+        total_lm_calls: result.total_lm_calls,
+        output_path: config.output_path.clone(),
+    };
+    tokio::fs::write(&config.output_path, serde_json::to_vec_pretty(&report)?)
+        .await
+        .with_context(|| format!("failed to write {}", config.output_path.display()))?;
+    Ok(report)
+}
+
+fn default_correction_artifact_id(profile: Option<&str>, target_model: Option<&str>) -> String {
+    let target = profile.or(target_model).unwrap_or("default");
+    format!("correction-agent/{target}")
+}
+
+fn default_request_adapter_artifact_id(
+    profile: Option<&str>,
+    target_model: Option<&str>,
+) -> String {
+    let target = profile.or(target_model).unwrap_or("default");
+    format!("request-adapter/{target}")
 }
 
 pub fn traces_to_gepa_examples(dataset_rows: &[Value]) -> Vec<Example> {
@@ -203,6 +405,39 @@ pub fn traces_to_gepa_examples(dataset_rows: &[Value]) -> Vec<Example> {
                 "possible": "output" => expected_fields.possible,
                 "confidence": "output" => expected_fields.confidence,
                 "explanation": "output" => expected_fields.explanation,
+                "content": "output" => expected_fields.content,
+                "tool_calls": "output" => expected_fields.tool_calls
+            }
+        })
+        .collect()
+}
+
+pub fn request_adapter_rows_to_gepa_examples(dataset_rows: &[Value]) -> Vec<Example> {
+    dataset_rows
+        .iter()
+        .filter(|row| {
+            row.get("dataset_type")
+                .and_then(Value::as_str)
+                .is_none_or(|kind| kind == "request_adapter_prompt_gepa/v1")
+        })
+        .map(|row| {
+            let expected = row.get("expected_output").cloned().unwrap_or_else(|| {
+                json!({
+                    "content": "",
+                    "tool_calls": []
+                })
+            });
+            let expected_fields = expected_adapter_output_fields(&expected);
+            example! {
+                "system_context": "input" => stringify_field(row.get("system_context")),
+                "conversation": "input" => stringify_field(row.get("conversation")),
+                "available_tools": "input" => stringify_field(row.get("available_tools")),
+                "tool_choice": "input" => stringify_field(row.get("tool_choice")),
+                "parallel_tool_calls": "input" => row
+                    .get("parallel_tool_calls")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true),
+                "expected_output": "output" => expected.clone(),
                 "content": "output" => expected_fields.content,
                 "tool_calls": "output" => expected_fields.tool_calls
             }
@@ -287,6 +522,25 @@ fn expected_repair_fields(expected: &Value) -> ExpectedRepairFields {
     }
 }
 
+fn expected_adapter_output_fields(expected: &Value) -> ExpectedRepairFields {
+    let expected_calls = expected
+        .get("tool_calls")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    ExpectedRepairFields {
+        possible: true,
+        confidence: 1.0,
+        explanation: "Matched expected request-adapter output".to_string(),
+        content: expected
+            .get("content")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        tool_calls: Value::Array(normalize_tool_calls(&expected_calls)),
+    }
+}
+
 fn prediction_to_repair_value(prediction: &Prediction) -> Value {
     let tool_calls = match prediction.data.get("tool_calls") {
         Some(Value::Array(calls)) => Value::Array(normalize_tool_calls(calls)),
@@ -302,6 +556,23 @@ fn prediction_to_repair_value(prediction: &Prediction) -> Value {
         "possible": prediction.data.get("possible").and_then(Value::as_bool).unwrap_or(false),
         "confidence": prediction.data.get("confidence").and_then(Value::as_f64).unwrap_or(0.0),
         "explanation": prediction.data.get("explanation").and_then(Value::as_str).unwrap_or_default(),
+        "content": prediction.data.get("content").and_then(Value::as_str).unwrap_or_default(),
+        "tool_calls": tool_calls
+    })
+}
+
+fn prediction_to_adapter_value(prediction: &Prediction) -> Value {
+    let tool_calls = match prediction.data.get("tool_calls") {
+        Some(Value::Array(calls)) => Value::Array(normalize_tool_calls(calls)),
+        Some(Value::String(text)) => serde_json::from_str::<Value>(text)
+            .ok()
+            .and_then(|value| value.as_array().cloned())
+            .map(|calls| Value::Array(normalize_tool_calls(&calls)))
+            .unwrap_or_else(|| Value::Array(Vec::new())),
+        _ => Value::Array(Vec::new()),
+    };
+
+    json!({
         "content": prediction.data.get("content").and_then(Value::as_str).unwrap_or_default(),
         "tool_calls": tool_calls
     })
@@ -370,6 +641,105 @@ fn score_correction_prediction(expected: &Value, predicted: &Value) -> FeedbackM
     }
 }
 
+fn score_request_adapter_prediction(expected: &Value, predicted: &Value) -> FeedbackMetric {
+    let expected_calls = expected
+        .get("tool_calls")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let predicted_calls = predicted
+        .get("tool_calls")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let expected_norm = normalize_tool_calls(&expected_calls);
+    let predicted_norm = normalize_tool_calls(&predicted_calls);
+
+    if !expected_norm.is_empty() {
+        if predicted_norm == expected_norm {
+            return FeedbackMetric::new(1.0, "Predicted expected DSRs tool call exactly");
+        }
+        if predicted_norm.iter().any(valid_adapter_tool_call) {
+            return FeedbackMetric::new(
+                0.65,
+                format!(
+                    "Predicted a valid tool call, but not the expected one. Expected {}; predicted {}",
+                    json!(expected_norm),
+                    json!(predicted_norm)
+                ),
+            );
+        }
+
+        let content = predicted
+            .get("content")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if adapter_content_is_noop(content) {
+            return FeedbackMetric::new(
+                0.0,
+                "Predicted empty/no-op content and no tool calls; this is the Gemma failure to avoid",
+            );
+        }
+        return FeedbackMetric::new(
+            0.25,
+            format!(
+                "Expected a tool call before answering, but predicted content only: {content:?}"
+            ),
+        );
+    }
+
+    let expected_content = expected
+        .get("content")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim();
+    let predicted_content = predicted
+        .get("content")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim();
+    if !expected_content.is_empty() && predicted_content == expected_content {
+        FeedbackMetric::new(1.0, "Predicted expected content exactly")
+    } else if !adapter_content_is_noop(predicted_content) && predicted_norm.is_empty() {
+        FeedbackMetric::new(0.7, "Predicted non-placeholder user-facing content")
+    } else {
+        FeedbackMetric::new(
+            0.0,
+            "Predicted no usable content and no tool calls for a completed turn",
+        )
+    }
+}
+
+fn valid_adapter_tool_call(call: &Value) -> bool {
+    let name = call.get("name").and_then(Value::as_str).unwrap_or_default();
+    let Some(arguments) = call.get("arguments").and_then(Value::as_object) else {
+        return false;
+    };
+    !name.trim().is_empty() && !arguments.is_empty()
+}
+
+fn adapter_content_is_noop(content: &str) -> bool {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    if matches!(
+        trimmed.to_ascii_lowercase().as_str(),
+        "content" | "content_value" | "tool_calls_value" | "completed_marker"
+    ) {
+        return true;
+    }
+    serde_json::from_str::<Value>(trimmed)
+        .ok()
+        .or_else(|| json5::from_str::<Value>(trimmed).ok())
+        .is_some_and(|value| match value {
+            Value::Null => true,
+            Value::Array(items) => items.is_empty(),
+            Value::Object(object) => object.is_empty(),
+            _ => false,
+        })
+}
+
 fn normalize_tool_calls(calls: &[Value]) -> Vec<Value> {
     calls
         .iter()
@@ -435,5 +805,46 @@ mod tests {
         });
         let feedback = score_correction_prediction(&expected, &predicted);
         assert_eq!(feedback.score, 1.0);
+    }
+
+    #[test]
+    fn converts_request_adapter_rows_to_gepa_examples() {
+        let rows = vec![json!({
+            "dataset_type": "request_adapter_prompt_gepa/v1",
+            "system_context": "Use tools for project questions.",
+            "conversation": "[0] role: user\ncontent:\ncan you tell me more about this project?",
+            "available_tools": [{"function":{"name":"read"}}],
+            "tool_choice": "auto",
+            "parallel_tool_calls": true,
+            "expected_output": {
+                "content": "",
+                "tool_calls": [{"name":"read","arguments":{"path":"README.md"}}]
+            }
+        })];
+
+        let examples = request_adapter_rows_to_gepa_examples(&rows);
+
+        assert_eq!(examples.len(), 1);
+        assert_eq!(examples[0].get("parallel_tool_calls", None), json!(true));
+        assert_eq!(
+            examples[0].get("tool_calls", None),
+            json!([{"name":"read","arguments":{"path":"README.md"}}])
+        );
+    }
+
+    #[test]
+    fn scores_request_adapter_noop_content_as_failure() {
+        let expected = json!({
+            "content": "",
+            "tool_calls": [{"name":"read","arguments":{"path":"README.md"}}]
+        });
+        let predicted = json!({
+            "content": "[]",
+            "tool_calls": []
+        });
+
+        let feedback = score_request_adapter_prediction(&expected, &predicted);
+
+        assert_eq!(feedback.score, 0.0);
     }
 }

@@ -1,13 +1,15 @@
-use std::net::SocketAddr;
+use std::{net::SocketAddr, path::PathBuf};
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use model_correction_proxy::{
     config::ProxyConfig,
-    dataset::{export_dataset, DatasetExportConfig},
-    eval::{run_regression_suite, RegressionConfig},
+    dataset::{export_dataset, DatasetExportConfig, DatasetExportFilter},
+    eval::{run_regression_suite, RegressionConfig, RegressionFilter},
     gateway::Gateway,
-    optimization::{optimize_correction_prompt, GepaOptimizationConfig},
+    optimization::{
+        optimize_correction_prompt, optimize_request_adapter_prompt, GepaOptimizationConfig,
+    },
     replay::{replay_traces, ReplayConfig},
     trace::{read_trace_records, trace_summaries, TraceSummary},
 };
@@ -22,22 +24,17 @@ struct Cli {
     #[arg(long, env = "MCP_BIND_ADDR", default_value = "127.0.0.1:8080")]
     bind: SocketAddr,
 
-    #[arg(
-        long,
-        env = "MCP_UPSTREAM_BASE_URL",
-        default_value = "https://openrouter.ai/api/v1"
-    )]
-    upstream_base_url: String,
+    #[arg(long, env = "MCP_CONFIG_PATH")]
+    config: Option<String>,
+
+    #[arg(long, env = "MCP_UPSTREAM_BASE_URL")]
+    upstream_base_url: Option<String>,
 
     #[arg(long, env = "MCP_UPSTREAM_API_KEY")]
     upstream_api_key: Option<String>,
 
-    #[arg(
-        long,
-        env = "MCP_TRACE_PATH",
-        default_value = "traces/model-correction-proxy.jsonl"
-    )]
-    trace_path: String,
+    #[arg(long, env = "MCP_TRACE_PATH")]
+    trace_path: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -48,6 +45,16 @@ enum Command {
         trace_path: String,
         #[arg(long, default_value = "datasets/corrections.jsonl")]
         output_path: String,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        profile: Option<String>,
+        #[arg(long = "failure-kind")]
+        failure_kinds: Vec<String>,
+        #[arg(long = "repair-action")]
+        repair_actions: Vec<String>,
+        #[arg(long = "correction-result")]
+        correction_results: Vec<String>,
     },
     Replay {
         #[arg(long, default_value = "traces/model-correction-proxy.jsonl")]
@@ -64,6 +71,10 @@ enum Command {
     Eval {
         #[arg(long, default_value = "eval/regressions.jsonl")]
         suite_path: String,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        profile: Option<String>,
     },
     OptimizePrompts {
         #[arg(long, default_value = "datasets/corrections.jsonl")]
@@ -78,6 +89,46 @@ enum Command {
         base_url: String,
         #[arg(long, env = "MCP_OPTIMIZATION_MODEL", default_value = "qwen/qwen3-8b")]
         model: String,
+        #[arg(long)]
+        target_model: Option<String>,
+        #[arg(long)]
+        profile: Option<String>,
+        #[arg(long)]
+        artifact_id: Option<String>,
+        #[arg(long, default_value_t = 3)]
+        iterations: usize,
+        #[arg(long, default_value_t = 12)]
+        max_examples: usize,
+    },
+    OptimizeRequestAdapterPrompt {
+        #[arg(
+            long,
+            default_value = "datasets/request-adapter/gemma-dsrs-conservative.jsonl"
+        )]
+        dataset_path: String,
+        #[arg(
+            long,
+            default_value = "datasets/request-adapter/gemma-dsrs-conservative-gepa.json"
+        )]
+        output_path: String,
+        #[arg(
+            long,
+            env = "MCP_UPSTREAM_BASE_URL",
+            default_value = "https://openrouter.ai/api/v1"
+        )]
+        base_url: String,
+        #[arg(
+            long,
+            env = "MCP_OPTIMIZATION_MODEL",
+            default_value = "google/gemma-4-26b-a4b-it"
+        )]
+        model: String,
+        #[arg(long)]
+        target_model: Option<String>,
+        #[arg(long)]
+        profile: Option<String>,
+        #[arg(long)]
+        artifact_id: Option<String>,
         #[arg(long, default_value_t = 3)]
         iterations: usize,
         #[arg(long, default_value_t = 12)]
@@ -96,25 +147,43 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let cli = Cli::parse();
+    let config_path = cli.config.as_deref().map(PathBuf::from);
     match cli.command.unwrap_or(Command::Serve) {
         Command::Serve => {
-            let mut config = ProxyConfig::default();
-            config.upstream.base_url = cli.upstream_base_url;
+            let mut config = ProxyConfig::from_optional_path(config_path.as_deref()).await?;
+            if let Some(base_url) = cli.upstream_base_url {
+                config.upstream.base_url = base_url;
+            }
             config.upstream.api_key = first_non_empty([
                 cli.upstream_api_key,
                 std::env::var("OPENROUTER_API_KEY").ok(),
+                config.upstream.api_key.clone(),
             ]);
-            config.trace.path = cli.trace_path.into();
+            if let Some(trace_path) = cli.trace_path {
+                config.trace.path = trace_path.into();
+            }
             let gateway = Gateway::new(config)?;
             gateway.serve(cli.bind).await.context("proxy server failed")
         }
         Command::ExportDataset {
             trace_path,
             output_path,
+            model,
+            profile,
+            failure_kinds,
+            repair_actions,
+            correction_results,
         } => {
             export_dataset(DatasetExportConfig {
                 trace_path: trace_path.into(),
                 output_path: output_path.into(),
+                filter: DatasetExportFilter {
+                    model,
+                    profile,
+                    failure_kinds,
+                    repair_actions,
+                    correction_results,
+                },
             })
             .await
         }
@@ -138,9 +207,16 @@ async fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
-        Command::Eval { suite_path } => {
+        Command::Eval {
+            suite_path,
+            model,
+            profile,
+        } => {
+            let proxy_config = ProxyConfig::from_optional_path(config_path.as_deref()).await?;
             let report = run_regression_suite(RegressionConfig {
                 suite_path: suite_path.into(),
+                proxy_config,
+                filter: RegressionFilter { model, profile },
             })
             .await?;
             println!("{}", serde_json::to_string_pretty(&report)?);
@@ -151,6 +227,9 @@ async fn main() -> anyhow::Result<()> {
             output_path,
             base_url,
             model,
+            target_model,
+            profile,
+            artifact_id,
             iterations,
             max_examples,
         } => {
@@ -160,6 +239,36 @@ async fn main() -> anyhow::Result<()> {
                 base_url,
                 api_key: std::env::var("OPENROUTER_API_KEY").ok(),
                 model,
+                target_model,
+                profile,
+                artifact_id,
+                iterations,
+                max_examples,
+            })
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(())
+        }
+        Command::OptimizeRequestAdapterPrompt {
+            dataset_path,
+            output_path,
+            base_url,
+            model,
+            target_model,
+            profile,
+            artifact_id,
+            iterations,
+            max_examples,
+        } => {
+            let report = optimize_request_adapter_prompt(GepaOptimizationConfig {
+                dataset_path: dataset_path.into(),
+                output_path: output_path.into(),
+                base_url,
+                api_key: std::env::var("OPENROUTER_API_KEY").ok(),
+                model,
+                target_model,
+                profile,
+                artifact_id,
                 iterations,
                 max_examples,
             })
@@ -174,13 +283,26 @@ fn print_trace_summaries(summaries: &[TraceSummary]) {
     for summary in summaries {
         println!("trace {}", summary.trace_id);
         println!(
-            "  model={} profile={} mode={} messages={} tools={}",
+            "  model={} profile={} rev={} source={} mode={} messages={} tools={}",
             summary.model,
             summary.profile.as_deref().unwrap_or("-"),
+            summary
+                .profile_revision
+                .map(|revision| revision.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            summary.profile_source.as_deref().unwrap_or("-"),
             summary.adapter_mode.as_deref().unwrap_or("-"),
             summary.request_messages,
             summary.request_tools
         );
+        if summary.request_adapter_artifact.is_some() || summary.correction_agent_artifact.is_some()
+        {
+            println!(
+                "  artifacts: request={} correction={}",
+                summary.request_adapter_artifact.as_deref().unwrap_or("-"),
+                summary.correction_agent_artifact.as_deref().unwrap_or("-")
+            );
+        }
         if let Some(latest_user) = &summary.latest_user {
             println!("  user: {latest_user}");
         }

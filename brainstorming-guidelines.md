@@ -77,6 +77,41 @@ Early non-goals:
 
 The proxy should be infrastructure, not an agent product.
 
+## Current implementation snapshot
+
+The current codebase has implemented most of the early architecture described in this document.
+
+What exists now:
+
+- OpenAI-compatible `/v1/chat/completions`, `/v1/models`, and `/health` endpoints.
+- Generic OpenAI-compatible upstream calls.
+- Request normalization into an internal request shape.
+- Code-level built-in model profiles selected by model-name substring, with config-file profile overrides.
+- Proxy-owned DSRs tool rendering as the primary path, with pass-through repair still available.
+- Translation of system/developer context, conversation history, prior assistant tool calls, and tool results into DSRs request fields.
+- Buffered upstream responses, with corrected SSE returned to streaming clients after repair.
+- Response interpretation for native tool calls, DSRs, XML, tagged JSON, markdown JSON, direct JSON, and function-like known-tool calls.
+- Typed response failure kinds for contract violations, template leaks, prompt echoes, malformed known tool calls, schema violations, and suspicious stops.
+- Deterministic and schema-guided repair before model-based correction.
+- A typed DSRs correction agent with `possible`, `confidence`, `explanation`, `content`, and `tool_calls` outputs.
+- Main JSONL request traces plus correction-agent sidecar traces.
+- Trace summaries, dataset export, replay, regression evaluation, and metadata-rich GEPA correction-prompt optimization artifacts.
+- TOML/JSON/JSON5 config loading through `--config` / `MCP_CONFIG_PATH`.
+- Runtime loading of request-adapter and correction-agent instruction artifacts from profiles.
+- Profile revision/source/artifact metadata recorded in main and correction-agent traces.
+- Dataset export filters by model, profile, failure kind, repair action, and correction result.
+
+What is still missing:
+
+- Full parser/repair policy configurability per model profile.
+- Dedicated GEPA optimization for request-adapter prompts.
+- Profile validation and migration tooling.
+- Provider-specific adapters beyond generic OpenAI-compatible HTTP.
+- An implemented retry/continue upstream loop.
+- True upstream token streaming.
+
+The new model configurability design lives in `docs/model-configurability.md`.
+
 ## Core architecture
 
 At a high level:

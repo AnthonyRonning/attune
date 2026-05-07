@@ -8,7 +8,7 @@ use tokio::{fs::OpenOptions, io::AsyncWriteExt, sync::Mutex};
 use uuid::Uuid;
 
 use crate::{
-    model_profile::ModelProfile,
+    model_profile::{ModelProfile, ProfileMetadata},
     normalizer::NormalizedRequest,
     openai::{ChatCompletionRequest, ChatCompletionResponse, ChatMessage, OpenAiTool},
     prompt_adapter::AdaptedRequest,
@@ -118,6 +118,14 @@ pub struct CorrectionAgentTraceRecord {
     pub completed_at: Option<DateTime<Utc>>,
     pub model: String,
     pub profile: String,
+    #[serde(default)]
+    pub profile_revision: u32,
+    #[serde(default)]
+    pub profile_source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_adapter_artifact: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correction_agent_artifact: Option<String>,
     pub correction_model: String,
     pub input: CorrectionAgentTraceInput,
     pub raw_output: Option<String>,
@@ -145,6 +153,10 @@ impl CorrectionAgentTraceRecord {
             completed_at: attempt.completed_at,
             model: attempt.model.clone(),
             profile: attempt.profile.clone(),
+            profile_revision: attempt.profile_revision,
+            profile_source: attempt.profile_source.clone(),
+            request_adapter_artifact: attempt.request_adapter_artifact.clone(),
+            correction_agent_artifact: attempt.correction_agent_artifact.clone(),
             correction_model: attempt.correction_model.clone(),
             input: CorrectionAgentTraceInput {
                 tools: attempt.tools.clone(),
@@ -185,6 +197,8 @@ pub struct TraceRecord {
     pub request: ChatCompletionRequest,
     pub normalized: Option<NormalizedRequest>,
     pub profile: Option<ModelProfile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_metadata: Option<ProfileMetadata>,
     pub adapted_request: Option<AdaptedRequest>,
     pub upstream_response: Option<ChatCompletionResponse>,
     pub interpreted: Option<InterpretedResponse>,
@@ -209,6 +223,7 @@ impl TraceRecord {
             request,
             normalized: None,
             profile: None,
+            profile_metadata: None,
             adapted_request: None,
             upstream_response: None,
             interpreted: None,
@@ -228,6 +243,14 @@ pub struct TraceSummary {
     pub trace_id: String,
     pub model: String,
     pub profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_revision: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_adapter_artifact: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correction_agent_artifact: Option<String>,
     pub adapter_mode: Option<String>,
     pub latest_user: Option<String>,
     pub request_messages: usize,
@@ -257,6 +280,7 @@ pub struct TraceSummary {
 
 impl TraceSummary {
     pub fn from_record(record: &TraceRecord) -> Self {
+        let profile_metadata = record_profile_metadata(record);
         let upstream_message = record
             .upstream_response
             .as_ref()
@@ -279,6 +303,18 @@ impl TraceSummary {
             trace_id: record.trace_id.clone(),
             model: record.request.model.clone(),
             profile: record.profile.as_ref().map(|profile| profile.name.clone()),
+            profile_revision: profile_metadata
+                .as_ref()
+                .map(|metadata| metadata.profile_revision),
+            profile_source: profile_metadata
+                .as_ref()
+                .map(|metadata| metadata.profile_source.clone()),
+            request_adapter_artifact: profile_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.request_adapter_artifact.clone()),
+            correction_agent_artifact: profile_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.correction_agent_artifact.clone()),
             adapter_mode: record
                 .adapted_request
                 .as_ref()
@@ -358,6 +394,13 @@ impl TraceSummary {
             error: record.error.clone(),
         }
     }
+}
+
+fn record_profile_metadata(record: &TraceRecord) -> Option<ProfileMetadata> {
+    record
+        .profile_metadata
+        .clone()
+        .or_else(|| record.profile.as_ref().map(ModelProfile::metadata))
 }
 
 pub fn trace_summaries(records: &[TraceRecord], limit: usize) -> Vec<TraceSummary> {

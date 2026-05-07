@@ -20,13 +20,41 @@ pub struct ModelProfile {
     pub name: String,
     #[serde(default)]
     pub model_patterns: Vec<String>,
+    #[serde(default = "default_profile_revision")]
+    pub revision: u32,
+    #[serde(default = "default_profile_source")]
+    pub source: String,
+    #[serde(default)]
+    pub request_adapter_artifact: Option<String>,
+    #[serde(default)]
+    pub correction_agent_artifact: Option<String>,
+    #[serde(default)]
+    pub correction_instruction: Option<String>,
+    #[serde(default = "default_tool_mode")]
     pub tool_mode: ToolMode,
+    #[serde(default = "default_tool_format")]
     pub tool_format: ToolFormat,
+    #[serde(default)]
     pub correction_model: Option<String>,
+    #[serde(default)]
     pub judge_model: Option<String>,
+    #[serde(default = "default_max_correction_passes")]
     pub max_correction_passes: usize,
+    #[serde(default = "default_supports_parallel_tool_calls")]
     pub supports_parallel_tool_calls: bool,
+    #[serde(default = "default_dsrs_instruction")]
     pub tool_instruction: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProfileMetadata {
+    pub profile_id: String,
+    pub profile_revision: u32,
+    pub profile_source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_adapter_artifact: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correction_agent_artifact: Option<String>,
 }
 
 impl ModelProfile {
@@ -34,6 +62,11 @@ impl ModelProfile {
         Self {
             name: "balanced-default".to_string(),
             model_patterns: vec!["*".to_string()],
+            revision: default_profile_revision(),
+            source: builtin_profile_source(),
+            request_adapter_artifact: None,
+            correction_agent_artifact: None,
+            correction_instruction: None,
             tool_mode: ToolMode::ProxyOwned,
             tool_format: ToolFormat::Dsrs,
             correction_model: None,
@@ -48,6 +81,11 @@ impl ModelProfile {
         Self {
             name: "qwen-dsrs".to_string(),
             model_patterns: vec!["qwen".to_string(), "qwq".to_string()],
+            revision: default_profile_revision(),
+            source: builtin_profile_source(),
+            request_adapter_artifact: None,
+            correction_agent_artifact: None,
+            correction_instruction: None,
             tool_mode: ToolMode::ProxyOwned,
             tool_format: ToolFormat::Dsrs,
             correction_model: None,
@@ -62,6 +100,11 @@ impl ModelProfile {
         Self {
             name: "kimi-dsrs".to_string(),
             model_patterns: vec!["kimi".to_string(), "moonshot".to_string()],
+            revision: default_profile_revision(),
+            source: builtin_profile_source(),
+            request_adapter_artifact: None,
+            correction_agent_artifact: None,
+            correction_instruction: None,
             tool_mode: ToolMode::ProxyOwned,
             tool_format: ToolFormat::Dsrs,
             correction_model: None,
@@ -79,6 +122,11 @@ impl ModelProfile {
         Self {
             name: "glm-dsrs".to_string(),
             model_patterns: vec!["glm".to_string(), "z-ai".to_string()],
+            revision: default_profile_revision(),
+            source: builtin_profile_source(),
+            request_adapter_artifact: None,
+            correction_agent_artifact: None,
+            correction_instruction: None,
             tool_mode: ToolMode::ProxyOwned,
             tool_format: ToolFormat::Dsrs,
             correction_model: None,
@@ -93,6 +141,11 @@ impl ModelProfile {
         Self {
             name: "llama-dsrs".to_string(),
             model_patterns: vec!["llama".to_string()],
+            revision: default_profile_revision(),
+            source: builtin_profile_source(),
+            request_adapter_artifact: None,
+            correction_agent_artifact: None,
+            correction_instruction: None,
             tool_mode: ToolMode::ProxyOwned,
             tool_format: ToolFormat::Dsrs,
             correction_model: None,
@@ -107,6 +160,11 @@ impl ModelProfile {
         Self {
             name: "gemma-dsrs-conservative".to_string(),
             model_patterns: vec!["gemma".to_string()],
+            revision: default_profile_revision(),
+            source: builtin_profile_source(),
+            request_adapter_artifact: None,
+            correction_agent_artifact: None,
+            correction_instruction: None,
             tool_mode: ToolMode::ProxyOwned,
             tool_format: ToolFormat::Dsrs,
             correction_model: None,
@@ -124,6 +182,11 @@ impl ModelProfile {
         Self {
             name: "pass-through".to_string(),
             model_patterns: Vec::new(),
+            revision: default_profile_revision(),
+            source: builtin_profile_source(),
+            request_adapter_artifact: None,
+            correction_agent_artifact: None,
+            correction_instruction: None,
             tool_mode: ToolMode::PassThrough,
             tool_format: ToolFormat::TaggedJson,
             correction_model: None,
@@ -132,6 +195,20 @@ impl ModelProfile {
             supports_parallel_tool_calls: true,
             tool_instruction: String::new(),
         }
+    }
+
+    pub fn metadata(&self) -> ProfileMetadata {
+        ProfileMetadata {
+            profile_id: self.name.clone(),
+            profile_revision: self.revision,
+            profile_source: self.source.clone(),
+            request_adapter_artifact: self.request_adapter_artifact.clone(),
+            correction_agent_artifact: self.correction_agent_artifact.clone(),
+        }
+    }
+
+    pub fn mark_config_source(&mut self) {
+        self.source = "config".to_string();
     }
 }
 
@@ -162,7 +239,7 @@ fn profile_matches(lower_model: &str, profile: &ModelProfile) -> bool {
     })
 }
 
-fn default_dsrs_instruction() -> String {
+pub fn default_dsrs_instruction() -> String {
     [
         "Tool calls are an application contract. If a tool is needed, do not narrate the action.",
         "Use the provided DSRs output fields exactly and do not create extra labels.",
@@ -170,10 +247,39 @@ fn default_dsrs_instruction() -> String {
         "Do not copy or summarize the serialized input fields, tool definitions, or prompt template.",
         "When no tool is needed, put only the user-facing reply in content and set tool_calls to [].",
         r#"When a tool is needed, leave content empty and set tool_calls to a valid JSON array like [{"name":"tool_name","arguments":{"argument":"value"}}]."#,
+        "Never emit both empty content and [] tool_calls for a real user turn; either answer in content or call an available tool.",
         "Every arguments object must match the selected tool parameters.",
         "Do not put scratchpad reasoning, field explanations, or presentation labels in content.",
     ]
     .join("\n")
+}
+
+fn default_tool_mode() -> ToolMode {
+    ToolMode::ProxyOwned
+}
+
+fn default_tool_format() -> ToolFormat {
+    ToolFormat::Dsrs
+}
+
+fn default_max_correction_passes() -> usize {
+    1
+}
+
+fn default_supports_parallel_tool_calls() -> bool {
+    true
+}
+
+fn default_profile_revision() -> u32 {
+    1
+}
+
+fn default_profile_source() -> String {
+    "unknown".to_string()
+}
+
+fn builtin_profile_source() -> String {
+    "builtin".to_string()
 }
 
 #[cfg(test)]
@@ -192,5 +298,38 @@ mod tests {
         let profile = resolve_profile("meta-llama/llama-3.2-3b-instruct", &[]);
         assert_eq!(profile.name, "llama-dsrs");
         assert_eq!(profile.tool_format, ToolFormat::Dsrs);
+    }
+
+    #[test]
+    fn unknown_models_fall_back_to_balanced_default() {
+        let profile = resolve_profile("some-new-provider/new-model-1", &[]);
+
+        assert_eq!(profile.name, "balanced-default");
+        assert_eq!(profile.tool_mode, ToolMode::ProxyOwned);
+        assert_eq!(profile.tool_format, ToolFormat::Dsrs);
+        assert_eq!(profile.source, "builtin");
+    }
+
+    #[test]
+    fn profile_metadata_records_runtime_artifact_ids() {
+        let mut profile = ModelProfile::qwen();
+        profile.revision = 7;
+        profile.source = "config".to_string();
+        profile.request_adapter_artifact = Some("profiles/qwen/request.json".to_string());
+        profile.correction_agent_artifact = Some("profiles/qwen/correction.json".to_string());
+
+        let metadata = profile.metadata();
+
+        assert_eq!(metadata.profile_id, "qwen-dsrs");
+        assert_eq!(metadata.profile_revision, 7);
+        assert_eq!(metadata.profile_source, "config");
+        assert_eq!(
+            metadata.request_adapter_artifact.as_deref(),
+            Some("profiles/qwen/request.json")
+        );
+        assert_eq!(
+            metadata.correction_agent_artifact.as_deref(),
+            Some("profiles/qwen/correction.json")
+        );
     }
 }

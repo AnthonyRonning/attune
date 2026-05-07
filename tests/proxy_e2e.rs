@@ -1,7 +1,7 @@
 use std::{net::SocketAddr, path::PathBuf};
 
 use httpmock::{Method::POST, MockServer};
-use model_correction_proxy::{config::ProxyConfig, Gateway};
+use model_correction_proxy::{config::ProxyConfig, model_profile::ModelProfile, Gateway};
 use serde_json::{json, Value};
 use tempfile::NamedTempFile;
 use tokio::task::JoinHandle;
@@ -13,6 +13,24 @@ async fn spawn_proxy(upstream_base_url: String, trace_path: PathBuf) -> (String,
     config.trace.path = trace_path;
     config.trace.correction_path = config.trace.path.with_extension("corrections.jsonl");
 
+    let gateway = Gateway::new(config).expect("gateway starts");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("binds proxy");
+    let addr = listener.local_addr().expect("local addr");
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, gateway.router())
+            .await
+            .expect("proxy serve failed");
+    });
+
+    (format!("http://{addr}"), handle)
+}
+
+async fn spawn_proxy_with_config(mut config: ProxyConfig) -> (String, JoinHandle<()>) {
+    if config.upstream.api_key.is_none() {
+        config.upstream.api_key = Some("test-key".to_string());
+    }
     let gateway = Gateway::new(config).expect("gateway starts");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -370,6 +388,161 @@ async fn proxy_e2e_routes_adjacent_json_violation_through_correction_agent() {
 }
 
 #[tokio::test]
+async fn proxy_e2e_configured_profile_controls_unknown_model_and_trace_metadata() {
+    let upstream = MockServer::start_async().await;
+    let _upstream_mock = upstream
+        .mock_async(|when, then| {
+            when.method(POST)
+                .path("/v1/chat/completions")
+                .body_contains("REQUEST CONFIG INSTRUCTION")
+                .body_contains("[[ ## available_tools ## ]]");
+            then.status(200).json_body(chat_response(
+                "new-provider/custom-model",
+                json!({
+                    "role": "assistant",
+                    "content": "[[ ## content ## ]]\nconfigured profile response\n[[ ## tool_calls ## ]]\n[]\n[[ ## completed ## ]]"
+                }),
+                "stop",
+            ));
+        })
+        .await;
+
+    let trace_file = NamedTempFile::new().expect("trace file");
+    let trace_path = trace_file.path().to_path_buf();
+    let mut profile = ModelProfile::default_balanced();
+    profile.name = "custom-config-dsrs".to_string();
+    profile.model_patterns = vec!["new-provider/custom".to_string()];
+    profile.revision = 42;
+    profile.request_adapter_artifact = Some("profiles/custom/request-gepa.json".to_string());
+    profile.tool_instruction = "REQUEST CONFIG INSTRUCTION".to_string();
+    profile.mark_config_source();
+
+    let mut config = ProxyConfig::default();
+    config.upstream.base_url = format!("{}/v1", upstream.base_url());
+    config.trace.path = trace_path.clone();
+    config.trace.correction_path = trace_path.with_extension("corrections.jsonl");
+    config.model_profiles = vec![profile];
+    let (proxy_url, handle) = spawn_proxy_with_config(config).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{proxy_url}/v1/chat/completions"))
+        .json(&pi_like_request(
+            "new-provider/custom-model",
+            "say hello without tools",
+            false,
+        ))
+        .send()
+        .await
+        .expect("proxy response");
+    assert!(response.status().is_success());
+    let body = response.text().await.expect("response text");
+    assert!(body.contains("configured profile response"));
+    assert!(!body.contains("[[ ##"));
+
+    let trace = tokio::fs::read_to_string(trace_file.path())
+        .await
+        .expect("trace file read");
+    assert!(trace.contains("\"profile_id\":\"custom-config-dsrs\""));
+    assert!(trace.contains("\"profile_revision\":42"));
+    assert!(trace.contains("\"profile_source\":\"config\""));
+    assert!(trace.contains("profiles/custom/request-gepa.json"));
+    assert!(trace.contains("\"summary\""));
+    handle.abort();
+}
+
+#[tokio::test]
+async fn proxy_e2e_correction_agent_uses_configured_instruction_artifact() {
+    let upstream = MockServer::start_async().await;
+    let _correction_mock = upstream
+        .mock_async(|when, then| {
+            when.method(POST)
+                .path("/v1/chat/completions")
+                .body_contains("CORRECTION CONFIG INSTRUCTION")
+                .body_contains("possible")
+                .body_contains("tool_calls");
+            then.status(200).json_body(chat_response(
+                "new-provider/custom-model",
+                json!({
+                    "role": "assistant",
+                    "content": "[[ ## possible ## ]]\ntrue\n\n[[ ## confidence ## ]]\n0.97\n\n[[ ## explanation ## ]]\nrecovered through configured correction artifact\n\n[[ ## content ## ]]\n\n[[ ## tool_calls ## ]]\n[{\"name\":\"read\",\"arguments\":{\"path\":\"packages/ai/README.md\"}}]\n\n[[ ## completed ## ]]"
+                }),
+                "stop",
+            ));
+        })
+        .await;
+    let _upstream_mock = upstream
+        .mock_async(|when, then| {
+            when.method(POST)
+                .path("/v1/chat/completions")
+                .body_contains("REQUEST CONFIG INSTRUCTION");
+            then.status(200).json_body(chat_response(
+                "new-provider/custom-model",
+                json!({
+                    "role": "assistant",
+                    "content": "[]\n\n[{\"name\":\"read\",\"arguments\":{\"path\":\"packages/ai/README.md\"}}]"
+                }),
+                "stop",
+            ));
+        })
+        .await;
+
+    let trace_file = NamedTempFile::new().expect("trace file");
+    let trace_path = trace_file.path().to_path_buf();
+    let mut profile = ModelProfile::default_balanced();
+    profile.name = "custom-correction-dsrs".to_string();
+    profile.model_patterns = vec!["new-provider/custom".to_string()];
+    profile.revision = 5;
+    profile.request_adapter_artifact = Some("profiles/custom/request-gepa.json".to_string());
+    profile.correction_agent_artifact =
+        Some("profiles/custom/correction-agent-gepa.json".to_string());
+    profile.tool_instruction = "REQUEST CONFIG INSTRUCTION".to_string();
+    profile.correction_instruction = Some("CORRECTION CONFIG INSTRUCTION".to_string());
+    profile.mark_config_source();
+
+    let mut config = ProxyConfig::default();
+    config.upstream.base_url = format!("{}/v1", upstream.base_url());
+    config.trace.path = trace_path.clone();
+    config.trace.correction_path = trace_path.with_extension("corrections.jsonl");
+    config.model_profiles = vec![profile];
+    let (proxy_url, handle) = spawn_proxy_with_config(config).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{proxy_url}/v1/chat/completions"))
+        .json(&pi_like_request(
+            "new-provider/custom-model",
+            "read the package readme",
+            false,
+        ))
+        .send()
+        .await
+        .expect("proxy response");
+    assert!(response.status().is_success());
+    let body = response.text().await.expect("response text");
+    let parsed: Value = serde_json::from_str(&body).expect("response JSON");
+    let calls = parsed
+        .pointer("/choices/0/message/tool_calls")
+        .and_then(Value::as_array)
+        .expect("tool calls");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0]["function"]["name"], "read");
+
+    let trace = tokio::fs::read_to_string(trace_file.path())
+        .await
+        .expect("trace file read");
+    let correction_trace =
+        tokio::fs::read_to_string(trace_file.path().with_extension("corrections.jsonl"))
+            .await
+            .expect("correction trace file read");
+    assert!(trace.contains("correction_agent_tool_recovery"));
+    assert!(trace.contains("profiles/custom/correction-agent-gepa.json"));
+    assert!(correction_trace.contains("\"profile_revision\":5"));
+    assert!(correction_trace.contains("\"profile_source\":\"config\""));
+    assert!(correction_trace.contains("profiles/custom/correction-agent-gepa.json"));
+    assert!(correction_trace.contains("recovered through configured correction artifact"));
+    handle.abort();
+}
+
+#[tokio::test]
 async fn proxy_e2e_routes_dsrs_contract_violation_through_correction_agent() {
     let upstream = MockServer::start_async().await;
     let _correction_mock = upstream
@@ -448,6 +621,92 @@ async fn proxy_e2e_routes_dsrs_contract_violation_through_correction_agent() {
     assert!(trace.contains("correction_agent_tool_recovery"));
     assert!(trace.contains("\"correction_attempts\""));
     assert!(trace.contains("\"policy_decisions\""));
+    handle.abort();
+}
+
+#[tokio::test]
+async fn proxy_e2e_routes_empty_dsrs_output_through_correction_agent() {
+    let upstream = MockServer::start_async().await;
+    let _correction_mock = upstream
+        .mock_async(|when, then| {
+            when.method(POST)
+                .path("/v1/chat/completions")
+                .body_contains("possible")
+                .body_contains("empty_dsrs_output")
+                .body_contains("can you tell me more about this project?");
+            then.status(200).json_body(chat_response(
+                "google/gemma-4-26b-a4b-it",
+                json!({
+                    "role": "assistant",
+                    "content": "[[ ## possible ## ]]\ntrue\n\n[[ ## confidence ## ]]\n0.93\n\n[[ ## explanation ## ]]\nempty DSRs output should inspect README for project context\n\n[[ ## content ## ]]\n\n[[ ## tool_calls ## ]]\n[{\"name\":\"read\",\"arguments\":{\"path\":\"README.md\"}}]\n\n[[ ## completed ## ]]"
+                }),
+                "stop",
+            ));
+        })
+        .await;
+    let _upstream_mock = upstream
+        .mock_async(|when, then| {
+            when.method(POST)
+                .path("/v1/chat/completions")
+                .body_contains("[[ ## profile_guidance ## ]]")
+                .body_contains("Never emit both empty content and [] tool_calls");
+            then.status(200).json_body(chat_response(
+                "google/gemma-4-26b-a4b-it",
+                json!({
+                    "role": "assistant",
+                    "content": "[[ ## content ## ]]\n[[ ## tool_calls ## ]]\n[]\n[[ ## completed ## ]]"
+                }),
+                "stop",
+            ));
+        })
+        .await;
+
+    let trace_file = NamedTempFile::new().expect("trace file");
+    let trace_path = trace_file.path().to_path_buf();
+    let (proxy_url, handle) =
+        spawn_proxy(format!("{}/v1", upstream.base_url()), trace_path.clone()).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{proxy_url}/v1/chat/completions"))
+        .json(&pi_like_request(
+            "google/gemma-4-26b-a4b-it",
+            "can you tell me more about this project?",
+            false,
+        ))
+        .send()
+        .await
+        .expect("proxy response");
+    assert!(
+        response.status().is_success(),
+        "proxy status {}: {}",
+        response.status(),
+        response.text().await.unwrap_or_default()
+    );
+    let body = response.text().await.expect("response text");
+    let parsed: Value = serde_json::from_str(&body).expect("response JSON");
+    let calls = parsed
+        .pointer("/choices/0/message/tool_calls")
+        .and_then(Value::as_array)
+        .expect("tool calls");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0]["function"]["name"], "read");
+    assert_eq!(
+        calls[0]["function"]["arguments"],
+        "{\"path\":\"README.md\"}"
+    );
+
+    let trace = tokio::fs::read_to_string(trace_path)
+        .await
+        .expect("trace file read");
+    let correction_trace =
+        tokio::fs::read_to_string(trace_file.path().with_extension("corrections.jsonl"))
+            .await
+            .expect("correction trace file read");
+    assert!(trace.contains("EmptyDsrsOutput"));
+    assert!(trace.contains("correction_agent_tool_recovery"));
+    assert!(trace.contains("attempt_correction_agent"));
+    assert!(correction_trace.contains("empty_dsrs_output"));
+    assert!(correction_trace.contains("empty DSRs output should inspect README"));
     handle.abort();
 }
 

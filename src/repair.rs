@@ -46,6 +46,14 @@ pub struct CorrectionAttemptTrace {
     pub completed_at: Option<DateTime<Utc>>,
     pub model: String,
     pub profile: String,
+    #[serde(default)]
+    pub profile_revision: u32,
+    #[serde(default)]
+    pub profile_source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_adapter_artifact: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correction_agent_artifact: Option<String>,
     pub correction_model: String,
     #[serde(default)]
     pub tools: Vec<OpenAiTool>,
@@ -411,6 +419,7 @@ fn interpreter_failures_require_model_correction(interpreted: &InterpretedRespon
         ResponseFailureKind::DsrsContentOutsideTaggedFields,
         ResponseFailureKind::DsrsInvalidToolCallsJson,
         ResponseFailureKind::DsrsInvalidToolCallsShape,
+        ResponseFailureKind::EmptyDsrsOutput,
         ResponseFailureKind::DsrsPlaceholderOnly,
         ResponseFailureKind::TemplateLeak,
         ResponseFailureKind::PromptEcho,
@@ -493,6 +502,10 @@ fn build_correction_attempt_trace(
         completed_at: Some(Utc::now()),
         model: input.model.clone(),
         profile: input.profile.name.clone(),
+        profile_revision: input.profile.revision,
+        profile_source: input.profile.source.clone(),
+        request_adapter_artifact: input.profile.request_adapter_artifact.clone(),
+        correction_agent_artifact: input.profile.correction_agent_artifact.clone(),
         correction_model,
         tools: input.tools.clone(),
         recent_messages: input.recent_messages.clone(),
@@ -988,6 +1001,16 @@ fn unusable_assistant_content(content: &str) -> bool {
         || lower.starts_with("thought process")
         || lower.starts_with("chain of thought")
         || trimmed.contains("[[ ##")
+        || empty_json_response_content(trimmed)
+}
+
+fn empty_json_response_content(content: &str) -> bool {
+    parse_json_lenient(content).is_some_and(|value| match value {
+        Value::Null => true,
+        Value::Array(items) => items.is_empty(),
+        Value::Object(object) => object.is_empty(),
+        _ => false,
+    })
 }
 
 fn replace_unusable_assistant_content(
@@ -1450,6 +1473,87 @@ mod tests {
             .actions
             .iter()
             .any(|action| action.action == "correction_agent_content_recovery"));
+    }
+
+    struct EmptyDsrsCorrectionAgent;
+
+    #[async_trait::async_trait]
+    impl CorrectionAgent for EmptyDsrsCorrectionAgent {
+        async fn correct(
+            &self,
+            input: CorrectionAgentInput,
+        ) -> Result<Option<crate::agents::CorrectionAgentOutput>> {
+            assert!(input.malformed_response.contains("[[ ## content ## ]]"));
+            assert!(input
+                .response_failures
+                .iter()
+                .any(|failure| failure.kind == ResponseFailureKind::EmptyDsrsOutput));
+            assert!(input
+                .parser_events
+                .iter()
+                .any(|event| event.contains("empty or no-op content and no tool calls")));
+            Ok(Some(crate::agents::CorrectionAgentOutput {
+                tool_calls: vec![ToolIntent {
+                    name: "read_file".to_string(),
+                    arguments: Some(json!({"path":"README.md"})),
+                    raw_arguments: r#"{"path":"README.md"}"#.to_string(),
+                    source: ToolIntentSource::CorrectionAgent,
+                    confidence: 0.93,
+                }],
+                content: None,
+                possible: true,
+                confidence: 0.93,
+                explanation: "empty DSRs output should inspect README for project context"
+                    .to_string(),
+                raw_output: Some("empty DSRs correction fixture".to_string()),
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_dsrs_output_routes_to_correction_agent() {
+        let normalized =
+            request_with_tool_prompt("can you tell me more about this project?", false);
+        let upstream = synthetic_response(
+            "google/gemma-4-26b-a4b-it",
+            "[[ ## content ## ]]\n[[ ## tool_calls ## ]]\n[]\n[[ ## completed ## ]]",
+        );
+        let interpreted =
+            crate::response_interpreter::interpret_response(&upstream, &normalized.tools);
+
+        assert!(interpreted.suspicious_stop);
+        assert!(interpreted.has_failure(ResponseFailureKind::EmptyDsrsOutput));
+
+        let outcome = repair_response(
+            &ProxyConfig::default(),
+            &normalized,
+            &ModelProfile::gemma(),
+            &upstream,
+            &interpreted,
+            &EmptyDsrsCorrectionAgent,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let calls = outcome.final_response.choices[0]
+            .message
+            .tool_calls
+            .as_ref()
+            .unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "read_file");
+        assert_eq!(calls[0].function.arguments, r#"{"path":"README.md"}"#);
+        assert!(outcome
+            .actions
+            .iter()
+            .any(|action| action.action == "correction_agent_tool_recovery"));
+        assert!(outcome.policy_decisions.iter().any(|decision| {
+            decision.decision == "attempt_correction_agent"
+                && decision
+                    .failure_kinds
+                    .contains(&ResponseFailureKind::EmptyDsrsOutput)
+        }));
     }
 
     struct ReadmeCorrectionAgent;

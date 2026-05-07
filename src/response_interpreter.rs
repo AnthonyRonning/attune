@@ -59,6 +59,7 @@ pub enum ResponseFailureKind {
     DsrsContentOutsideTaggedFields,
     DsrsInvalidToolCallsJson,
     DsrsInvalidToolCallsShape,
+    EmptyDsrsOutput,
     DsrsPlaceholderOnly,
     TemplateLeak,
     PromptEcho,
@@ -121,6 +122,7 @@ pub fn interpret_response(
 
     let mut tool_intents = Vec::new();
     let mut failures = Vec::new();
+    let mut parsed_dsrs_empty_output = false;
     if let Some(native_calls) = &message.tool_calls {
         for call in native_calls {
             let parsed = parse_jsonish(&call.function.arguments);
@@ -154,7 +156,13 @@ pub fn interpret_response(
             parsed_dsrs = true;
             parse_events.extend(parsed.events);
             failures.extend(parsed.failures);
+            let parsed_content_noop = parsed
+                .content
+                .as_deref()
+                .map(dsrs_content_is_empty_or_noop)
+                .unwrap_or(true);
             let parsed_tool_intents = parsed.tool_intents;
+            parsed_dsrs_empty_output = parsed_tool_intents.is_empty() && parsed_content_noop;
             content = parsed
                 .content
                 .or_else(|| parsed_tool_intents.is_empty().then(String::new));
@@ -188,6 +196,16 @@ pub fn interpret_response(
 
     classify_intent_failures(&tool_intents, tools, &mut failures);
 
+    if parsed_dsrs_empty_output {
+        parse_events
+            .push("DSRs response contained empty or no-op content and no tool calls".to_string());
+        push_failure(
+            &mut failures,
+            ResponseFailureKind::EmptyDsrsOutput,
+            "assistant emitted a valid DSRs envelope with empty or no-op content and empty tool_calls",
+        );
+    }
+
     let content_suggests_premature_tool = content
         .as_deref()
         .map(|content| looks_like_premature_tool_narration(content, tools))
@@ -196,12 +214,13 @@ pub fn interpret_response(
         .as_deref()
         .map(|content| looks_like_malformed_tool_output(content, tools))
         .unwrap_or(false);
-    let suspicious_stop = tool_intents.is_empty()
+    let suspicious_tool_stop = tool_intents.is_empty()
         && tools_available(tools)
         && choice.finish_reason.as_deref().unwrap_or("stop") == "stop"
         && (content_suggests_premature_tool || content_suggests_malformed_tool);
+    let suspicious_stop = suspicious_tool_stop || parsed_dsrs_empty_output;
 
-    if suspicious_stop {
+    if suspicious_tool_stop {
         parse_events.push(
             "assistant appears to contain tool intent but emitted no valid tool call".to_string(),
         );
@@ -472,6 +491,20 @@ fn parse_jsonish(input: &str) -> Option<Value> {
     serde_json::from_str(trimmed)
         .ok()
         .or_else(|| json5::from_str(trimmed).ok())
+}
+
+fn dsrs_content_is_empty_or_noop(content: &str) -> bool {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+
+    parse_jsonish(trimmed).is_some_and(|value| match value {
+        Value::Null => true,
+        Value::Array(items) => items.is_empty(),
+        Value::Object(object) => object.is_empty(),
+        _ => false,
+    })
 }
 
 fn tools_available(tools: &[OpenAiTool]) -> bool {
@@ -788,6 +821,68 @@ mod tests {
 
         assert_eq!(interpreted.content.as_deref(), Some("Done."));
         assert!(interpreted.tool_intents.is_empty());
+    }
+
+    #[test]
+    fn marks_empty_dsrs_content_and_tool_calls_as_failure() {
+        let response = ChatCompletionResponse {
+            id: "1".to_string(),
+            object: "chat.completion".to_string(),
+            created: 0,
+            model: "google/gemma-4-26b-a4b-it".to_string(),
+            choices: vec![ChatChoice {
+                index: 0,
+                message: ChatMessage::new(
+                    "assistant",
+                    "[[ ## content ## ]]\n[[ ## tool_calls ## ]]\n[]\n[[ ## completed ## ]]",
+                ),
+                finish_reason: Some("stop".to_string()),
+                logprobs: None,
+                extra: Map::new(),
+            }],
+            usage: None,
+            extra: Map::new(),
+        };
+
+        let interpreted = interpret_response(&response, &[tool("read")]);
+
+        assert_eq!(interpreted.content.as_deref(), Some(""));
+        assert!(interpreted.tool_intents.is_empty());
+        assert!(interpreted.suspicious_stop);
+        assert!(interpreted.has_failure(ResponseFailureKind::EmptyDsrsOutput));
+        assert!(interpreted
+            .parse_events
+            .iter()
+            .any(|event| event.contains("empty or no-op content and no tool calls")));
+    }
+
+    #[test]
+    fn marks_noop_dsrs_content_and_empty_tool_calls_as_failure() {
+        let response = ChatCompletionResponse {
+            id: "1".to_string(),
+            object: "chat.completion".to_string(),
+            created: 0,
+            model: "google/gemma-4-26b-a4b-it".to_string(),
+            choices: vec![ChatChoice {
+                index: 0,
+                message: ChatMessage::new(
+                    "assistant",
+                    "[[ ## content ## ]]\n[]\n[[ ## tool_calls ## ]]\n[]\n[[ ## completed ## ]]",
+                ),
+                finish_reason: Some("stop".to_string()),
+                logprobs: None,
+                extra: Map::new(),
+            }],
+            usage: None,
+            extra: Map::new(),
+        };
+
+        let interpreted = interpret_response(&response, &[tool("read")]);
+
+        assert_eq!(interpreted.content.as_deref(), Some("[]"));
+        assert!(interpreted.tool_intents.is_empty());
+        assert!(interpreted.suspicious_stop);
+        assert!(interpreted.has_failure(ResponseFailureKind::EmptyDsrsOutput));
     }
 
     #[test]

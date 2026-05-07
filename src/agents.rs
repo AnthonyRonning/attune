@@ -5,7 +5,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use dspy_rs::{adapter::Adapter, example, ChatAdapter, Prediction, Signature, LM};
+use dspy_rs::{adapter::Adapter, example, ChatAdapter, MetaSignature, Prediction, Signature, LM};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -120,9 +120,11 @@ struct CorrectMalformedToolResponse {
     /// assistant response by filling exactly the requested DSRs output fields.
     /// If clear tool calls were intended, put them in tool_calls and leave content
     /// empty. If no tool call was intended, put the user-facing text in content and
-    /// use an empty tool_calls array. If the malformed response is ambiguous or unsafe
-    /// to repair, set possible to false. Do not invent tools, arguments, or facts. Do
-    /// not emit prose outside the DSRs field markers.
+    /// use an empty tool_calls array. An empty DSRs response with empty content and
+    /// [] tool_calls is malformed; recover only when the conversation and tools make
+    /// the next action or answer clear. If the malformed response is ambiguous or
+    /// unsafe to repair, set possible to false. Do not invent tools, arguments, or
+    /// facts. Do not emit prose outside the DSRs field markers.
     #[input(desc = "OpenAI-compatible tool definitions")]
     pub available_tools: String,
 
@@ -202,7 +204,18 @@ impl CorrectionAgent for DsrsCorrectionAgent {
             .await
             .context("failed to build DSRs correction LM")?;
 
-        let signature = CorrectMalformedToolResponse::new();
+        let mut signature = CorrectMalformedToolResponse::new();
+        if let Some(instruction) = input
+            .profile
+            .correction_instruction
+            .as_deref()
+            .map(str::trim)
+            .filter(|instruction| !instruction.is_empty())
+        {
+            signature
+                .update_instruction(instruction.to_string())
+                .context("failed to apply correction-agent profile instruction")?;
+        }
         let adapter = ChatAdapter;
         let available_tools = serde_json::to_string_pretty(&input.tools)?;
         let recent_messages = serde_json::to_string_pretty(&input.recent_messages)?;

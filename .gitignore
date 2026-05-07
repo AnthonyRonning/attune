@@ -1,6 +1,10 @@
 /target/
 /traces/
-/datasets/
+/datasets/*
+!/datasets/corrections.jsonl
+!/datasets/request-adapter/
+!/datasets/request-adapter/*.json
+!/datasets/request-adapter/*.jsonl
 /eval/*.local.jsonl
 *.log
 *.env
