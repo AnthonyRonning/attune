@@ -13,6 +13,7 @@ use model_correction_proxy::{
     model_profile::DsrsHistoryFormat,
     optimization::{
         optimize_correction_prompt, optimize_request_adapter_prompt, GepaOptimizationConfig,
+        DEFAULT_GEPA_LM_MAX_TOKENS,
     },
     promotion::{promote_artifact, ArtifactPromotionConfig},
     replay::{replay_traces, ReplayConfig},
@@ -146,6 +147,8 @@ enum Command {
         iterations: usize,
         #[arg(long, default_value_t = 12)]
         max_examples: usize,
+        #[arg(long, default_value_t = DEFAULT_GEPA_LM_MAX_TOKENS)]
+        lm_max_tokens: u32,
     },
     OptimizeRequestAdapterPrompt {
         #[arg(
@@ -184,6 +187,8 @@ enum Command {
         iterations: usize,
         #[arg(long, default_value_t = 12)]
         max_examples: usize,
+        #[arg(long, default_value_t = DEFAULT_GEPA_LM_MAX_TOKENS)]
+        lm_max_tokens: u32,
     },
     PromoteArtifact {
         #[arg(long)]
@@ -413,6 +418,7 @@ async fn main() -> anyhow::Result<()> {
             artifact_id,
             iterations,
             max_examples,
+            lm_max_tokens,
         } => {
             let report = optimize_correction_prompt(GepaOptimizationConfig {
                 dataset_path: dataset_path.into(),
@@ -427,6 +433,7 @@ async fn main() -> anyhow::Result<()> {
                 artifact_id,
                 iterations,
                 max_examples,
+                lm_max_tokens,
             })
             .await?;
             println!("{}", serde_json::to_string_pretty(&report)?);
@@ -444,6 +451,7 @@ async fn main() -> anyhow::Result<()> {
             artifact_id,
             iterations,
             max_examples,
+            lm_max_tokens,
         } => {
             let report = optimize_request_adapter_prompt(GepaOptimizationConfig {
                 dataset_path: dataset_path.into(),
@@ -458,6 +466,7 @@ async fn main() -> anyhow::Result<()> {
                 artifact_id,
                 iterations,
                 max_examples,
+                lm_max_tokens,
             })
             .await?;
             println!("{}", serde_json::to_string_pretty(&report)?);

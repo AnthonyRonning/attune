@@ -2649,6 +2649,7 @@ dependencies = [
  "json5",
  "regex",
  "reqwest",
+ "rig-core",
  "schemars",
  "serde",
  "serde_json",

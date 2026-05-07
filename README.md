@@ -488,6 +488,10 @@ nix develop --command cargo run -- \
 
 This loads dataset rows as typed DSRs examples, runs GEPA against the correction-prompt program, and writes a report with the best discovered instruction, artifact metadata, and optimization statistics. The command also accepts `--target-model`, `--profile`, and `--artifact-id` so artifacts can be tied back to a runtime profile.
 
+Both GEPA commands expose `--lm-max-tokens`, defaulting to `100000`. This is separate from the live proxy request path: client `max_tokens` values are still passed through only when provided. The GEPA runner sets a high optimizer token budget because `dspy-rs` sends an explicit `max_tokens` value for its own optimizer, reflection, and target-model calls, and truncated optimizer instructions are not useful artifacts.
+
+Request-adapter GEPA uses a local JSON adapter for GEPA's own reflection/proposal calls instead of the default DSRs chat adapter. The runtime candidate still renders through the selected proxy `dsrs_history_format`; the JSON adapter only prevents GEPA's outer meta-parser from truncating optimized instructions that legitimately contain literal `[[ ## content ## ]]`, `[[ ## tool_calls ## ]]`, or `[[ ## completed ## ]]` text.
+
 The optimized correction prompt report can be loaded by a profile using `correction_agent_artifact`.
 
 For request-adapter profile guidance, use a separate dataset and optimizer:

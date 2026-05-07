@@ -1,13 +1,16 @@
-use std::{collections::HashMap, path::PathBuf};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use dspy_rs::{
-    configure, example, Chat, ChatAdapter, Evaluator, Example, FeedbackEvaluator, FeedbackMetric,
-    GEPAResult, Module, Optimizable, Predict, Prediction, Predictor, Signature, GEPA, LM,
+    adapter::Adapter, configure, example, Chat, ChatAdapter, Evaluator, Example, FeedbackEvaluator,
+    FeedbackMetric, GEPAResult, LmUsage, Message, MetaSignature, Module, Optimizable, Predict,
+    Prediction, Predictor, Signature, GEPA, LM,
 };
 use futures::FutureExt;
 use indexmap::IndexMap;
+use rig::tool::ToolDyn;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -18,6 +21,235 @@ use crate::{
     normalizer::normalize_request,
     openai::{ChatCompletionRequest, ChatMessage, OpenAiFunctionTool, OpenAiTool},
 };
+
+pub const DEFAULT_GEPA_LM_MAX_TOKENS: u32 = 100_000;
+
+fn default_gepa_lm_max_tokens() -> u32 {
+    DEFAULT_GEPA_LM_MAX_TOKENS
+}
+
+#[derive(Debug, Default, Clone)]
+struct GepaJsonAdapter;
+
+#[async_trait]
+impl Adapter for GepaJsonAdapter {
+    fn format(&self, signature: &dyn MetaSignature, inputs: Example) -> Chat {
+        let input_fields = signature.input_fields();
+        let output_fields = signature.output_fields();
+        let output_keys = field_names(&output_fields);
+        let input_values = field_values(&input_fields, &inputs);
+        let instruction = if signature.instruction().trim().is_empty() {
+            format!(
+                "Given the input fields {}, produce the output fields {}.",
+                field_names(&input_fields)
+                    .into_iter()
+                    .map(|name| format!("`{name}`"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                output_keys
+                    .iter()
+                    .map(|name| format!("`{name}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        } else {
+            signature.instruction()
+        };
+
+        let system = format!(
+            "You are a strict JSON adapter for GEPA prompt optimization.\n\
+Return only one valid JSON object with exactly the requested output keys.\n\
+Do not wrap the response in Markdown fences. Do not use DSRs field markers as the outer response format.\n\
+Literal DSRs marker text such as [[ ## content ## ]] may appear inside JSON string values; preserve it as normal string content.\n\n\
+Input fields:\n{}\n\
+Output fields:\n{}\n\
+Objective:\n{}",
+            describe_fields(&input_fields),
+            describe_fields(&output_fields),
+            instruction
+        );
+        let user = format!(
+            "Input values:\n{}\n\nReturn a JSON object with these output keys, in this order: {}",
+            serde_json::to_string_pretty(&input_values).unwrap_or_else(|_| "{}".to_string()),
+            output_keys
+                .iter()
+                .map(|name| format!("\"{name}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        Chat::new(vec![Message::system(system), Message::user(user)])
+    }
+
+    fn parse_response(
+        &self,
+        signature: &dyn MetaSignature,
+        response: Message,
+    ) -> HashMap<String, Value> {
+        let raw = response.content();
+        let Some(object) = extract_json_object(&raw).and_then(|value| value.as_object().cloned())
+        else {
+            return HashMap::new();
+        };
+
+        let output_fields = signature.output_fields();
+        field_names(&output_fields)
+            .into_iter()
+            .filter_map(|field_name| {
+                object.get(&field_name).map(|value| {
+                    let field = output_fields
+                        .get(&field_name)
+                        .cloned()
+                        .unwrap_or(Value::Null);
+                    (field_name, coerce_json_adapter_value(value.clone(), &field))
+                })
+            })
+            .collect()
+    }
+
+    async fn call(
+        &self,
+        lm: Arc<LM>,
+        signature: &dyn MetaSignature,
+        inputs: Example,
+        tools: Vec<Arc<dyn ToolDyn>>,
+    ) -> Result<Prediction> {
+        let messages = self.format(signature, inputs);
+        let response = match lm.call(messages, tools).await {
+            Ok(response) => response,
+            Err(_) => return Ok(Prediction::new(HashMap::new(), LmUsage::default())),
+        };
+        Ok(Prediction::new(
+            self.parse_response(signature, response.output),
+            response.usage,
+        ))
+    }
+}
+
+fn field_names(fields: &Value) -> Vec<String> {
+    fields
+        .as_object()
+        .map(|object| object.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
+fn describe_fields(fields: &Value) -> String {
+    fields
+        .as_object()
+        .map(|object| {
+            object
+                .iter()
+                .enumerate()
+                .map(|(index, (name, field))| {
+                    let ty = field.get("type").and_then(Value::as_str).unwrap_or("Value");
+                    let desc = field.get("desc").and_then(Value::as_str).unwrap_or("");
+                    if desc.is_empty() {
+                        format!("{}. `{name}` ({ty})", index + 1)
+                    } else {
+                        format!("{}. `{name}` ({ty}): {desc}", index + 1)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default()
+}
+
+fn field_values(fields: &Value, inputs: &Example) -> Value {
+    let object = field_names(fields)
+        .into_iter()
+        .map(|name| (name.clone(), inputs.get(&name, None)))
+        .collect::<serde_json::Map<_, _>>();
+    Value::Object(object)
+}
+
+fn coerce_json_adapter_value(value: Value, field: &Value) -> Value {
+    let data_type = field
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("String");
+    match data_type {
+        "String" => match value {
+            Value::String(_) => value,
+            other => Value::String(other.to_string()),
+        },
+        "bool" => match value {
+            Value::Bool(_) => value,
+            Value::String(text) => text
+                .parse::<bool>()
+                .map(Value::Bool)
+                .unwrap_or(Value::String(text)),
+            other => other,
+        },
+        "f32" | "f64" => match value {
+            Value::Number(_) => value,
+            Value::String(text) => text
+                .parse::<f64>()
+                .ok()
+                .and_then(serde_json::Number::from_f64)
+                .map(Value::Number)
+                .unwrap_or(Value::String(text)),
+            other => other,
+        },
+        _ => match value {
+            Value::String(text) => serde_json::from_str(&text).unwrap_or(Value::String(text)),
+            other => other,
+        },
+    }
+}
+
+fn extract_json_object(raw: &str) -> Option<Value> {
+    let trimmed = strip_json_fence(raw.trim());
+    serde_json::from_str::<Value>(trimmed)
+        .ok()
+        .or_else(|| balanced_json_object(trimmed).and_then(|json| serde_json::from_str(json).ok()))
+}
+
+fn strip_json_fence(raw: &str) -> &str {
+    let Some(stripped) = raw.strip_prefix("```") else {
+        return raw;
+    };
+    let stripped = stripped
+        .strip_prefix("json")
+        .unwrap_or(stripped)
+        .trim_start();
+    stripped
+        .strip_suffix("```")
+        .map(str::trim_end)
+        .unwrap_or(stripped)
+}
+
+fn balanced_json_object(raw: &str) -> Option<&str> {
+    let start = raw.find('{')?;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut depth = 0usize;
+    for (offset, ch) in raw[start..].char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => in_string = true,
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    let end = start + offset + ch.len_utf8();
+                    return raw.get(start..end);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
 
 #[derive(Debug, Clone)]
 pub struct GepaOptimizationConfig {
@@ -33,6 +265,7 @@ pub struct GepaOptimizationConfig {
     pub artifact_id: Option<String>,
     pub iterations: usize,
     pub max_examples: usize,
+    pub lm_max_tokens: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,6 +282,8 @@ pub struct GepaOptimizationReport {
     pub optimizer_model: String,
     pub created_at: DateTime<Utc>,
     pub examples_loaded: usize,
+    #[serde(default = "default_gepa_lm_max_tokens")]
+    pub lm_max_tokens: u32,
     pub best_instruction: String,
     pub best_average_score: f32,
     pub total_rollouts: usize,
@@ -155,7 +390,23 @@ impl RequestAdapterPromptProgram {
             chat.push(role, &message.content_text().unwrap_or_default());
         }
 
-        let response = lm.call(chat, Vec::new()).await?;
+        let response = match lm.call(chat, Vec::new()).await {
+            Ok(response) => response,
+            Err(error) => {
+                return Ok(Prediction::new(
+                    HashMap::from([
+                        ("content".to_string(), Value::String(String::new())),
+                        ("tool_calls".to_string(), Value::Array(Vec::new())),
+                        ("raw_output".to_string(), Value::String(String::new())),
+                        (
+                            "parser_events".to_string(),
+                            json!([format!("request-adapter runtime LM call failed: {error}")]),
+                        ),
+                    ]),
+                    LmUsage::default(),
+                ));
+            }
+        };
         let raw_output = response.output.content();
         let parsed = parse_tool_contract_response(&raw_output);
         let (content, tool_calls, parser_events) = match parsed {
@@ -360,6 +611,7 @@ pub async fn optimize_correction_prompt(
         .api_key(api_key)
         .model(config.model.clone())
         .temperature(0.2)
+        .max_tokens(config.lm_max_tokens)
         .build()
         .await
         .context("failed to build GEPA LM")?;
@@ -401,6 +653,7 @@ pub async fn optimize_correction_prompt(
         optimizer_model: config.model.clone(),
         created_at: Utc::now(),
         examples_loaded: examples.len(),
+        lm_max_tokens: config.lm_max_tokens,
         best_instruction: result.best_candidate.instruction.clone(),
         best_average_score: result.best_candidate.average_score(),
         total_rollouts: result.total_rollouts,
@@ -434,26 +687,48 @@ pub async fn optimize_request_adapter_prompt(
         anyhow::bail!("dataset contained no request-adapter optimization examples");
     }
 
-    let lm = LM::builder()
+    let optimizer_lm = LM::builder()
         .base_url(config.base_url.clone())
-        .api_key(api_key)
+        .api_key(api_key.clone())
         .model(config.model.clone())
         .temperature(0.2)
+        .max_tokens(config.lm_max_tokens)
         .build()
         .await
         .context("failed to build request-adapter GEPA LM")?;
-    configure(lm.clone(), ChatAdapter);
+    let runtime_model = config
+        .target_model
+        .clone()
+        .unwrap_or_else(|| config.model.clone());
+    let runtime_lm = if runtime_model == config.model {
+        optimizer_lm.clone()
+    } else {
+        LM::builder()
+            .base_url(config.base_url.clone())
+            .api_key(
+                config
+                    .api_key
+                    .clone()
+                    .expect("api key was checked before optimizer LM construction"),
+            )
+            .model(runtime_model.clone())
+            .temperature(0.2)
+            .max_tokens(config.lm_max_tokens)
+            .build()
+            .await
+            .context("failed to build request-adapter target GEPA LM")?
+    };
+    configure(optimizer_lm.clone(), GepaJsonAdapter);
 
     let gepa = GEPA::builder()
         .num_iterations(config.iterations)
         .minibatch_size(examples.len().clamp(1, 3))
         .temperature(0.7)
         .track_stats(true)
-        .maybe_prompt_model(Some(lm.clone()))
         .maybe_max_lm_calls(Some((config.iterations.max(1) * 16) + 16))
         .build();
 
-    let mut program = RequestAdapterPromptProgram::runtime(lm);
+    let mut program = RequestAdapterPromptProgram::runtime(runtime_lm);
     let result: GEPAResult = gepa
         .compile_with_feedback(&mut program, examples.clone())
         .await
@@ -473,13 +748,14 @@ pub async fn optimize_request_adapter_prompt(
         }),
         artifact_type: "request_adapter_instruction".to_string(),
         signature: "openai_tool_use_contract_profile_guidance/v1".to_string(),
-        target_model: config.target_model.clone(),
+        target_model: Some(runtime_model),
         profile: config.profile.clone(),
         profile_revision: config.profile_revision,
         dsrs_history_format: config.dsrs_history_format,
         optimizer_model: config.model.clone(),
         created_at: Utc::now(),
         examples_loaded: examples.len(),
+        lm_max_tokens: config.lm_max_tokens,
         best_instruction: result.best_candidate.instruction.clone(),
         best_average_score: result.best_candidate.average_score(),
         total_rollouts: result.total_rollouts,
@@ -1132,6 +1408,52 @@ pub fn dsrs_is_linked() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[Signature]
+    struct GepaAdapterMarkerCollisionFixture {
+        /// Produce one instruction.
+        #[input(desc = "Current instruction")]
+        pub current_instruction: String,
+
+        #[output(desc = "Improved instruction")]
+        pub improved_instruction: String,
+    }
+
+    #[test]
+    fn gepa_json_adapter_preserves_dsrs_markers_inside_instruction_strings() {
+        let adapter = GepaJsonAdapter;
+        let signature = GepaAdapterMarkerCollisionFixture::new();
+        let raw = r#"{
+  "improved_instruction": "Use the exact DSRs response shape:\n[[ ## content ## ]]\n<text>\n\n[[ ## tool_calls ## ]]\n[]\n\n[[ ## completed ## ]]"
+}"#;
+
+        let parsed = adapter.parse_response(&signature, Message::assistant(raw));
+
+        assert_eq!(
+            parsed
+                .get("improved_instruction")
+                .and_then(Value::as_str)
+                .expect("instruction parsed"),
+            "Use the exact DSRs response shape:\n[[ ## content ## ]]\n<text>\n\n[[ ## tool_calls ## ]]\n[]\n\n[[ ## completed ## ]]"
+        );
+    }
+
+    #[test]
+    fn gepa_json_adapter_extracts_fenced_json_without_using_dsrs_delimiters() {
+        let adapter = GepaJsonAdapter;
+        let signature = GepaAdapterMarkerCollisionFixture::new();
+        let raw = "```json\n{\"improved_instruction\":\"keep [[ ## content ## ]] literal\"}\n```";
+
+        let parsed = adapter.parse_response(&signature, Message::assistant(raw));
+
+        assert_eq!(
+            parsed
+                .get("improved_instruction")
+                .and_then(Value::as_str)
+                .expect("instruction parsed"),
+            "keep [[ ## content ## ]] literal"
+        );
+    }
 
     #[test]
     fn converts_rows_to_gepa_examples() {

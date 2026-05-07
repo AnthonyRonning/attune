@@ -308,12 +308,17 @@ Each artifact should record:
 - signature name and version
 - dataset path or dataset ID
 - optimizer model
+- GEPA LM max-token budget
 - score and metric summary
 - created time
 - prompt/instruction text
 - checksum of the dataset or dataset manifest
 
 Request-adapter prompts and correction-agent prompts should be optimized separately. Their datasets, metrics, and failure modes are different.
+
+The GEPA CLI defaults `--lm-max-tokens` to `100000` for both correction-agent and request-adapter optimization. This only affects optimizer/reflection/target-model calls made by the GEPA runner; the live proxy path still leaves generation token controls unset unless the incoming API request provided them.
+
+Request-adapter GEPA uses a local JSON adapter for the optimizer's own reflection/proposal signatures. That adapter is intentionally separate from the proxy runtime formatter, so candidate request-adapter instructions can contain literal DSRs marker examples without being parsed as the optimizer's outer field delimiters.
 
 For example, a model that emits a valid DSRs envelope with empty `content` and `[]` tool calls has failed at the request-adapter prompt layer, not the correction-agent layer. That trace belongs in a model/profile-specific request-adapter dataset so GEPA can improve the profile guidance, while runtime policy should still route the empty response through correction or a future retry path.
 
