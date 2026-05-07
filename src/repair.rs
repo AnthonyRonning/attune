@@ -120,6 +120,7 @@ pub async fn repair_response(
     let mut correction_attempts = Vec::new();
     let mut policy_decisions = Vec::new();
     let mut intents = interpreted.tool_intents.clone();
+    let mut using_correction_tool_calls = false;
     let mut corrected_content: Option<(String, f32, String)> = None;
     let should_try_correction = should_try_correction_agent(normalized, interpreted, &intents);
     let correction_available = config.correction.enabled
@@ -186,7 +187,18 @@ pub async fn repair_response(
                     confidence,
                     reason: explanation,
                 });
-                intents.extend(output.tool_calls);
+                if !intents.is_empty() {
+                    actions.push(RepairAction {
+                        action: "correction_agent_replaced_parser_tool_intents".to_string(),
+                        confidence,
+                        reason: format!(
+                            "accepted correction-agent tool calls replaced {} parser-recovered intent(s)",
+                            intents.len()
+                        ),
+                    });
+                }
+                intents = output.tool_calls;
+                using_correction_tool_calls = true;
             }
             Ok(Some(output)) => {
                 if correction_output_is_accepted(config, &output) {
@@ -339,10 +351,11 @@ pub async fn repair_response(
     first.message.tool_calls = Some(repaired_tool_calls);
     first.finish_reason = Some("tool_calls".to_string());
 
-    if interpreted
-        .tool_intents
-        .iter()
-        .any(|intent| intent.source != ToolIntentSource::Native)
+    if !using_correction_tool_calls
+        && interpreted
+            .tool_intents
+            .iter()
+            .any(|intent| intent.source != ToolIntentSource::Native)
     {
         actions.push(RepairAction {
             action: "content_tool_call_extracted".to_string(),
@@ -1554,6 +1567,97 @@ mod tests {
                     .failure_kinds
                     .contains(&ResponseFailureKind::EmptyDsrsOutput)
         }));
+    }
+
+    struct DuplicateReadmeCorrectionAgent;
+
+    #[async_trait::async_trait]
+    impl CorrectionAgent for DuplicateReadmeCorrectionAgent {
+        async fn correct(
+            &self,
+            input: CorrectionAgentInput,
+        ) -> Result<Option<crate::agents::CorrectionAgentOutput>> {
+            assert!(input.malformed_response.contains("README.md"));
+            assert!(input
+                .response_failures
+                .iter()
+                .any(|failure| failure.kind == ResponseFailureKind::DsrsContractViolation));
+            Ok(Some(crate::agents::CorrectionAgentOutput {
+                tool_calls: vec![ToolIntent {
+                    name: "read".to_string(),
+                    arguments: Some(json!({"path":"README.md"})),
+                    raw_arguments: r#"{"path":"README.md"}"#.to_string(),
+                    source: ToolIntentSource::CorrectionAgent,
+                    confidence: 0.97,
+                }],
+                content: None,
+                possible: true,
+                confidence: 0.97,
+                explanation: "added the missing DSRs completed marker around the read call"
+                    .to_string(),
+                raw_output: Some("duplicate read correction fixture".to_string()),
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn correction_tool_recovery_replaces_parser_intents_without_duplication() {
+        let normalized = request_with_named_tool(
+            "read",
+            "what do you know about this project? can you dive into the readme?",
+            false,
+        );
+        let upstream = synthetic_response(
+            "google/gemma-4-26b-a4b-it",
+            r#"[[ ## content ## ]]
+[[ ## tool_calls ## ]]
+[
+  {
+    "name": "read",
+    "arguments": {
+      "path": "README.md"
+    }
+  }
+]"#,
+        );
+        let interpreted =
+            crate::response_interpreter::interpret_response(&upstream, &normalized.tools);
+
+        assert_eq!(interpreted.tool_intents.len(), 1);
+        assert!(interpreted.has_failure(ResponseFailureKind::DsrsContractViolation));
+
+        let outcome = repair_response(
+            &ProxyConfig::default(),
+            &normalized,
+            &ModelProfile::gemma(),
+            &upstream,
+            &interpreted,
+            &DuplicateReadmeCorrectionAgent,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let calls = outcome.final_response.choices[0]
+            .message
+            .tool_calls
+            .as_ref()
+            .unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "read");
+        assert_eq!(calls[0].function.arguments, r#"{"path":"README.md"}"#);
+        assert!(outcome
+            .actions
+            .iter()
+            .any(|action| action.action == "correction_agent_tool_recovery"));
+        assert!(outcome
+            .actions
+            .iter()
+            .any(|action| action.action == "correction_agent_replaced_parser_tool_intents"));
+        assert!(!outcome
+            .actions
+            .iter()
+            .any(|action| action.action == "content_tool_call_extracted"));
     }
 
     struct ReadmeCorrectionAgent;
