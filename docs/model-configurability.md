@@ -326,9 +326,13 @@ The GEPA CLI defaults `--lm-max-tokens` to `100000` for both correction-agent an
 
 Request-adapter GEPA uses a local JSON adapter for the optimizer's own reflection/proposal signatures. That adapter is intentionally separate from the proxy runtime formatter, so candidate request-adapter instructions can contain literal DSRs marker examples without being parsed as the optimizer's outer field delimiters.
 
+Both GEPA commands support `--seed-artifact`. When supplied, the optimizer extracts `best_instruction` from that artifact and uses it as the starting instruction before GEPA proposes revisions. This is the preferred path for continuing a model/profile/history-format line from the current best artifact instead of restarting from the built-in profile text. Reports record `seed_artifact_path` so seeded runs are reproducible.
+
 For example, a model that emits a valid DSRs envelope with empty `content` and `[]` tool calls, or a reasoning-only stop with no visible content or tool calls, has failed at the request-adapter prompt layer, not the correction-agent layer. That trace belongs in a model/profile-specific request-adapter dataset so GEPA can improve the profile guidance, while runtime policy should still route the empty response through correction or a future retry path.
 
 Promotion is now explicit rather than automatic. The optimizer writes JSON artifacts for review; `promote-artifact` then validates `artifact_type`, `profile`, and layer metadata, updates the appropriate profile config field, carries `dsrs_history_format` from request-adapter artifacts into the profile config, and increments the profile revision. `promote-default-artifact` is the next promotion step: it updates `profiles/builtin-defaults.toml` so a reviewed artifact is validated by `build.rs` and embedded into shipped binaries. Both commands work for request-adapter artifacts and correction-agent artifacts, so every profile can follow the same dataset -> GEPA -> inspect -> config promotion -> default promotion loop. Formatter-comparison GEPA outputs are ignored by default until a specific artifact is reviewed and promoted.
+
+GEPA artifacts and promotion reports include non-blocking `artifact_warnings` when an instruction appears to mention optimizer/eval metadata such as expected output, datasets, labels, test harnesses, or scoring. These warnings are deliberately review-only because deterministic overfit checks can produce false positives.
 
 The latest reviewed request-adapter matrix used 14 Gemma-focused examples from:
 
@@ -463,13 +467,13 @@ Status: partially implemented. Eval reports now include model/profile/revision/a
 
 After correction-agent artifact loading works, add artifact loading for request-adapter profile guidance. Keep the DSRs signature stable, and let artifacts tune wording, examples, and profile guidance.
 
-Status: artifact loading is implemented through `request_adapter_artifact`. A dedicated request-adapter GEPA optimizer is now available through `optimize-request-adapter-prompt`; it evaluates candidate profile guidance by rendering the real runtime DSRs request format selected by `--dsrs-history-format`. `export-request-adapter-dataset` converts trace IDs into trace-faithful request-adapter rows with explicit labels. The current Gemma dataset combines hand-labeled rows, exact trace exports, and curated trace-harness examples; Qwen has its first curated trace-harness dataset for future model-specific GEPA runs. Separate append-only and regenerated-context GEPA artifacts can be generated for comparison. The reviewed append-only Gemma artifact has been promoted to `configs/gemma-dsrs-conservative.toml`; trial outputs should stay ignored unless promoted.
+Status: artifact loading is implemented through `request_adapter_artifact`. A dedicated request-adapter GEPA optimizer is now available through `optimize-request-adapter-prompt`; it evaluates candidate profile guidance by rendering the real runtime DSRs request format selected by `--dsrs-history-format`. `export-request-adapter-dataset` converts trace IDs into trace-faithful request-adapter rows with explicit labels. The current Gemma dataset combines hand-labeled rows, exact trace exports, and curated trace-harness examples; Qwen has its first curated trace-harness dataset for future model-specific GEPA runs. Separate append-only and regenerated-context GEPA artifacts can be generated for comparison, and `--seed-artifact` lets each line continue from its previous best reviewed artifact. The reviewed append-only Gemma artifact has been promoted to `configs/gemma-dsrs-conservative.toml`; trial outputs should stay ignored unless promoted.
 
 ### Step 8: Add explicit artifact promotion
 
 GEPA artifacts should not silently change runtime behavior. Promotion should be a deliberate command that can be inspected, reviewed, committed, reverted, and reproduced.
 
-Status: implemented through `promote-artifact`. The command supports request-adapter and correction-agent GEPA artifacts, preserves existing profile model patterns unless `--model-pattern` is supplied, records the previous and new artifact reference in its JSON report, carries request-adapter `dsrs_history_format` into config, and supports `--dry-run`.
+Status: implemented through `promote-artifact`. The command supports request-adapter and correction-agent GEPA artifacts, preserves existing profile model patterns unless `--model-pattern` is supplied, records the previous and new artifact reference in its JSON report, carries request-adapter `dsrs_history_format` into config, surfaces non-blocking artifact warnings for review, and supports `--dry-run`.
 
 ### Step 9: Add embedded built-in default promotion
 

@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::{
+    artifacts::extract_instruction_from_path,
     dsrs_contract::{format_tool_contract, parse_tool_contract_response},
     model_profile::{builtin_profiles, resolve_profile, DsrsHistoryFormat, ModelProfile},
     normalizer::normalize_request,
@@ -263,9 +264,18 @@ pub struct GepaOptimizationConfig {
     pub profile_revision: Option<u32>,
     pub dsrs_history_format: Option<DsrsHistoryFormat>,
     pub artifact_id: Option<String>,
+    pub seed_artifact_path: Option<PathBuf>,
     pub iterations: usize,
     pub max_examples: usize,
     pub lm_max_tokens: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtifactWarning {
+    pub code: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -279,6 +289,8 @@ pub struct GepaOptimizationReport {
     pub profile_revision: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dsrs_history_format: Option<DsrsHistoryFormat>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed_artifact_path: Option<PathBuf>,
     pub optimizer_model: String,
     pub created_at: DateTime<Utc>,
     pub examples_loaded: usize,
@@ -288,7 +300,88 @@ pub struct GepaOptimizationReport {
     pub best_average_score: f32,
     pub total_rollouts: usize,
     pub total_lm_calls: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_warnings: Vec<ArtifactWarning>,
     pub output_path: PathBuf,
+}
+
+pub fn artifact_instruction_warnings(
+    artifact_type: &str,
+    instruction: &str,
+) -> Vec<ArtifactWarning> {
+    let mut warnings = Vec::new();
+    let lower = instruction.to_ascii_lowercase();
+
+    if let Some(matched) = first_matched_phrase(
+        &lower,
+        &[
+            "expected_output",
+            "expected output",
+            "expected repair",
+            "answer key",
+            "gold label",
+            "labels",
+            "labelled",
+            "labeled",
+            "eval",
+            "evaluation",
+            "benchmark",
+            "test harness",
+            "dataset",
+            "rollout",
+            "score",
+            "scoring",
+        ],
+    ) {
+        warnings.push(ArtifactWarning {
+            code: "optimizer_meta_language".to_string(),
+            message: format!(
+                "{artifact_type} instruction appears to mention optimizer/eval metadata; review for benchmark overfit before promotion"
+            ),
+            matched: Some(matched.to_string()),
+        });
+    }
+
+    if let Some(matched) = first_matched_phrase(
+        &lower,
+        &[
+            "character-for-character",
+            "character for character",
+            "exact template",
+            "match it exactly",
+            "match expected",
+            "expected values",
+            "expected command",
+            "use it as the exact",
+        ],
+    ) {
+        warnings.push(ArtifactWarning {
+            code: "exact_label_matching_language".to_string(),
+            message: format!(
+                "{artifact_type} instruction appears to ask the runtime model to match labels or examples too literally"
+            ),
+            matched: Some(matched.to_string()),
+        });
+    }
+
+    if instruction.len() > 2_400 {
+        warnings.push(ArtifactWarning {
+            code: "long_instruction".to_string(),
+            message: format!(
+                "{artifact_type} instruction is long enough to merit extra review for prompt drift"
+            ),
+            matched: Some(format!("{} chars", instruction.len())),
+        });
+    }
+
+    warnings
+}
+
+fn first_matched_phrase<'a>(haystack_lower: &str, phrases: &'a [&str]) -> Option<&'a str> {
+    phrases
+        .iter()
+        .copied()
+        .find(|phrase| haystack_lower.contains(phrase))
 }
 
 #[Signature]
@@ -307,6 +400,17 @@ struct RequestAdapterPromptSignature {
     /// calls in tool_calls and optionally include brief user-facing content. When
     /// no tool is needed, put a real user-facing answer in content and set
     /// tool_calls to [].
+    ///
+    /// Optimize reusable runtime profile guidance, not a benchmark-specific
+    /// answer key. Do not mention expected_output, labels, datasets, evals,
+    /// scoring, test harnesses, rollouts, or examples in the instruction you
+    /// produce. Do not tell the runtime model to match labels, expected output,
+    /// or example-specific commands character-for-character. Do not add
+    /// task-specific rules copied from individual rows, file paths, issue
+    /// numbers, branch names, or command snippets. Prefer concise general rules
+    /// that improve DSRs structure, visible assistant output, valid tool_calls
+    /// JSON, and correct use of available tool schemas across arbitrary
+    /// OpenAI-compatible requests.
     #[input(desc = "Model profile name being optimized")]
     pub profile: String,
 
@@ -636,6 +740,13 @@ pub async fn optimize_correction_prompt(
         .build();
 
     let mut program = CorrectionPromptProgram::default();
+    if let Some(seed_instruction) = seed_instruction_from_artifact(&config).await? {
+        program
+            .predictor
+            .signature
+            .update_instruction(seed_instruction)
+            .context("failed to apply correction GEPA seed artifact instruction")?;
+    }
     let result: GEPAResult = gepa
         .compile_with_feedback(&mut program, examples.clone())
         .await
@@ -646,6 +757,8 @@ pub async fn optimize_correction_prompt(
             .await
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
+    let artifact_type = "correction_agent_instruction".to_string();
+    let best_instruction = result.best_candidate.instruction.clone();
     let report = GepaOptimizationReport {
         artifact_id: config.artifact_id.clone().unwrap_or_else(|| {
             default_correction_artifact_id(
@@ -653,17 +766,19 @@ pub async fn optimize_correction_prompt(
                 config.target_model.as_deref(),
             )
         }),
-        artifact_type: "correction_agent_instruction".to_string(),
+        artifact_type: artifact_type.clone(),
         signature: "correct_malformed_tool_response/v1".to_string(),
         target_model: config.target_model.clone(),
         profile: config.profile.clone(),
         profile_revision: config.profile_revision,
         dsrs_history_format: None,
+        seed_artifact_path: config.seed_artifact_path.clone(),
         optimizer_model: config.model.clone(),
         created_at: Utc::now(),
         examples_loaded: examples.len(),
         lm_max_tokens: config.lm_max_tokens,
-        best_instruction: result.best_candidate.instruction.clone(),
+        artifact_warnings: artifact_instruction_warnings(&artifact_type, &best_instruction),
+        best_instruction,
         best_average_score: result.best_candidate.average_score(),
         total_rollouts: result.total_rollouts,
         total_lm_calls: result.total_lm_calls,
@@ -737,8 +852,7 @@ pub async fn optimize_request_adapter_prompt(
         .maybe_max_lm_calls(Some((config.iterations.max(1) * 16) + 16))
         .build();
 
-    let initial_instruction =
-        request_adapter_initial_instruction(config.profile.as_deref(), &runtime_model);
+    let initial_instruction = request_adapter_initial_instruction(&config, &runtime_model).await?;
     let mut program = RequestAdapterPromptProgram::runtime(runtime_lm, initial_instruction);
     let result: GEPAResult = gepa
         .compile_with_feedback(&mut program, examples.clone())
@@ -750,6 +864,8 @@ pub async fn optimize_request_adapter_prompt(
             .await
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
+    let artifact_type = "request_adapter_instruction".to_string();
+    let best_instruction = result.best_candidate.instruction.clone();
     let report = GepaOptimizationReport {
         artifact_id: config.artifact_id.clone().unwrap_or_else(|| {
             default_request_adapter_artifact_id(
@@ -757,17 +873,19 @@ pub async fn optimize_request_adapter_prompt(
                 config.target_model.as_deref(),
             )
         }),
-        artifact_type: "request_adapter_instruction".to_string(),
+        artifact_type: artifact_type.clone(),
         signature: "openai_tool_use_contract_profile_guidance/v1".to_string(),
         target_model: Some(runtime_model),
         profile: config.profile.clone(),
         profile_revision: config.profile_revision,
         dsrs_history_format: config.dsrs_history_format,
+        seed_artifact_path: config.seed_artifact_path.clone(),
         optimizer_model: config.model.clone(),
         created_at: Utc::now(),
         examples_loaded: examples.len(),
         lm_max_tokens: config.lm_max_tokens,
-        best_instruction: result.best_candidate.instruction.clone(),
+        artifact_warnings: artifact_instruction_warnings(&artifact_type, &best_instruction),
+        best_instruction,
         best_average_score: result.best_candidate.average_score(),
         total_rollouts: result.total_rollouts,
         total_lm_calls: result.total_lm_calls,
@@ -792,18 +910,46 @@ fn default_request_adapter_artifact_id(
     format!("request-adapter/{target}")
 }
 
-fn request_adapter_initial_instruction(
-    profile_name: Option<&str>,
+async fn request_adapter_initial_instruction(
+    config: &GepaOptimizationConfig,
     target_model: &str,
-) -> Option<String> {
-    let profile = profile_name
+) -> Result<Option<String>> {
+    if let Some(seed_instruction) = seed_instruction_from_artifact(config).await? {
+        return Ok(Some(seed_instruction));
+    }
+
+    let profile = config
+        .profile
+        .as_deref()
         .and_then(|name| {
             builtin_profiles()
                 .into_iter()
                 .find(|profile| profile.name == name)
         })
         .unwrap_or_else(|| resolve_profile(target_model, &[]));
-    Some(profile.tool_instruction).filter(|instruction| !instruction.trim().is_empty())
+    Ok(Some(profile.tool_instruction).filter(|instruction| !instruction.trim().is_empty()))
+}
+
+async fn seed_instruction_from_artifact(config: &GepaOptimizationConfig) -> Result<Option<String>> {
+    let Some(seed_artifact_path) = &config.seed_artifact_path else {
+        return Ok(None);
+    };
+    let content = tokio::fs::read_to_string(seed_artifact_path)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to read seed artifact {}",
+                seed_artifact_path.display()
+            )
+        })?;
+    let instruction =
+        extract_instruction_from_path(seed_artifact_path, &content).with_context(|| {
+            format!(
+                "failed to extract instruction from seed artifact {}",
+                seed_artifact_path.display()
+            )
+        })?;
+    Ok(Some(instruction))
 }
 
 pub fn traces_to_gepa_examples(dataset_rows: &[Value]) -> Vec<Example> {
@@ -1481,6 +1627,21 @@ mod tests {
     }
 
     #[test]
+    fn artifact_instruction_warnings_flag_eval_language_without_blocking() {
+        let warnings = artifact_instruction_warnings(
+            "request_adapter_instruction",
+            "Match the expected output character-for-character from the test harness.",
+        );
+
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.code == "optimizer_meta_language"));
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.code == "exact_label_matching_language"));
+    }
+
+    #[test]
     fn converts_rows_to_gepa_examples() {
         let rows = vec![json!({
             "available_tools": [{"function":{"name":"read_file"}}],
@@ -1513,15 +1674,70 @@ mod tests {
         assert_eq!(feedback.score, 1.0);
     }
 
-    #[test]
-    fn request_adapter_gepa_seeds_from_current_builtin_profile() {
+    #[tokio::test]
+    async fn request_adapter_gepa_seeds_from_current_builtin_profile() {
         let instruction = request_adapter_initial_instruction(
-            Some("gemma-dsrs-conservative"),
+            &GepaOptimizationConfig {
+                dataset_path: PathBuf::from("dataset.jsonl"),
+                output_path: PathBuf::from("artifact.json"),
+                base_url: "https://openrouter.ai/api/v1".to_string(),
+                api_key: None,
+                model: "google/gemma-4-26b-a4b-it".to_string(),
+                target_model: Some("google/gemma-4-26b-a4b-it".to_string()),
+                profile: Some("gemma-dsrs-conservative".to_string()),
+                profile_revision: None,
+                dsrs_history_format: Some(DsrsHistoryFormat::AppendOnly),
+                artifact_id: None,
+                seed_artifact_path: None,
+                iterations: 1,
+                max_examples: 1,
+                lm_max_tokens: DEFAULT_GEPA_LM_MAX_TOKENS,
+            },
             "google/gemma-4-26b-a4b-it",
         )
+        .await
         .unwrap();
 
-        assert_eq!(instruction, ModelProfile::gemma().tool_instruction);
+        assert_eq!(instruction.unwrap(), ModelProfile::gemma().tool_instruction);
+    }
+
+    #[tokio::test]
+    async fn request_adapter_gepa_seeds_from_explicit_artifact() {
+        let dir = tempfile::tempdir().unwrap();
+        let artifact_path = dir.path().join("request-adapter-seed.json");
+        tokio::fs::write(
+            &artifact_path,
+            r#"{"best_instruction":"Use the previous optimized profile guidance."}"#,
+        )
+        .await
+        .unwrap();
+
+        let instruction = request_adapter_initial_instruction(
+            &GepaOptimizationConfig {
+                dataset_path: PathBuf::from("dataset.jsonl"),
+                output_path: PathBuf::from("artifact.json"),
+                base_url: "https://openrouter.ai/api/v1".to_string(),
+                api_key: None,
+                model: "google/gemma-4-26b-a4b-it".to_string(),
+                target_model: Some("google/gemma-4-26b-a4b-it".to_string()),
+                profile: Some("gemma-dsrs-conservative".to_string()),
+                profile_revision: None,
+                dsrs_history_format: Some(DsrsHistoryFormat::AppendOnly),
+                artifact_id: None,
+                seed_artifact_path: Some(artifact_path),
+                iterations: 1,
+                max_examples: 1,
+                lm_max_tokens: DEFAULT_GEPA_LM_MAX_TOKENS,
+            },
+            "google/gemma-4-26b-a4b-it",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            instruction.as_deref(),
+            Some("Use the previous optimized profile guidance.")
+        );
     }
 
     #[test]

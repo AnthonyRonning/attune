@@ -522,7 +522,7 @@ nix develop --command cargo run -- \
   --max-examples 12
 ```
 
-This loads dataset rows as typed DSRs examples, runs GEPA against the correction-prompt program, and writes a report with the best discovered instruction, artifact metadata, and optimization statistics. The command also accepts `--target-model`, `--profile`, and `--artifact-id` so artifacts can be tied back to a runtime profile.
+This loads dataset rows as typed DSRs examples, runs GEPA against the correction-prompt program, and writes a report with the best discovered instruction, artifact metadata, and optimization statistics. The command also accepts `--target-model`, `--profile`, `--artifact-id`, and `--seed-artifact` so artifacts can be tied back to a runtime profile and future runs can continue from a reviewed previous instruction instead of starting from the built-in default.
 
 Both GEPA commands expose `--lm-max-tokens`, defaulting to `100000`. This is separate from the live proxy request path: client `max_tokens` values are still passed through only when provided. The GEPA runner sets a high optimizer token budget because `dspy-rs` sends an explicit `max_tokens` value for its own optimizer, reflection, and target-model calls, and truncated optimizer instructions are not useful artifacts.
 
@@ -557,15 +557,18 @@ nix develop --command cargo run -- \
   --profile gemma-dsrs-conservative \
   --profile-revision 3 \
   --dsrs-history-format append_only \
+  --seed-artifact datasets/request-adapter/gemma-dsrs-conservative-r4-append-only-gepa.json \
   --artifact-id request-adapter/gemma-dsrs-conservative/append-only \
   --iterations 3 \
   --max-examples 3 \
   --lm-max-tokens 100000
 ```
 
-This optimizer uses the same runtime DSRs formatter as the proxy. GEPA mutates the profile guidance, the runner installs that candidate guidance into a model profile, renders the request through the selected `dsrs_history_format`, calls the target model, parses the DSRs response, and scores the result against the request-adapter dataset. Exact labeled tool calls or content score highest, but structurally valid different tool calls and real non-placeholder content receive strong partial credit so the optimizer does not overfit to one trace's arbitrary next action. To compare formatter behavior, run the same dataset twice with different `--dsrs-history-format` values and separate artifact IDs.
+This optimizer uses the same runtime DSRs formatter as the proxy. GEPA mutates the profile guidance, the runner installs that candidate guidance into a model profile, renders the request through the selected `dsrs_history_format`, calls the target model, parses the DSRs response, and scores the result against the request-adapter dataset. Exact labeled tool calls or content score highest, but structurally valid different tool calls and real non-placeholder content receive strong partial credit so the optimizer does not overfit to one trace's arbitrary next action. To compare formatter behavior, run the same dataset twice with different `--dsrs-history-format` values and separate artifact IDs. Use `--seed-artifact` when iterating on an existing model/profile/history-format line so the new run starts from the current best reviewed instruction; generated reports record `seed_artifact_path` for auditability.
 
 This writes a `request_adapter_instruction` artifact that records the target profile, profile revision, and history format. It can be loaded through `request_adapter_artifact`; promotion can also carry the artifact's `dsrs_history_format` into the profile config. See `configs/gemma-dsrs-conservative.toml` for a Gemma profile wired to an optimized artifact.
+
+Request-adapter GEPA is instructed to produce reusable runtime profile guidance rather than benchmark-specific answer-key instructions. Generated artifacts also include non-blocking `artifact_warnings` when the instruction appears to mention optimizer/eval metadata such as expected output, datasets, test harnesses, labels, or scoring. These warnings are review signals only; they do not prevent writing or promoting an artifact.
 
 GEPA comparison artifacts are treated as disposable until promoted. Files such as `*-append-only-gepa.json`, `*-regenerated-context-gepa.json`, and `*-trace-faithful-*-gepa.json` are ignored by default; keep or force-add only artifacts that have been reviewed and intentionally promoted.
 
@@ -602,7 +605,7 @@ nix develop --command cargo run -- \
   --profile gemma-dsrs-conservative
 ```
 
-The promotion command reads the artifact metadata, validates the artifact layer, updates either `request_adapter_artifact` or `correction_agent_artifact`, preserves existing model patterns unless `--model-pattern` is provided, and bumps the profile revision. Use `--dry-run` to print the promotion report without writing the config.
+The promotion command reads the artifact metadata, validates the artifact layer, updates either `request_adapter_artifact` or `correction_agent_artifact`, preserves existing model patterns unless `--model-pattern` is provided, and bumps the profile revision. Use `--dry-run` to print the promotion report without writing the config. Promotion reports also surface non-blocking `artifact_warnings`; these can be false positives, so they are not hard blockers, but they should be reviewed before adopting the artifact.
 
 After the config path has been tested, promote the same artifact into built-in defaults if it should ship inside the binary:
 

@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use toml_edit::{value, Array, ArrayOfTables, DocumentMut, Item, Table};
 
 use crate::model_profile::DsrsHistoryFormat;
-use crate::optimization::GepaOptimizationReport;
+use crate::optimization::{artifact_instruction_warnings, ArtifactWarning, GepaOptimizationReport};
 
 #[derive(Debug, Clone)]
 pub struct ArtifactPromotionConfig {
@@ -49,6 +49,8 @@ pub struct ArtifactPromotionReport {
     pub new_dsrs_history_format: Option<DsrsHistoryFormat>,
     pub created_profile: bool,
     pub dry_run: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_warnings: Vec<ArtifactWarning>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,10 +75,13 @@ pub struct DefaultArtifactPromotionReport {
     pub created_profile: bool,
     pub created_artifact: bool,
     pub dry_run: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_warnings: Vec<ArtifactWarning>,
 }
 
 pub async fn promote_artifact(config: ArtifactPromotionConfig) -> Result<ArtifactPromotionReport> {
     let artifact = read_artifact_report(&config.artifact_path).await?;
+    let artifact_warnings = artifact_warnings(&artifact);
     let promoted_field = promoted_field(&artifact.artifact_type)?;
     if let (Some(requested_profile), Some(artifact_profile)) = (&config.profile, &artifact.profile)
     {
@@ -154,6 +159,7 @@ pub async fn promote_artifact(config: ArtifactPromotionConfig) -> Result<Artifac
         new_dsrs_history_format: outcome.new_dsrs_history_format,
         created_profile: outcome.created_profile,
         dry_run: config.dry_run,
+        artifact_warnings,
     })
 }
 
@@ -161,6 +167,7 @@ pub async fn promote_default_artifact(
     config: DefaultArtifactPromotionConfig,
 ) -> Result<DefaultArtifactPromotionReport> {
     let artifact = read_artifact_report(&config.artifact_path).await?;
+    let artifact_warnings = artifact_warnings(&artifact);
     let promoted_field = promoted_field(&artifact.artifact_type)?;
     if let (Some(requested_profile), Some(artifact_profile)) = (&config.profile, &artifact.profile)
     {
@@ -246,7 +253,30 @@ pub async fn promote_default_artifact(
         created_profile: outcome.created_profile,
         created_artifact: outcome.created_artifact,
         dry_run: config.dry_run,
+        artifact_warnings,
     })
+}
+
+fn artifact_warnings(artifact: &GepaOptimizationReport) -> Vec<ArtifactWarning> {
+    let mut warnings = artifact.artifact_warnings.clone();
+    warnings.extend(artifact_instruction_warnings(
+        &artifact.artifact_type,
+        &artifact.best_instruction,
+    ));
+    dedupe_warnings(warnings)
+}
+
+fn dedupe_warnings(warnings: Vec<ArtifactWarning>) -> Vec<ArtifactWarning> {
+    let mut deduped = Vec::new();
+    for warning in warnings {
+        if deduped.iter().any(|existing: &ArtifactWarning| {
+            existing.code == warning.code && existing.matched == warning.matched
+        }) {
+            continue;
+        }
+        deduped.push(warning);
+    }
+    deduped
 }
 
 async fn read_artifact_report(path: &Path) -> Result<GepaOptimizationReport> {
@@ -683,6 +713,57 @@ request_adapter_artifact = "../datasets/old.json"
         assert!(config.contains("dsrs_history_format = \"append_only\""));
         assert!(config.contains("request_adapter_artifact"));
         assert!(config.contains("../datasets/gemma-request.json"));
+    }
+
+    #[tokio::test]
+    async fn promotion_reports_artifact_warnings_without_blocking() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("profiles.toml");
+        let artifact_path = dir.path().join("qwen-request.json");
+        tokio::fs::write(
+            &artifact_path,
+            serde_json::to_vec_pretty(&json!({
+                "artifact_id": "request-adapter/qwen-dsrs/test",
+                "artifact_type": "request_adapter_instruction",
+                "signature": "openai_tool_use_contract_profile_guidance/v1",
+                "target_model": "qwen/qwen3.5-9b",
+                "profile": "qwen-dsrs",
+                "profile_revision": 1,
+                "dsrs_history_format": "append_only",
+                "optimizer_model": "qwen/qwen3.5-9b",
+                "created_at": "2026-05-08T00:00:00Z",
+                "examples_loaded": 8,
+                "best_instruction": "Match the expected output character-for-character.",
+                "best_average_score": 0.5,
+                "total_rollouts": 33,
+                "total_lm_calls": 6,
+                "output_path": artifact_path
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let report = promote_artifact(ArtifactPromotionConfig {
+            config_path: config_path.clone(),
+            artifact_path,
+            artifact_reference: None,
+            profile: None,
+            model_patterns: Vec::new(),
+            dry_run: false,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(report.promoted_field, "request_adapter_artifact");
+        assert!(report
+            .artifact_warnings
+            .iter()
+            .any(|warning| warning.code == "optimizer_meta_language"));
+        assert!(tokio::fs::read_to_string(config_path)
+            .await
+            .unwrap()
+            .contains("request_adapter_artifact"));
     }
 
     #[tokio::test]

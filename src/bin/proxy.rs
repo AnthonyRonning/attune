@@ -146,6 +146,8 @@ enum Command {
         profile_revision: Option<u32>,
         #[arg(long)]
         artifact_id: Option<String>,
+        #[arg(long)]
+        seed_artifact: Option<String>,
         #[arg(long, default_value_t = 3)]
         iterations: usize,
         #[arg(long, default_value_t = 12)]
@@ -186,6 +188,8 @@ enum Command {
         dsrs_history_format: Option<DsrsHistoryFormat>,
         #[arg(long)]
         artifact_id: Option<String>,
+        #[arg(long)]
+        seed_artifact: Option<String>,
         #[arg(long, default_value_t = 3)]
         iterations: usize,
         #[arg(long, default_value_t = 12)]
@@ -441,6 +445,7 @@ async fn main() -> anyhow::Result<()> {
             profile,
             profile_revision,
             artifact_id,
+            seed_artifact,
             iterations,
             max_examples,
             lm_max_tokens,
@@ -456,6 +461,7 @@ async fn main() -> anyhow::Result<()> {
                 profile_revision,
                 dsrs_history_format: None,
                 artifact_id,
+                seed_artifact_path: seed_artifact.map(Into::into),
                 iterations,
                 max_examples,
                 lm_max_tokens,
@@ -474,6 +480,7 @@ async fn main() -> anyhow::Result<()> {
             profile_revision,
             dsrs_history_format,
             artifact_id,
+            seed_artifact,
             iterations,
             max_examples,
             lm_max_tokens,
@@ -489,6 +496,7 @@ async fn main() -> anyhow::Result<()> {
                 profile_revision,
                 dsrs_history_format,
                 artifact_id,
+                seed_artifact_path: seed_artifact.map(Into::into),
                 iterations,
                 max_examples,
                 lm_max_tokens,
