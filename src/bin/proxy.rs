@@ -10,7 +10,7 @@ use model_correction_proxy::{
     },
     eval::{run_regression_suite, RegressionConfig, RegressionFilter},
     gateway::Gateway,
-    model_profile::DsrsHistoryFormat,
+    model_profile::{DsrsHistoryFormat, ProviderRouting},
     optimization::{
         optimize_correction_prompt, optimize_request_adapter_prompt, GepaOptimizationConfig,
         DEFAULT_GEPA_LM_MAX_TOKENS,
@@ -288,6 +288,16 @@ enum TraceHarnessCommand {
         model: Option<String>,
         #[arg(long, default_value_t = 24)]
         limit: usize,
+        #[arg(long = "provider-order", value_delimiter = ',')]
+        provider_order: Vec<String>,
+        #[arg(long = "provider-only", value_delimiter = ',')]
+        provider_only: Vec<String>,
+        #[arg(long = "provider-ignore", value_delimiter = ',')]
+        provider_ignore: Vec<String>,
+        #[arg(long)]
+        disable_provider_fallbacks: bool,
+        #[arg(long)]
+        require_provider_parameters: bool,
     },
 }
 
@@ -611,6 +621,11 @@ async fn main() -> anyhow::Result<()> {
                 proxy_url,
                 model,
                 limit,
+                provider_order,
+                provider_only,
+                provider_ignore,
+                disable_provider_fallbacks,
+                require_provider_parameters,
             } => {
                 let proxy_config =
                     ProxyConfig::from_optional_path(runtime_config_path.as_deref()).await?;
@@ -620,6 +635,13 @@ async fn main() -> anyhow::Result<()> {
                     proxy_url,
                     model,
                     limit,
+                    provider: provider_routing_from_flags(
+                        provider_order,
+                        provider_only,
+                        provider_ignore,
+                        disable_provider_fallbacks,
+                        require_provider_parameters,
+                    ),
                     proxy_config,
                 })
                 .await?;
@@ -628,6 +650,36 @@ async fn main() -> anyhow::Result<()> {
             }
         },
     }
+}
+
+fn provider_routing_from_flags(
+    order: Vec<String>,
+    only: Vec<String>,
+    ignore: Vec<String>,
+    disable_fallbacks: bool,
+    require_parameters: bool,
+) -> Option<ProviderRouting> {
+    let provider = ProviderRouting {
+        order: normalize_provider_list(order),
+        only: normalize_provider_list(only),
+        ignore: normalize_provider_list(ignore),
+        allow_fallbacks: disable_fallbacks.then_some(false),
+        require_parameters: require_parameters.then_some(true),
+    };
+
+    if provider.is_empty() {
+        None
+    } else {
+        Some(provider)
+    }
+}
+
+fn normalize_provider_list(values: Vec<String>) -> Vec<String> {
+    values
+        .into_iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect()
 }
 
 fn print_trace_summaries(summaries: &[TraceSummary]) {

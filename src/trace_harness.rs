@@ -17,6 +17,7 @@ use tokio::task::JoinHandle;
 use crate::{
     config::ProxyConfig,
     gateway::Gateway,
+    model_profile::ProviderRouting,
     openai::{ChatCompletionRequest, ChatMessage, OpenAiFunctionTool, OpenAiTool, OpenAiToolCall},
 };
 
@@ -39,6 +40,7 @@ pub struct TraceHarnessRunConfig {
     pub proxy_url: Option<String>,
     pub model: Option<String>,
     pub limit: usize,
+    pub provider: Option<ProviderRouting>,
     pub proxy_config: ProxyConfig,
 }
 
@@ -147,6 +149,13 @@ pub async fn run_trace_harness(config: TraceHarnessRunConfig) -> Result<TraceHar
         let mut request = scenario.request.clone();
         if let Some(model) = &config.model {
             request.model = model.clone();
+        }
+        if let Some(provider) = &config.provider {
+            if !provider.is_empty() {
+                request
+                    .extra
+                    .insert("provider".to_string(), serde_json::to_value(provider)?);
+            }
         }
         request.stream = Some(false);
         let report = run_one_scenario(&client, &proxy_url, scenario, request).await;

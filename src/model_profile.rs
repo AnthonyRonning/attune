@@ -76,12 +76,38 @@ pub struct ModelProfile {
     pub correction_model: Option<String>,
     #[serde(default)]
     pub judge_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<ProviderRouting>,
     #[serde(default = "default_max_correction_passes")]
     pub max_correction_passes: usize,
     #[serde(default = "default_supports_parallel_tool_calls")]
     pub supports_parallel_tool_calls: bool,
     #[serde(default = "default_dsrs_instruction")]
     pub tool_instruction: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderRouting {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub order: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub only: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ignore: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_fallbacks: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub require_parameters: Option<bool>,
+}
+
+impl ProviderRouting {
+    pub fn is_empty(&self) -> bool {
+        self.order.is_empty()
+            && self.only.is_empty()
+            && self.ignore.is_empty()
+            && self.allow_fallbacks.is_none()
+            && self.require_parameters.is_none()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -95,6 +121,8 @@ pub struct ProfileMetadata {
     pub request_adapter_artifact: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub correction_agent_artifact: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<ProviderRouting>,
 }
 
 impl ModelProfile {
@@ -112,6 +140,7 @@ impl ModelProfile {
             dsrs_history_format: default_dsrs_history_format(),
             correction_model: None,
             judge_model: None,
+            provider: None,
             max_correction_passes: 1,
             supports_parallel_tool_calls: true,
             tool_instruction: default_dsrs_instruction(),
@@ -132,6 +161,7 @@ impl ModelProfile {
             dsrs_history_format: default_dsrs_history_format(),
             correction_model: None,
             judge_model: None,
+            provider: None,
             max_correction_passes: 1,
             supports_parallel_tool_calls: true,
             tool_instruction: default_dsrs_instruction(),
@@ -152,6 +182,7 @@ impl ModelProfile {
             dsrs_history_format: default_dsrs_history_format(),
             correction_model: None,
             judge_model: None,
+            provider: None,
             max_correction_passes: 1,
             supports_parallel_tool_calls: true,
             tool_instruction: format!(
@@ -175,6 +206,7 @@ impl ModelProfile {
             dsrs_history_format: default_dsrs_history_format(),
             correction_model: None,
             judge_model: None,
+            provider: None,
             max_correction_passes: 1,
             supports_parallel_tool_calls: true,
             tool_instruction: default_dsrs_instruction(),
@@ -195,6 +227,7 @@ impl ModelProfile {
             dsrs_history_format: default_dsrs_history_format(),
             correction_model: None,
             judge_model: None,
+            provider: None,
             max_correction_passes: 1,
             supports_parallel_tool_calls: true,
             tool_instruction: default_dsrs_instruction(),
@@ -215,6 +248,7 @@ impl ModelProfile {
             dsrs_history_format: default_dsrs_history_format(),
             correction_model: None,
             judge_model: None,
+            provider: None,
             max_correction_passes: 1,
             supports_parallel_tool_calls: false,
             tool_instruction: format!(
@@ -238,6 +272,7 @@ impl ModelProfile {
             dsrs_history_format: default_dsrs_history_format(),
             correction_model: None,
             judge_model: None,
+            provider: None,
             max_correction_passes: 1,
             supports_parallel_tool_calls: true,
             tool_instruction: String::new(),
@@ -252,6 +287,7 @@ impl ModelProfile {
             dsrs_history_format: self.dsrs_history_format,
             request_adapter_artifact: self.request_adapter_artifact.clone(),
             correction_agent_artifact: self.correction_agent_artifact.clone(),
+            provider: self.provider.clone(),
         }
     }
 

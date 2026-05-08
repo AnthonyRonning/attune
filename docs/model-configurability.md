@@ -46,9 +46,9 @@ The current implementation already has the core pipeline needed for this design:
 | Optimization | `src/optimization.rs` runs GEPA against correction-agent and request-adapter prompt programs and writes profile-aware artifacts |
 | Artifact promotion | `src/promotion.rs` validates a GEPA artifact and promotes it into the matching profile config field |
 
-The first configuration slice is implemented. `ProxyConfig` can now load TOML, JSON, or JSON5 files from `--config` / `MCP_CONFIG_PATH`; configured profiles override built-ins; profile revision/source/history-format/artifact metadata is written to traces; request-adapter and correction-agent instruction artifacts are loaded from filesystem paths or `builtin:<artifact-id>` references; and GEPA reports include profile, revision, artifact, and request-adapter history-format metadata.
+The first configuration slice is implemented. `ProxyConfig` can now load TOML, JSON, or JSON5 files from `--config` / `MCP_CONFIG_PATH`; configured profiles override built-ins; profile revision/source/history-format/artifact/provider metadata is written to traces; request-adapter and correction-agent instruction artifacts are loaded from filesystem paths or `builtin:<artifact-id>` references; and GEPA reports include profile, revision, artifact, and request-adapter history-format metadata.
 
-The remaining limitation is that not every planned per-model knob is exposed yet. Tool mode, tool format, model matching, profile guidance, correction model, correction passes, and prompt artifacts are configurable. Parser strictness, correction trigger policy, provider identity, and retry strategy still live mostly in shared code and coarse global config.
+The remaining limitation is that not every planned per-model knob is exposed yet. Tool mode, tool format, model matching, profile guidance, correction model, correction passes, provider routing, and prompt artifacts are configurable. Parser strictness, correction trigger policy, provider health scoring, and retry strategy still live mostly in shared code and coarse global config.
 
 ## Shared vs Model-Specific
 
@@ -230,6 +230,7 @@ Configurable fields should include:
 - profile guidance artifact
 - examples or demonstrations
 - conversation-history rendering policy through `dsrs_history_format`
+- provider routing hints such as OpenRouter `provider.ignore`, `provider.order`, or `provider.allow_fallbacks`
 - tool-result rendering policy tied to the selected history format
 - parallel-tool instruction policy
 - stream policy

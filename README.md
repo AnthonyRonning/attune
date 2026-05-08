@@ -322,6 +322,25 @@ nix develop --command cargo run -- \
   --limit 12
 ```
 
+When testing OpenRouter models with multiple provider endpoints, the trace harness
+can inject provider routing fields into every scenario request:
+
+```sh
+nix develop --command cargo run -- \
+  trace-harness run \
+  --scenarios-path eval/trace-harness/scenarios/pi-mono.local.jsonl \
+  --output-path eval/trace-harness/results/qwen-pi.local.json \
+  --model qwen/qwen3.5-9b \
+  --provider-ignore venice \
+  --limit 12
+```
+
+Use `--provider-order`, `--provider-only`, `--provider-ignore`,
+`--disable-provider-fallbacks`, and `--require-provider-parameters` to compare
+provider behavior without changing the source scenarios. Normal proxy requests
+can also pass an OpenRouter-compatible `provider` object directly; profile-level
+provider routing is only injected when the caller did not send one.
+
 Trace-harness scenarios preserve the source conversation prefix and tool definitions, then ask the live proxy/model for the next assistant turn. They do not execute source harness tools and they do not grade whether the model made the best engineering choice. They only check whether the final proxy response stays structurally usable for an OpenAI-compatible agent loop. See [`eval/trace-harness/README.md`](eval/trace-harness/README.md).
 
 The harness writes downloaded source traces, converted scenarios, and run reports under `eval/trace-harness/raw/`, `eval/trace-harness/scenarios/`, and `eval/trace-harness/results/`. Those local files are ignored by default. Reviewed edge cases can be copied into request-adapter datasets only after inspection.

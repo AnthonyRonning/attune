@@ -224,6 +224,9 @@ mod tests {
                 [[model_profiles]]
                 name = "custom-default"
                 model_patterns = ["custom"]
+                [model_profiles.provider]
+                ignore = ["venice"]
+                allow_fallbacks = false
             "#,
         )
         .unwrap();
@@ -240,6 +243,9 @@ mod tests {
         assert!(config.model_profiles[0]
             .tool_instruction
             .contains("Tool calls are an application contract"));
+        let provider = config.model_profiles[0].provider.as_ref().unwrap();
+        assert_eq!(provider.ignore, vec!["venice"]);
+        assert_eq!(provider.allow_fallbacks, Some(false));
     }
 
     #[tokio::test]

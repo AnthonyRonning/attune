@@ -22,6 +22,7 @@ pub fn adapt_request(
 ) -> Result<AdaptedRequest> {
     let mut upstream_request = normalized.original.clone();
     upstream_request.stream = Some(false);
+    apply_profile_provider_routing(&mut upstream_request, profile)?;
 
     if normalized.tools.is_empty() || profile.tool_mode == ToolMode::PassThrough {
         return Ok(AdaptedRequest {
@@ -58,6 +59,27 @@ pub fn adapt_request(
         mode: ToolMode::ProxyOwned,
         injected_instruction: Some(instruction),
     })
+}
+
+fn apply_profile_provider_routing(
+    request: &mut ChatCompletionRequest,
+    profile: &ModelProfile,
+) -> Result<()> {
+    if request.extra.contains_key("provider") {
+        return Ok(());
+    }
+
+    let Some(provider) = &profile.provider else {
+        return Ok(());
+    };
+    if provider.is_empty() {
+        return Ok(());
+    }
+
+    request
+        .extra
+        .insert("provider".to_string(), serde_json::to_value(provider)?);
+    Ok(())
 }
 
 fn inject_system_instruction(messages: &mut Vec<ChatMessage>, instruction: &str) {
@@ -146,7 +168,7 @@ fn escape_text(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::{json, Map};
+    use serde_json::{json, Map, Value};
 
     use super::*;
     use crate::openai::{OpenAiFunctionTool, OpenAiTool};
@@ -188,5 +210,69 @@ mod tests {
             .content_text()
             .unwrap()
             .contains("[[ ## available_tools ## ]]"));
+    }
+
+    #[test]
+    fn profile_provider_routing_is_injected_without_overriding_request_provider() {
+        let tool = OpenAiTool {
+            tool_type: "function".to_string(),
+            function: OpenAiFunctionTool {
+                name: "read_file".to_string(),
+                description: Some("Read a file".to_string()),
+                parameters: json!({"type":"object"}),
+            },
+        };
+        let req = ChatCompletionRequest {
+            model: "qwen".to_string(),
+            messages: vec![ChatMessage::new("user", "read x")],
+            tools: Some(vec![tool]),
+            tool_choice: None,
+            parallel_tool_calls: None,
+            stream: None,
+            temperature: None,
+            top_p: None,
+            max_tokens: None,
+            max_completion_tokens: None,
+            response_format: None,
+            extra: Map::new(),
+        };
+        let normalized = crate::normalizer::normalize_request(req).unwrap();
+        let mut profile = ModelProfile::qwen();
+        profile.provider = Some(crate::model_profile::ProviderRouting {
+            ignore: vec!["venice".to_string()],
+            allow_fallbacks: Some(false),
+            ..Default::default()
+        });
+
+        let adapted = adapt_request(&normalized, &profile).unwrap();
+        assert_eq!(
+            adapted
+                .upstream_request
+                .extra
+                .get("provider")
+                .and_then(|provider| provider.pointer("/ignore/0"))
+                .and_then(Value::as_str),
+            Some("venice")
+        );
+        assert_eq!(
+            adapted
+                .upstream_request
+                .extra
+                .get("provider")
+                .and_then(|provider| provider.get("allow_fallbacks"))
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+
+        let mut req_with_provider = normalized.original.clone();
+        req_with_provider
+            .extra
+            .insert("provider".to_string(), json!({"order":["together"]}));
+        let normalized = crate::normalizer::normalize_request(req_with_provider).unwrap();
+        let adapted = adapt_request(&normalized, &profile).unwrap();
+        assert_eq!(
+            adapted.upstream_request.extra.get("provider"),
+            Some(&json!({"order":["together"]}))
+        );
     }
 }

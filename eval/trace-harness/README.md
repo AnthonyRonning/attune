@@ -85,6 +85,24 @@ cargo run -- \
   --limit 12
 ```
 
+Provider routing flags are available for OpenRouter comparisons. They inject a
+`provider` object into each scenario request before it is sent to the proxy:
+
+```bash
+cargo run -- \
+  trace-harness run \
+  --scenarios-path eval/trace-harness/scenarios/pi-mono.local.jsonl \
+  --output-path eval/trace-harness/results/qwen-pi.local.json \
+  --model qwen/qwen3.5-9b \
+  --provider-ignore venice \
+  --limit 12
+```
+
+Use `--provider-order deepinfra/bf16`, `--provider-order together`,
+`--provider-only`, `--provider-ignore`, `--disable-provider-fallbacks`, and
+`--require-provider-parameters` to isolate provider behavior. The trace harness
+override is explicit and does not edit the scenario file.
+
 The report checks structural invariants:
 
 - final response parses as OpenAI-compatible JSON
