@@ -439,17 +439,34 @@ mod tests {
         let profile = resolve_profile("google/gemma-4-26b-a4b-it", &[]);
 
         assert_eq!(profile.name, "gemma-dsrs-conservative");
-        assert_eq!(profile.revision, 5);
+        assert_eq!(profile.revision, 7);
         assert_eq!(profile.dsrs_history_format, DsrsHistoryFormat::AppendOnly);
         assert_eq!(
             profile.request_adapter_artifact.as_deref(),
-            Some(
-                "builtin:request-adapter/gemma-dsrs-conservative/r4-append-only-content-tools-json-meta"
-            )
+            Some("builtin:request-adapter/gemma-dsrs-conservative/sonnet-fresh-r1-append-only")
         );
         assert!(profile
             .tool_instruction
             .contains("MANDATORY INSPECTION FIRST"));
+    }
+
+    #[test]
+    fn qwen_builtin_profile_uses_embedded_promoted_default() {
+        let profile = resolve_profile("qwen/qwen3.5-9b", &[]);
+
+        assert_eq!(profile.name, "qwen-dsrs");
+        assert_eq!(profile.revision, 3);
+        assert_eq!(
+            profile.dsrs_history_format,
+            DsrsHistoryFormat::RegeneratedContext
+        );
+        assert_eq!(
+            profile.request_adapter_artifact.as_deref(),
+            Some("builtin:request-adapter/qwen-dsrs/sonnet-fresh-r1-regenerated-context")
+        );
+        assert!(profile
+            .tool_instruction
+            .contains("CRITICAL JSON ESCAPING RULE"));
     }
 
     #[test]

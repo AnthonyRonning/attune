@@ -1,0 +1,26 @@
+{
+  "artifact_id": "request-adapter/qwen-dsrs/sonnet-fresh-r1-append-only",
+  "artifact_type": "request_adapter_instruction",
+  "signature": "openai_tool_use_contract_profile_guidance/v1",
+  "target_model": "qwen/qwen3.5-9b",
+  "profile": "qwen-dsrs",
+  "profile_revision": 1,
+  "dsrs_history_format": "append_only",
+  "optimizer_model": "anthropic:claude-sonnet-4-6",
+  "judge_model": "anthropic:claude-sonnet-4-6",
+  "created_at": "2026-05-08T19:39:51.497174412Z",
+  "examples_loaded": 8,
+  "lm_max_tokens": 100000,
+  "best_instruction": "Tool calls are an application contract. If a tool is needed, do not narrate the action.\nUse the provided DSRs output fields exactly and do not create extra labels.\nAnswer the latest non-system conversation message; obey system_context but never copy it.\nDo not copy or summarize the serialized input fields, tool definitions, or prompt template.\n\nEVERY response MUST include all three DSRs output field markers in order:\n  [[ ## content ## ]]\n  [[ ## tool_calls ## ]]\n  [[ ## completed ## ]]\nA response missing any of these markers is invalid and will be rejected by the parser.\n\nWhen no tool is needed, put only the user-facing reply in content and set tool_calls to [].\nWhen a tool is needed, set tool_calls to a valid JSON array like [{\"name\":\"tool_name\",\"arguments\":{\"argument\":\"value\"}}]. You may also include brief user-facing content before the tool call when it helps the caller understand what you are doing.\nNever emit both empty content and [] tool_calls for a real user turn; either answer in content or call an available tool.\nEvery arguments object must match the selected tool parameters.\nDo not put scratchpad reasoning, field explanations, or presentation labels in content.\n\nMULTI-STEP TASKS: After receiving a tool response, if the overall task is not yet complete, immediately issue the next required tool call. Do not emit transitional prose (e.g., 'Now I will...', 'Next I'll...') without also completing the action via a tool call or full content response. A response consisting only of transitional prose with no tool calls and no substantive content is never acceptable — it wastes a turn and produces no progress.",
+  "best_average_score": 0.7125,
+  "total_rollouts": 55,
+  "total_lm_calls": 10,
+  "artifact_warnings": [
+    {
+      "code": "optimizer_meta_language",
+      "message": "request_adapter_instruction instruction appears to mention optimizer/eval metadata; review for benchmark overfit before promotion",
+      "matched": "labels"
+    }
+  ],
+  "output_path": "datasets/request-adapter/qwen-dsrs-sonnet-fresh-r1-append-only-gepa.json"
+}

@@ -11,9 +11,40 @@ artifact_type = "request_adapter_instruction"
 path = "datasets/request-adapter/gemma-dsrs-conservative-r4-append-only-gepa.json"
 profile = "gemma-dsrs-conservative"
 
+[[artifacts]]
+id = "request-adapter/qwen-dsrs/sonnet-fresh-r1-append-only"
+artifact_type = "request_adapter_instruction"
+path = "datasets/request-adapter/qwen-dsrs-sonnet-fresh-r1-append-only-gepa.json"
+profile = "qwen-dsrs"
+
+[[artifacts]]
+id = "request-adapter/qwen-dsrs/sonnet-fresh-r1-regenerated-context"
+artifact_type = "request_adapter_instruction"
+path = "datasets/request-adapter/qwen-dsrs-sonnet-fresh-r1-regenerated-context-gepa.json"
+profile = "qwen-dsrs"
+
+[[artifacts]]
+id = "request-adapter/gemma-dsrs-conservative/sonnet-fresh-r1-regenerated-context"
+artifact_type = "request_adapter_instruction"
+path = "datasets/request-adapter/gemma-dsrs-conservative-sonnet-fresh-r1-regenerated-context-gepa.json"
+profile = "gemma-dsrs-conservative"
+
+[[artifacts]]
+id = "request-adapter/gemma-dsrs-conservative/sonnet-fresh-r1-append-only"
+artifact_type = "request_adapter_instruction"
+path = "datasets/request-adapter/gemma-dsrs-conservative-sonnet-fresh-r1-append-only-gepa.json"
+profile = "gemma-dsrs-conservative"
+
 [[profiles]]
 name = "gemma-dsrs-conservative"
-revision = 5
+revision = 7
 model_patterns = ["gemma"]
 dsrs_history_format = "append_only"
-request_adapter_artifact = "request-adapter/gemma-dsrs-conservative/r4-append-only-content-tools-json-meta"
+request_adapter_artifact = "request-adapter/gemma-dsrs-conservative/sonnet-fresh-r1-append-only"
+
+[[profiles]]
+name = "qwen-dsrs"
+model_patterns = ["qwen", "qwq"]
+revision = 3
+request_adapter_artifact = "request-adapter/qwen-dsrs/sonnet-fresh-r1-regenerated-context"
+dsrs_history_format = "regenerated_context"

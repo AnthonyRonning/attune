@@ -78,14 +78,32 @@ mod tests {
     #[test]
     fn gemma_request_adapter_artifact_is_embedded() {
         let profile = profile_default("gemma-dsrs-conservative").unwrap();
-        assert_eq!(profile.revision, 5);
+        assert_eq!(profile.revision, 7);
         assert_eq!(
             profile.request_adapter_artifact,
-            Some("request-adapter/gemma-dsrs-conservative/r4-append-only-content-tools-json-meta")
+            Some("request-adapter/gemma-dsrs-conservative/sonnet-fresh-r1-append-only")
         );
 
         let instruction = instruction_for_id(profile.request_adapter_artifact.unwrap()).unwrap();
         assert!(instruction.contains("DSRs Structural Contract"));
         assert!(instruction.contains("MANDATORY INSPECTION FIRST"));
+    }
+
+    #[test]
+    fn qwen_request_adapter_artifact_is_embedded() {
+        let profile = profile_default("qwen-dsrs").unwrap();
+        assert_eq!(profile.revision, 3);
+        assert_eq!(
+            profile.dsrs_history_format,
+            Some(DsrsHistoryFormat::RegeneratedContext)
+        );
+        assert_eq!(
+            profile.request_adapter_artifact,
+            Some("request-adapter/qwen-dsrs/sonnet-fresh-r1-regenerated-context")
+        );
+
+        let instruction = instruction_for_id(profile.request_adapter_artifact.unwrap()).unwrap();
+        assert!(instruction.contains("CRITICAL FORMATTING REQUIREMENT"));
+        assert!(instruction.contains("CRITICAL JSON ESCAPING RULE"));
     }
 }

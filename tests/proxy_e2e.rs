@@ -244,7 +244,7 @@ async fn proxy_e2e_matrix_for_pi_like_prompts() {
 #[tokio::test]
 async fn proxy_e2e_translates_multiturn_tool_history_into_dsrs_context() {
     let request = json!({
-        "model": "qwen/qwen3.5-9b",
+        "model": "google/gemma-4-26b-a4b-it",
         "messages": [
             {
                 "role": "system",
@@ -280,7 +280,7 @@ async fn proxy_e2e_translates_multiturn_tool_history_into_dsrs_context() {
     let (body, trace) = run_request(
         request,
         chat_response(
-            "qwen/qwen3.5-9b",
+            "google/gemma-4-26b-a4b-it",
             json!({
                 "role": "assistant",
                 "content": "[[ ## content ## ]]\nIt is a proxy for correcting model responses.\n[[ ## tool_calls ## ]]\n[]\n[[ ## completed ## ]]"

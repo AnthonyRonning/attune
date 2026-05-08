@@ -338,7 +338,7 @@ Promotion is now explicit rather than automatic. The optimizer writes JSON artif
 
 GEPA artifacts and promotion reports include non-blocking `artifact_warnings` when an instruction appears to mention optimizer/eval metadata such as expected output, datasets, labels, test harnesses, or scoring. These warnings are deliberately review-only because deterministic overfit checks can produce false positives.
 
-The latest reviewed request-adapter matrix used 14 Gemma-focused examples from:
+The Gemma request-adapter dataset is assembled from reviewed examples in:
 
 - `datasets/request-adapter/gemma-dsrs-conservative.jsonl`
 - `datasets/request-adapter/gemma-dsrs-conservative-trace-faithful.jsonl`
@@ -346,16 +346,16 @@ The latest reviewed request-adapter matrix used 14 Gemma-focused examples from:
 
 Qwen now also has a small curated trace-harness dataset at `datasets/request-adapter/qwen-dsrs-trace-harness-curated.jsonl`. It covers representative failures from the Pi/Hermes 100-trace run, including contract violations, invalid tagged `tool_calls`, premature tool stops, empty DSRs output, and reasoning-only empty assistant output.
 
-Historical results from the pre-Sonnet-judge runner:
+The latest fresh request-adapter matrix was run from scratch with native Anthropic Claude Sonnet 4.6 for reflection/proposal and judging, OpenRouter only for target model calls, hidden labels outside reflected examples, and no seed artifact. Current promotion policy treats long and behavior-specific instructions as acceptable when the corrected GEPA workflow and artifact review support them; the main rejection criteria are hidden-label leakage, exact expected-output leakage, trace-specific answers, and brittle one-off rules.
 
 | Target model | History format | Score | Promotion decision |
 | --- | --- | ---: | --- |
-| `google/gemma-4-26b-a4b-it` | `append_only` | `0.8714286` | promoted |
-| `google/gemma-4-26b-a4b-it` | `regenerated_context` | `0.8000001` | experiment only |
-| `qwen/qwen3.5-9b` | `append_only` | `0.7000001` | not promoted; showed Pi/path-specific overfit |
-| `qwen/qwen3.5-9b` | `regenerated_context` | `0.6642858` | not promoted |
+| `qwen/qwen3.5-9b` | `append_only` | `0.7125` | reviewed and embedded as alternate |
+| `qwen/qwen3.5-9b` | `regenerated_context` | `0.8400` | promoted as Qwen built-in default |
+| `google/gemma-4-26b-a4b-it` | `append_only` | `0.9450` | promoted as Gemma built-in default |
+| `google/gemma-4-26b-a4b-it` | `regenerated_context` | `0.9083` | reviewed and embedded as alternate |
 
-The promoted Gemma artifact is `datasets/request-adapter/gemma-dsrs-conservative-r4-append-only-gepa.json`; `configs/gemma-dsrs-conservative.toml` references it and carries profile revision 5, and `profiles/builtin-defaults.toml` embeds it as `builtin:request-adapter/gemma-dsrs-conservative/r4-append-only-content-tools-json-meta`. The r4 GEPA rerun used the revised content-plus-tools contract and kept the r3 instruction because it remained the best candidate. That makes plain built-in Gemma resolution use the reviewed instruction without requiring local artifact files. The Qwen built-in profile remains intentionally unpromoted until it has a cleaner Qwen-specific dataset.
+The active built-in Qwen artifact is `datasets/request-adapter/qwen-dsrs-sonnet-fresh-r1-regenerated-context-gepa.json` with `dsrs_history_format = "regenerated_context"`. The active built-in Gemma artifact is `datasets/request-adapter/gemma-dsrs-conservative-sonnet-fresh-r1-append-only-gepa.json` with `dsrs_history_format = "append_only"`. The other fresh Sonnet artifacts remain checked in as reviewed alternates so future comparisons do not depend on ignored local experiment files.
 
 ### Traces and Datasets
 
