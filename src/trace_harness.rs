@@ -323,9 +323,6 @@ fn validate_proxy_response(
     if tool_calls.is_empty() && content_text.trim().is_empty() {
         failures.push("final assistant message had empty content and no tool calls".to_string());
     }
-    if !tool_calls.is_empty() && !content_text.trim().is_empty() {
-        failures.push("final assistant message had both content and tool_calls".to_string());
-    }
 
     let known_tools = request
         .tools

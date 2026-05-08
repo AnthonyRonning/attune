@@ -188,13 +188,14 @@ async fn proxy_e2e_matrix_for_pi_like_prompts() {
             "meta-llama/llama-3.1-8b-instruct",
             json!({
                 "role": "assistant",
-                "content": "[[ ## content ## ]]\n\n[[ ## tool_calls ## ]]\n[{\"name\":\"bash\",\"arguments\":{\"command\":\"ls -la\"}}]\n[[ ## completed ## ]]"
+                "content": "[[ ## content ## ]]\nI will list the repository files.\n\n[[ ## tool_calls ## ]]\n[{\"name\":\"bash\",\"arguments\":{\"command\":\"ls -la\"}}]\n[[ ## completed ## ]]"
             }),
             "stop",
         ),
     )
     .await;
     assert!(body.contains("\"tool_calls\""));
+    assert!(body.contains("I will list the repository files."));
     assert!(body.contains("\"name\":\"bash\""));
     assert!(body.contains("ls -la"));
 

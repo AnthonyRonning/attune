@@ -301,8 +301,8 @@ mod tests {
                 [[model_profiles]]
                 name = "gemma-dsrs-conservative"
                 model_patterns = ["gemma"]
-                revision = 4
-                request_adapter_artifact = "builtin:request-adapter/gemma-dsrs-conservative/r3-append-only-json-meta"
+                revision = 5
+                request_adapter_artifact = "builtin:request-adapter/gemma-dsrs-conservative/r4-append-only-content-tools-json-meta"
             "#,
         )
         .await
@@ -312,13 +312,15 @@ mod tests {
         let profile = &config.model_profiles[0];
 
         assert_eq!(profile.source, "config");
-        assert_eq!(profile.revision, 4);
+        assert_eq!(profile.revision, 5);
         assert!(profile
             .tool_instruction
             .contains("MANDATORY INSPECTION FIRST"));
         assert_eq!(
             profile.request_adapter_artifact.as_deref(),
-            Some("builtin:request-adapter/gemma-dsrs-conservative/r3-append-only-json-meta")
+            Some(
+                "builtin:request-adapter/gemma-dsrs-conservative/r4-append-only-content-tools-json-meta"
+            )
         );
     }
 }

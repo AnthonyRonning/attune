@@ -99,9 +99,11 @@ Profiles support revision/source metadata plus request-adapter and correction-ag
 
 DSRs profiles also support `dsrs_history_format`. The default is `append_only`, which keeps user turns as chat messages and renders prior assistant turns in the same DSRs `content` / `tool_calls` shape expected for the next answer. The previous single regenerated transcript format is still available as `regenerated_context` for models that perform better with one serialized conversation block.
 
+The DSRs response contract intentionally mirrors OpenAI-compatible assistant messages: `content` only is valid, `tool_calls` only is valid, and `content` plus `tool_calls` is valid. Empty content plus empty `tool_calls` remains a failure for a real assistant turn.
+
 Built-in defaults are generated from [`profiles/builtin-defaults.toml`](profiles/builtin-defaults.toml) at build time. Reviewed artifacts listed there are validated by `build.rs` and embedded into the binary, so shipped binaries do not need local dataset files for their default profile prompts. Runtime config profiles still match before built-ins and can override the embedded defaults.
 
-The current Gemma built-in default embeds `datasets/request-adapter/gemma-dsrs-conservative-r3-append-only-gepa.json` as `builtin:request-adapter/gemma-dsrs-conservative/r3-append-only-json-meta` at profile revision 4. [`configs/gemma-dsrs-conservative.toml`](configs/gemma-dsrs-conservative.toml) remains a filesystem-artifact example and local override path, but plain `cargo run` now gets the same reviewed Gemma request-adapter instruction through the embedded built-in default.
+The current Gemma built-in default embeds `datasets/request-adapter/gemma-dsrs-conservative-r4-append-only-gepa.json` as `builtin:request-adapter/gemma-dsrs-conservative/r4-append-only-content-tools-json-meta` at profile revision 5. [`configs/gemma-dsrs-conservative.toml`](configs/gemma-dsrs-conservative.toml) remains a filesystem-artifact example and local override path, but plain `cargo run` now gets the same reviewed Gemma request-adapter instruction through the embedded built-in default.
 
 ## What the repair engine handles
 
@@ -568,7 +570,7 @@ The latest full matrix used 14 reviewed rows and tested both DSRs history format
 | `qwen/qwen3.5-9b` | `append_only` | `0.7000001` | not promoted; showed Pi/path-specific overfit |
 | `qwen/qwen3.5-9b` | `regenerated_context` | `0.6642858` | not promoted |
 
-The promoted Gemma artifact is `datasets/request-adapter/gemma-dsrs-conservative-r3-append-only-gepa.json`. [`configs/gemma-dsrs-conservative.toml`](configs/gemma-dsrs-conservative.toml) references it at profile revision 4, and [`profiles/builtin-defaults.toml`](profiles/builtin-defaults.toml) embeds it into the shipped Gemma built-in default. Higher GEPA scores are not enough by themselves; artifacts still need human review for overfit, brittle one-off rules, and prompt drift before promotion.
+The promoted Gemma artifact is `datasets/request-adapter/gemma-dsrs-conservative-r4-append-only-gepa.json`. [`configs/gemma-dsrs-conservative.toml`](configs/gemma-dsrs-conservative.toml) references it at profile revision 5, and [`profiles/builtin-defaults.toml`](profiles/builtin-defaults.toml) embeds it into the shipped Gemma built-in default. The r4 GEPA rerun used the revised content-plus-tools contract and kept the r3 instruction because it remained the best candidate. Higher GEPA scores are not enough by themselves; artifacts still need human review for overfit, brittle one-off rules, and prompt drift before promotion.
 
 After inspecting a GEPA artifact, first promote it into a model-profile config explicitly:
 
@@ -576,7 +578,7 @@ After inspecting a GEPA artifact, first promote it into a model-profile config e
 nix develop --command cargo run -- \
   promote-artifact \
   --config-path configs/gemma-dsrs-conservative.toml \
-  --artifact-path datasets/request-adapter/gemma-dsrs-conservative-r3-append-only-gepa.json \
+  --artifact-path datasets/request-adapter/gemma-dsrs-conservative-r4-append-only-gepa.json \
   --profile gemma-dsrs-conservative
 ```
 
@@ -587,7 +589,7 @@ After the config path has been tested, promote the same artifact into built-in d
 ```sh
 nix develop --command cargo run -- \
   promote-default-artifact \
-  --artifact-path datasets/request-adapter/gemma-dsrs-conservative-r3-append-only-gepa.json \
+  --artifact-path datasets/request-adapter/gemma-dsrs-conservative-r4-append-only-gepa.json \
   --profile gemma-dsrs-conservative \
   --model-pattern gemma
 ```

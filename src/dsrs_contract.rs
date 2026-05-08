@@ -44,7 +44,9 @@ struct OpenAiToolUseContract {
     #[input(desc = "Whether multiple tool calls may be emitted")]
     pub parallel_tool_calls: bool,
 
-    #[output(desc = "Plain user-facing reply text without labels; empty when using tools.")]
+    #[output(
+        desc = "Plain user-facing reply text without labels; may be present with tool calls."
+    )]
     pub content: String,
 
     #[output(desc = "JSON array of {\"name\": string, \"arguments\": object} tool calls")]
@@ -262,17 +264,6 @@ pub fn parse_tool_contract_response(content: &str) -> Option<ParsedDsrsContract>
     let tool_calls_field = raw_tool_calls_field.trim();
 
     let tool_intents = parse_tool_calls_field(tool_calls_field, &mut events, &mut failures);
-    if parsed_content
-        .as_deref()
-        .is_some_and(|content| !content.trim().is_empty())
-        && !tool_intents.is_empty()
-    {
-        push_failure(
-            &mut failures,
-            ResponseFailureKind::DsrsContractViolation,
-            "DSRs output contained user-facing content while also emitting tool calls",
-        );
-    }
 
     Some(ParsedDsrsContract {
         content: parsed_content,
@@ -1119,7 +1110,7 @@ tool_calls: [
     }
 
     #[test]
-    fn reports_content_and_tool_calls_as_contract_violation() {
+    fn accepts_content_and_tool_calls_together() {
         let parsed = parse_tool_contract_response(
             r#"[[ ## content ## ]]
 I will inspect the package list first.
@@ -1135,11 +1126,10 @@ I will inspect the package list first.
             Some("I will inspect the package list first.")
         );
         assert_eq!(parsed.tool_intents.len(), 1);
-        assert!(parsed.failures.iter().any(|failure| failure.kind
-            == ResponseFailureKind::DsrsContractViolation
-            && failure
-                .detail
-                .contains("content while also emitting tool calls")));
+        assert!(!parsed
+            .failures
+            .iter()
+            .any(|failure| failure.kind == ResponseFailureKind::DsrsContractViolation));
     }
 
     #[test]

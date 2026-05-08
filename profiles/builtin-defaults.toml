@@ -6,14 +6,14 @@
 # include_str!.
 
 [[artifacts]]
-id = "request-adapter/gemma-dsrs-conservative/r3-append-only-json-meta"
+id = "request-adapter/gemma-dsrs-conservative/r4-append-only-content-tools-json-meta"
 artifact_type = "request_adapter_instruction"
-path = "datasets/request-adapter/gemma-dsrs-conservative-r3-append-only-gepa.json"
+path = "datasets/request-adapter/gemma-dsrs-conservative-r4-append-only-gepa.json"
 profile = "gemma-dsrs-conservative"
 
 [[profiles]]
 name = "gemma-dsrs-conservative"
-revision = 4
+revision = 5
 model_patterns = ["gemma"]
 dsrs_history_format = "append_only"
-request_adapter_artifact = "request-adapter/gemma-dsrs-conservative/r3-append-only-json-meta"
+request_adapter_artifact = "request-adapter/gemma-dsrs-conservative/r4-append-only-content-tools-json-meta"

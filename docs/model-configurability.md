@@ -242,6 +242,8 @@ Implemented DSRs history formats:
 - `append_only`: default. Runtime context is sent first, then the original conversation is appended as chat messages. User turns remain normal user messages, prior assistant turns are rendered as DSRs `content` / `tool_calls` outputs, and tool results are rendered as observed tool-result messages.
 - `regenerated_context`: legacy format. The whole non-system conversation is regenerated into one serialized `conversation` field with `assistant_tool_calls` and tool-result text. This remains useful for models that respond better to a single compact transcript.
 
+The DSRs output contract allows the same assistant message shapes that OpenAI-compatible clients already allow: content only, tool calls only, or content plus tool calls. A syntactically valid DSRs response with empty or no-op content and empty `tool_calls` is still a failure because it would stop the agent loop without an answer or action.
+
 ### Response Interpreter
 
 The interpreter should stay shared, but profiles should choose strictness and routing.
@@ -341,7 +343,7 @@ Results:
 | `qwen/qwen3.5-9b` | `append_only` | `0.7000001` | not promoted; showed Pi/path-specific overfit |
 | `qwen/qwen3.5-9b` | `regenerated_context` | `0.6642858` | not promoted |
 
-The promoted Gemma artifact is `datasets/request-adapter/gemma-dsrs-conservative-r3-append-only-gepa.json`; `configs/gemma-dsrs-conservative.toml` references it and carries profile revision 4, and `profiles/builtin-defaults.toml` embeds it as `builtin:request-adapter/gemma-dsrs-conservative/r3-append-only-json-meta`. That makes plain built-in Gemma resolution use the reviewed instruction without requiring local artifact files. The Qwen built-in profile remains intentionally unpromoted until it has a cleaner Qwen-specific dataset.
+The promoted Gemma artifact is `datasets/request-adapter/gemma-dsrs-conservative-r4-append-only-gepa.json`; `configs/gemma-dsrs-conservative.toml` references it and carries profile revision 5, and `profiles/builtin-defaults.toml` embeds it as `builtin:request-adapter/gemma-dsrs-conservative/r4-append-only-content-tools-json-meta`. The r4 GEPA rerun used the revised content-plus-tools contract and kept the r3 instruction because it remained the best candidate. That makes plain built-in Gemma resolution use the reviewed instruction without requiring local artifact files. The Qwen built-in profile remains intentionally unpromoted until it has a cleaner Qwen-specific dataset.
 
 ### Traces and Datasets
 

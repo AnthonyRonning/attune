@@ -163,12 +163,13 @@ pub fn interpret_response(
                 .unwrap_or(true);
             let parsed_tool_intents = parsed.tool_intents;
             parsed_dsrs_empty_output = parsed_tool_intents.is_empty() && parsed_content_noop;
-            content = parsed
-                .content
-                .or_else(|| parsed_tool_intents.is_empty().then(String::new));
-            if !parsed_tool_intents.is_empty() {
-                content = None;
-            }
+            content = if !parsed_tool_intents.is_empty() && parsed_content_noop {
+                None
+            } else {
+                parsed
+                    .content
+                    .or_else(|| parsed_tool_intents.is_empty().then(String::new))
+            };
             tool_intents.extend(parsed_tool_intents);
         }
 
@@ -797,7 +798,7 @@ mod tests {
     }
 
     #[test]
-    fn marks_dsrs_content_with_tool_calls_as_contract_violation() {
+    fn preserves_dsrs_content_with_tool_calls() {
         let response = ChatCompletionResponse {
             id: "1".to_string(),
             object: "chat.completion".to_string(),
@@ -824,9 +825,12 @@ I will inspect the repository first.
 
         let interpreted = interpret_response(&response, &[tool("bash")]);
 
-        assert_eq!(interpreted.content, None);
+        assert_eq!(
+            interpreted.content.as_deref(),
+            Some("I will inspect the repository first.")
+        );
         assert_eq!(interpreted.tool_intents.len(), 1);
-        assert!(interpreted.has_failure(ResponseFailureKind::DsrsContractViolation));
+        assert!(!interpreted.has_failure(ResponseFailureKind::DsrsContractViolation));
     }
 
     #[test]

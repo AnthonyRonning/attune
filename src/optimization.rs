@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 
 use crate::{
     dsrs_contract::{format_tool_contract, parse_tool_contract_response},
-    model_profile::{DsrsHistoryFormat, ModelProfile},
+    model_profile::{builtin_profiles, resolve_profile, DsrsHistoryFormat, ModelProfile},
     normalizer::normalize_request,
     openai::{ChatCompletionRequest, ChatMessage, OpenAiFunctionTool, OpenAiTool},
 };
@@ -303,9 +303,10 @@ struct RequestAdapterPromptSignature {
     /// call an available inspection tool instead of guessing. A completed response
     /// must never be blank or placeholder content. Empty content with [] tool_calls
     /// is invalid. Literal [], {}, null, content_value, tool_calls_value, or
-    /// completed_marker in content are invalid answers. When using tools, leave
-    /// content empty and put valid calls in tool_calls. When no tool is needed, put
-    /// a real user-facing answer in content and set tool_calls to [].
+    /// completed_marker in content are invalid answers. When using tools, put valid
+    /// calls in tool_calls and optionally include brief user-facing content. When
+    /// no tool is needed, put a real user-facing answer in content and set
+    /// tool_calls to [].
     #[input(desc = "Model profile name being optimized")]
     pub profile: String,
 
@@ -333,7 +334,9 @@ struct RequestAdapterPromptSignature {
     #[input(desc = "Whether multiple tool calls may be emitted")]
     pub parallel_tool_calls: bool,
 
-    #[output(desc = "Plain user-facing reply text without labels; empty when using tools.")]
+    #[output(
+        desc = "Plain user-facing reply text without labels; may be present with tool calls."
+    )]
     pub content: String,
 
     #[output(desc = "JSON array of {\"name\": string, \"arguments\": object} tool calls")]
@@ -362,9 +365,15 @@ impl Default for RequestAdapterPromptProgram {
 }
 
 impl RequestAdapterPromptProgram {
-    fn runtime(lm: LM) -> Self {
+    fn runtime(lm: LM, initial_instruction: Option<String>) -> Self {
+        let mut signature = RequestAdapterPromptSignature::new();
+        if let Some(instruction) =
+            initial_instruction.filter(|instruction| !instruction.trim().is_empty())
+        {
+            let _ = signature.update_instruction(instruction);
+        }
         Self {
-            predictor: Predict::new(RequestAdapterPromptSignature::new()),
+            predictor: Predict::new(signature),
             lm: Some(lm),
         }
     }
@@ -525,7 +534,7 @@ struct CorrectionPromptSignature {
     #[output(desc = "Brief explanation of the repair decision.")]
     pub explanation: String,
 
-    #[output(desc = "Plain user-facing content, or an empty string when using tools.")]
+    #[output(desc = "Plain user-facing content; may be empty when only tool calls are needed.")]
     pub content: String,
 
     #[output(
@@ -728,7 +737,9 @@ pub async fn optimize_request_adapter_prompt(
         .maybe_max_lm_calls(Some((config.iterations.max(1) * 16) + 16))
         .build();
 
-    let mut program = RequestAdapterPromptProgram::runtime(runtime_lm);
+    let initial_instruction =
+        request_adapter_initial_instruction(config.profile.as_deref(), &runtime_model);
+    let mut program = RequestAdapterPromptProgram::runtime(runtime_lm, initial_instruction);
     let result: GEPAResult = gepa
         .compile_with_feedback(&mut program, examples.clone())
         .await
@@ -779,6 +790,20 @@ fn default_request_adapter_artifact_id(
 ) -> String {
     let target = profile.or(target_model).unwrap_or("default");
     format!("request-adapter/{target}")
+}
+
+fn request_adapter_initial_instruction(
+    profile_name: Option<&str>,
+    target_model: &str,
+) -> Option<String> {
+    let profile = profile_name
+        .and_then(|name| {
+            builtin_profiles()
+                .into_iter()
+                .find(|profile| profile.name == name)
+        })
+        .unwrap_or_else(|| resolve_profile(target_model, &[]));
+    Some(profile.tool_instruction).filter(|instruction| !instruction.trim().is_empty())
 }
 
 pub fn traces_to_gepa_examples(dataset_rows: &[Value]) -> Vec<Example> {
@@ -1489,6 +1514,17 @@ mod tests {
     }
 
     #[test]
+    fn request_adapter_gepa_seeds_from_current_builtin_profile() {
+        let instruction = request_adapter_initial_instruction(
+            Some("gemma-dsrs-conservative"),
+            "google/gemma-4-26b-a4b-it",
+        )
+        .unwrap();
+
+        assert_eq!(instruction, ModelProfile::gemma().tool_instruction);
+    }
+
+    #[test]
     fn converts_request_adapter_rows_to_gepa_examples() {
         let rows = vec![json!({
             "dataset_type": "request_adapter_prompt_gepa/v1",
@@ -1567,6 +1603,22 @@ mod tests {
         let feedback = score_request_adapter_prediction(&expected, &predicted);
 
         assert_eq!(feedback.score, 0.8);
+    }
+
+    #[test]
+    fn scores_request_adapter_expected_tool_call_with_content_as_exact() {
+        let expected = json!({
+            "content": "",
+            "tool_calls": [{"name":"read","arguments":{"path":"README.md"}}]
+        });
+        let predicted = json!({
+            "content": "I will inspect the README first.",
+            "tool_calls": [{"name":"read","arguments":{"path":"README.md"}}]
+        });
+
+        let feedback = score_request_adapter_prediction(&expected, &predicted);
+
+        assert_eq!(feedback.score, 1.0);
     }
 
     #[test]

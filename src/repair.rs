@@ -121,6 +121,7 @@ pub async fn repair_response(
     let mut policy_decisions = Vec::new();
     let mut intents = interpreted.tool_intents.clone();
     let mut using_correction_tool_calls = false;
+    let mut content_with_tool_calls = interpreted_content_with_tool_calls(interpreted);
     let mut corrected_content: Option<(String, f32, String)> = None;
     let should_try_correction = should_try_correction_agent(normalized, interpreted, &intents);
     let correction_available = config.correction.enabled
@@ -198,6 +199,14 @@ pub async fn repair_response(
                     });
                 }
                 intents = output.tool_calls;
+                let previous_content = content_with_tool_calls.clone();
+                content_with_tool_calls = output
+                    .content
+                    .clone()
+                    .filter(|content| {
+                        !unusable_assistant_content(content) && !content.trim().is_empty()
+                    })
+                    .or(previous_content);
                 using_correction_tool_calls = true;
             }
             Ok(Some(output)) => {
@@ -347,7 +356,11 @@ pub async fn repair_response(
     }
 
     let first = final_response.choices.first_mut().expect("choice ensured");
-    first.message.set_content_null();
+    if let Some(content) = content_with_tool_calls {
+        first.message.set_content_text(content);
+    } else {
+        first.message.set_content_null();
+    }
     first.message.tool_calls = Some(repaired_tool_calls);
     first.finish_reason = Some("tool_calls".to_string());
 
@@ -357,12 +370,7 @@ pub async fn repair_response(
             .iter()
             .any(|intent| intent.source != ToolIntentSource::Native)
     {
-        actions.push(RepairAction {
-            action: "content_tool_call_extracted".to_string(),
-            confidence: 0.9,
-            reason: "converted clear tool call syntax in assistant content into OpenAI tool_calls"
-                .to_string(),
-        });
+        actions.push(non_native_tool_intent_action(interpreted));
     }
 
     Ok(RepairOutcome {
@@ -1017,6 +1025,49 @@ fn unusable_assistant_content(content: &str) -> bool {
         || empty_json_response_content(trimmed)
 }
 
+fn interpreted_content_with_tool_calls(interpreted: &InterpretedResponse) -> Option<String> {
+    if interpreted.tool_intents.is_empty()
+        || !interpreted.tool_intents.iter().all(|intent| {
+            matches!(
+                intent.source,
+                ToolIntentSource::Native | ToolIntentSource::Dsrs
+            )
+        })
+    {
+        return None;
+    }
+
+    interpreted
+        .content
+        .as_deref()
+        .map(str::trim)
+        .filter(|content| !content.is_empty() && !unusable_assistant_content(content))
+        .map(str::to_string)
+}
+
+fn non_native_tool_intent_action(interpreted: &InterpretedResponse) -> RepairAction {
+    let all_non_native_intents_are_dsrs = interpreted
+        .tool_intents
+        .iter()
+        .filter(|intent| intent.source != ToolIntentSource::Native)
+        .all(|intent| intent.source == ToolIntentSource::Dsrs);
+
+    if all_non_native_intents_are_dsrs {
+        RepairAction {
+            action: "dsrs_tool_calls_adapted".to_string(),
+            confidence: 1.0,
+            reason: "converted valid DSRs tool_calls output into OpenAI tool_calls".to_string(),
+        }
+    } else {
+        RepairAction {
+            action: "content_tool_call_extracted".to_string(),
+            confidence: 0.9,
+            reason: "converted clear tool call syntax in assistant content into OpenAI tool_calls"
+                .to_string(),
+        }
+    }
+}
+
 fn empty_json_response_content(content: &str) -> bool {
     parse_json_lenient(content).is_some_and(|value| match value {
         Value::Null => true,
@@ -1286,6 +1337,115 @@ mod tests {
             .tool_calls
             .as_ref()
             .unwrap();
+        assert_eq!(calls[0].function.name, "read_file");
+        assert_eq!(calls[0].function.arguments, r#"{"path":"Cargo.toml"}"#);
+        assert!(outcome
+            .actions
+            .iter()
+            .any(|action| action.action == "content_tool_call_extracted"));
+    }
+
+    #[tokio::test]
+    async fn preserves_dsrs_content_when_emitting_tool_calls() {
+        let normalized = request_with_tool(true);
+        let upstream = synthetic_response(
+            "test",
+            r#"[[ ## content ## ]]
+I will inspect the manifest first.
+
+[[ ## tool_calls ## ]]
+[{"name":"read_file","arguments":{"path":"Cargo.toml"}}]
+[[ ## completed ## ]]"#,
+        );
+        let interpreted =
+            crate::response_interpreter::interpret_response(&upstream, &normalized.tools);
+
+        assert_eq!(
+            interpreted.content.as_deref(),
+            Some("I will inspect the manifest first.")
+        );
+        assert_eq!(interpreted.tool_intents.len(), 1);
+        assert!(!interpreted.has_failure(ResponseFailureKind::DsrsContractViolation));
+
+        let outcome = repair_response(
+            &ProxyConfig::default(),
+            &normalized,
+            &ModelProfile::qwen(),
+            &upstream,
+            &interpreted,
+            &crate::agents::NoopCorrectionAgent,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let message = &outcome.final_response.choices[0].message;
+        assert_eq!(
+            message.content_text().as_deref(),
+            Some("I will inspect the manifest first.")
+        );
+        let calls = message.tool_calls.as_ref().unwrap();
+        assert_eq!(calls[0].function.name, "read_file");
+        assert_eq!(calls[0].function.arguments, r#"{"path":"Cargo.toml"}"#);
+        assert!(outcome.correction_attempts.is_empty());
+        assert!(outcome
+            .actions
+            .iter()
+            .any(|action| action.action == "dsrs_tool_calls_adapted"));
+        assert!(!outcome
+            .actions
+            .iter()
+            .any(|action| action.action == "content_tool_call_extracted"));
+    }
+
+    #[tokio::test]
+    async fn preserves_native_content_when_repairing_native_tool_arguments() {
+        let normalized = request_with_tool(false);
+        let mut upstream = ChatCompletionResponse::empty_for_model("test");
+        upstream.choices.push(ChatChoice {
+            index: 0,
+            message: ChatMessage {
+                role: "assistant".to_string(),
+                content: Some(json!("I will read the manifest first.")),
+                name: None,
+                tool_call_id: None,
+                tool_calls: Some(vec![OpenAiToolCall::function(
+                    "read_file",
+                    r#"{"path":"Cargo.toml""#,
+                )]),
+                extra: Map::new(),
+            },
+            finish_reason: Some("tool_calls".to_string()),
+            logprobs: None,
+            extra: Map::new(),
+        });
+        let interpreted =
+            crate::response_interpreter::interpret_response(&upstream, &normalized.tools);
+
+        assert!(interpreted.has_failure(ResponseFailureKind::NativeMalformedJsonArguments));
+        assert_eq!(
+            interpreted.content.as_deref(),
+            Some("I will read the manifest first.")
+        );
+
+        let outcome = repair_response(
+            &ProxyConfig::default(),
+            &normalized,
+            &ModelProfile::qwen(),
+            &upstream,
+            &interpreted,
+            &crate::agents::NoopCorrectionAgent,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let message = &outcome.final_response.choices[0].message;
+        assert_eq!(
+            message.content_text().as_deref(),
+            Some("I will read the manifest first.")
+        );
+        let calls = message.tool_calls.as_ref().unwrap();
         assert_eq!(calls[0].function.name, "read_file");
         assert_eq!(calls[0].function.arguments, r#"{"path":"Cargo.toml"}"#);
     }

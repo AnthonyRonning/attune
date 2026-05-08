@@ -78,10 +78,10 @@ mod tests {
     #[test]
     fn gemma_request_adapter_artifact_is_embedded() {
         let profile = profile_default("gemma-dsrs-conservative").unwrap();
-        assert_eq!(profile.revision, 4);
+        assert_eq!(profile.revision, 5);
         assert_eq!(
             profile.request_adapter_artifact,
-            Some("request-adapter/gemma-dsrs-conservative/r3-append-only-json-meta")
+            Some("request-adapter/gemma-dsrs-conservative/r4-append-only-content-tools-json-meta")
         );
 
         let instruction = instruction_for_id(profile.request_adapter_artifact.unwrap()).unwrap();

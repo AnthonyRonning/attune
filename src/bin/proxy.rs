@@ -161,7 +161,7 @@ enum Command {
         dataset_path: String,
         #[arg(
             long,
-            default_value = "datasets/request-adapter/gemma-dsrs-conservative-gepa.json"
+            default_value = "datasets/request-adapter/gemma-dsrs-conservative-local-append-only-gepa.json"
         )]
         output_path: String,
         #[arg(

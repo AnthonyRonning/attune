@@ -90,10 +90,11 @@ The report checks structural invariants:
 - final response parses as OpenAI-compatible JSON
 - no DSRs markers or field labels leak into user-facing content
 - no empty content plus empty tool calls
-- no content and tool calls in the same final message
 - tool call names are known for the scenario
 - tool call arguments are JSON objects
 - duplicate identical final tool calls are warnings
+
+OpenAI-compatible assistant messages may contain content, tool calls, or both. The harness only treats empty content plus empty tool calls as structurally invalid.
 
 The report is a review aid, not an automatic quality grade. A model can choose a different tool than the source trace and still be structurally valid. A model can also make a poor engineering choice that is outside this proxy's scope. The proxy is responsible for clean OpenAI-compatible structure, not for making every target model as smart as the source model.
 
@@ -126,14 +127,14 @@ Then run the request-adapter optimizer for the history format being tested:
 ```bash
 cargo run -- optimize-request-adapter-prompt \
   --dataset-path /tmp/gemma-request-adapter-all.jsonl \
-  --output-path datasets/request-adapter/gemma-dsrs-conservative-r3-append-only-gepa.json \
+  --output-path datasets/request-adapter/gemma-dsrs-conservative-r4-append-only-gepa.json \
   --base-url https://openrouter.ai/api/v1 \
   --model google/gemma-4-26b-a4b-it \
   --target-model google/gemma-4-26b-a4b-it \
   --profile gemma-dsrs-conservative \
-  --profile-revision 3 \
+  --profile-revision 4 \
   --dsrs-history-format append_only \
-  --artifact-id request-adapter/gemma-dsrs-conservative/append-only \
+  --artifact-id request-adapter/gemma-dsrs-conservative/r4-append-only-content-tools-json-meta \
   --iterations 3 \
   --max-examples 14 \
   --lm-max-tokens 100000

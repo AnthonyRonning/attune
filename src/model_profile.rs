@@ -329,7 +329,7 @@ pub fn default_dsrs_instruction() -> String {
         "Answer the latest non-system conversation message; obey system_context but never copy it.",
         "Do not copy or summarize the serialized input fields, tool definitions, or prompt template.",
         "When no tool is needed, put only the user-facing reply in content and set tool_calls to [].",
-        r#"When a tool is needed, leave content empty and set tool_calls to a valid JSON array like [{"name":"tool_name","arguments":{"argument":"value"}}]."#,
+        r#"When a tool is needed, set tool_calls to a valid JSON array like [{"name":"tool_name","arguments":{"argument":"value"}}]. You may also include brief user-facing content before the tool call when it helps the caller understand what you are doing."#,
         "Never emit both empty content and [] tool_calls for a real user turn; either answer in content or call an available tool.",
         "Every arguments object must match the selected tool parameters.",
         "Do not put scratchpad reasoning, field explanations, or presentation labels in content.",
@@ -403,11 +403,13 @@ mod tests {
         let profile = resolve_profile("google/gemma-4-26b-a4b-it", &[]);
 
         assert_eq!(profile.name, "gemma-dsrs-conservative");
-        assert_eq!(profile.revision, 4);
+        assert_eq!(profile.revision, 5);
         assert_eq!(profile.dsrs_history_format, DsrsHistoryFormat::AppendOnly);
         assert_eq!(
             profile.request_adapter_artifact.as_deref(),
-            Some("builtin:request-adapter/gemma-dsrs-conservative/r3-append-only-json-meta")
+            Some(
+                "builtin:request-adapter/gemma-dsrs-conservative/r4-append-only-content-tools-json-meta"
+            )
         );
         assert!(profile
             .tool_instruction

@@ -118,13 +118,14 @@ impl DsrsCorrectionAgent {
 struct CorrectMalformedToolResponse {
     /// You are a strict DSRs model-response correction agent. Recover a malformed
     /// assistant response by filling exactly the requested DSRs output fields.
-    /// If clear tool calls were intended, put them in tool_calls and leave content
-    /// empty. If no tool call was intended, put the user-facing text in content and
-    /// use an empty tool_calls array. An empty DSRs response with empty content and
-    /// [] tool_calls is malformed; recover only when the conversation and tools make
-    /// the next action or answer clear. If the malformed response is ambiguous or
-    /// unsafe to repair, set possible to false. Do not invent tools, arguments, or
-    /// facts. Do not emit prose outside the DSRs field markers.
+    /// If clear tool calls were intended, put them in tool_calls and optionally
+    /// preserve brief user-facing content. If no tool call was intended, put the
+    /// user-facing text in content and use an empty tool_calls array. An empty DSRs
+    /// response with empty content and [] tool_calls is malformed; recover only when
+    /// the conversation and tools make the next action or answer clear. If the
+    /// malformed response is ambiguous or unsafe to repair, set possible to false.
+    /// Do not invent tools, arguments, or facts. Do not emit prose outside the DSRs
+    /// field markers.
     #[input(desc = "OpenAI-compatible tool definitions")]
     pub available_tools: String,
 
@@ -149,7 +150,7 @@ struct CorrectMalformedToolResponse {
     #[output(desc = "Brief explanation of the repair decision.")]
     pub explanation: String,
 
-    #[output(desc = "Plain user-facing content, or an empty string when using tools.")]
+    #[output(desc = "Plain user-facing content; may be empty when only tool calls are needed.")]
     pub content: String,
 
     #[output(
