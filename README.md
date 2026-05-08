@@ -72,7 +72,7 @@ The proxy supports two early modes:
    - It removes native upstream tool definitions.
    - It renders the conversation, tool definitions, `tool_choice`, and parallel-call setting into a DSRs contract using `dspy-rs`.
    - It parses the model's text back into OpenAI `tool_calls`.
-   - It deterministically parses tagged DSRs output and keeps untagged DSRs-like output, contract violations, and empty DSRs completions on the correction path instead of treating them as valid contract output.
+   - It deterministically parses tagged DSRs output and keeps untagged DSRs-like output, contract violations, empty DSRs completions, and reasoning-only empty assistant stops on the correction path instead of treating them as valid contract output.
 
 2. **Pass-through repair**
    - The proxy can preserve native upstream tool calling behavior.
@@ -149,6 +149,7 @@ Current deterministic and schema-guided repairs include:
 - direct JSON tool-call objects
 - function-like text for known tool names
 - JSON5-like malformed arguments, including unquoted keys, single quotes, and trailing commas
+- reasoning-only empty assistant stops when tools are available; these are treated as failed visible output and routed through correction before fallback
 - fuzzy near-match tool-name repair
 - simple schema key typo repair, such as `pth` -> `path`
 - scalar-to-string coercion when the schema expects a string
@@ -161,7 +162,7 @@ Low-confidence semantic invention is intentionally avoided. If a hallucinated to
 
 ## Correction-agent path
 
-When deterministic parsing finds a suspicious stop, malformed known tool call, DSRs contract violation, empty DSRs output, prompt/template leak, invalid DSRs `tool_calls`, schema violation, or similar failure that needs semantic recovery, the repair pipeline can call the correction agent.
+When deterministic parsing finds a suspicious stop, malformed known tool call, DSRs contract violation, empty DSRs output, reasoning-only empty assistant output, prompt/template leak, invalid DSRs `tool_calls`, schema violation, or similar failure that needs semantic recovery, the repair pipeline can call the correction agent.
 
 The current live correction agent is itself a DSRs-style internal agent. It is asked to fill typed output fields:
 
@@ -171,7 +172,7 @@ The current live correction agent is itself a DSRs-style internal agent. It is a
 - `content`
 - `tool_calls`
 
-`tool_calls` is a JSON array of `{ "name": string, "arguments": object }`. The proxy does not ask the correction agent for an OpenAI `tool_calls` envelope; the proxy parses the DSRs fields and then builds the OpenAI-compatible response itself.
+`tool_calls` is a JSON array of `{ "name": string, "arguments": object }`. The proxy does not ask the correction agent for an OpenAI `tool_calls` envelope; the proxy parses the DSRs fields and then builds the OpenAI-compatible response itself. The correction-agent parser first uses the DSRs typed adapter and then falls back to deterministic DSRs field extraction with JSON5/trailing-comma tolerance, so parser brittleness does not turn a near-valid typed correction into an unrecovered response.
 
 The correction model defaults to the same model requested by the client, unless `CorrectionConfig.default_model` or the selected `ModelProfile.correction_model` overrides it. Correction-agent instructions can be profile-specific and loaded from a GEPA artifact. Correction is synchronous in the request path so the client receives the repaired response before its agent loop continues.
 
@@ -568,7 +569,7 @@ This writes a `request_adapter_instruction` artifact that records the target pro
 
 GEPA comparison artifacts are treated as disposable until promoted. Files such as `*-append-only-gepa.json`, `*-regenerated-context-gepa.json`, and `*-trace-faithful-*-gepa.json` are ignored by default; keep or force-add only artifacts that have been reviewed and intentionally promoted.
 
-`datasets/request-adapter/gemma-dsrs-conservative-trace-harness-curated.jsonl` contains a small reviewed set from live trace-harness runs. It is intentionally narrow: exact tool-shape positives plus correction-needed request-adapter failures where the final clean output is a clear label.
+`datasets/request-adapter/gemma-dsrs-conservative-trace-harness-curated.jsonl` and `datasets/request-adapter/qwen-dsrs-trace-harness-curated.jsonl` contain small reviewed sets from live trace-harness runs. They are intentionally narrow: exact tool-shape positives plus correction-needed request-adapter failures where the final clean output is a clear label. The Qwen set includes representative DSRs contract violations, invalid tagged `tool_calls`, premature tool stops, empty DSRs output, and reasoning-only empty assistant output from the Pi/Hermes 100-trace run.
 
 The current reviewed Gemma request-adapter GEPA run combines the hand-labeled profile dataset, exact trace-faithful exports, and curated trace-harness examples:
 

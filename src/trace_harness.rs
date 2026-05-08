@@ -19,6 +19,7 @@ use crate::{
     gateway::Gateway,
     model_profile::ProviderRouting,
     openai::{ChatCompletionRequest, ChatMessage, OpenAiFunctionTool, OpenAiTool, OpenAiToolCall},
+    repair::is_unrecovered_fallback_content,
 };
 
 #[derive(Debug, Clone)]
@@ -331,6 +332,9 @@ fn validate_proxy_response(
     }
     if tool_calls.is_empty() && content_text.trim().is_empty() {
         failures.push("final assistant message had empty content and no tool calls".to_string());
+    }
+    if is_unrecovered_fallback_content(content_text) {
+        failures.push("proxy returned an unrecovered fallback response".to_string());
     }
 
     let known_tools = request
@@ -1133,6 +1137,52 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn validate_proxy_response_fails_generic_unrecovered_fallback() {
+        let request = ChatCompletionRequest {
+            model: "test/model".to_string(),
+            messages: vec![ChatMessage::new("user", "Read README.md")],
+            tools: Some(vec![OpenAiTool {
+                tool_type: "function".to_string(),
+                function: OpenAiFunctionTool {
+                    name: "read_file".to_string(),
+                    description: None,
+                    parameters: json!({
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                        "required": ["path"]
+                    }),
+                },
+            }]),
+            tool_choice: None,
+            parallel_tool_calls: None,
+            stream: None,
+            temperature: None,
+            top_p: None,
+            max_tokens: None,
+            max_completion_tokens: None,
+            response_format: None,
+            extra: Map::new(),
+        };
+        let response = json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "The upstream model did not return a usable assistant response."
+                }
+            }]
+        });
+        let mut failures = Vec::new();
+        let mut warnings = Vec::new();
+
+        validate_proxy_response(&request, &response, &mut failures, &mut warnings);
+
+        assert!(failures
+            .iter()
+            .any(|failure| failure.contains("unrecovered fallback")));
+        assert!(warnings.is_empty());
     }
 
     #[test]

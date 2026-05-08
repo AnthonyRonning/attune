@@ -19,6 +19,11 @@ use crate::{
     },
 };
 
+pub const GENERIC_UNUSABLE_ASSISTANT_RESPONSE: &str =
+    "The upstream model did not return a usable assistant response.";
+pub const GENERIC_UNRECOVERABLE_TOOL_RESPONSE: &str =
+    "The upstream model emitted a malformed tool call that could not be safely recovered.";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepairOutcome {
     pub final_response: ChatCompletionResponse,
@@ -441,6 +446,7 @@ fn interpreter_failures_require_model_correction(interpreted: &InterpretedRespon
         ResponseFailureKind::DsrsInvalidToolCallsJson,
         ResponseFailureKind::DsrsInvalidToolCallsShape,
         ResponseFailureKind::EmptyDsrsOutput,
+        ResponseFailureKind::EmptyAssistantOutput,
         ResponseFailureKind::DsrsPlaceholderOnly,
         ResponseFailureKind::TemplateLeak,
         ResponseFailureKind::PromptEcho,
@@ -1130,8 +1136,13 @@ fn fallback_unusable_response_content(normalized: &NormalizedRequest) -> String 
         "I can help read files, run commands, edit code, and answer questions about this repository."
             .to_string()
     } else {
-        "The upstream model did not return a usable assistant response.".to_string()
+        GENERIC_UNUSABLE_ASSISTANT_RESPONSE.to_string()
     }
+}
+
+pub fn is_unrecovered_fallback_content(content: &str) -> bool {
+    let trimmed = content.trim();
+    trimmed == GENERIC_UNUSABLE_ASSISTANT_RESPONSE || trimmed == GENERIC_UNRECOVERABLE_TOOL_RESPONSE
 }
 
 fn latest_user_text(normalized: &NormalizedRequest) -> String {
@@ -1158,9 +1169,9 @@ fn suppress_unrecoverable_tool_output(
     ensure_first_choice(response, "");
     let first = response.choices.first_mut().expect("choice ensured");
     first.message.tool_calls = None;
-    first.message.set_content_text(
-        "The upstream model emitted a malformed tool call that could not be safely recovered.",
-    );
+    first
+        .message
+        .set_content_text(GENERIC_UNRECOVERABLE_TOOL_RESPONSE);
     remove_reasoning_extra(&mut first.message);
     first.finish_reason = Some("stop".to_string());
     actions.push(RepairAction {
@@ -1309,6 +1320,17 @@ mod tests {
     fn repairs_json5_arguments() {
         let value = parse_json_lenient("{path:'Cargo.toml',}").unwrap();
         assert_eq!(value["path"], "Cargo.toml");
+    }
+
+    #[test]
+    fn identifies_generic_unrecovered_fallback_content() {
+        assert!(is_unrecovered_fallback_content(
+            GENERIC_UNUSABLE_ASSISTANT_RESPONSE
+        ));
+        assert!(is_unrecovered_fallback_content(
+            GENERIC_UNRECOVERABLE_TOOL_RESPONSE
+        ));
+        assert!(!is_unrecovered_fallback_content("Hello! How can I help?"));
     }
 
     #[tokio::test]
@@ -1727,6 +1749,88 @@ I will inspect the manifest first.
                     .failure_kinds
                     .contains(&ResponseFailureKind::EmptyDsrsOutput)
         }));
+    }
+
+    struct ReasoningOnlyCorrectionAgent;
+
+    #[async_trait::async_trait]
+    impl CorrectionAgent for ReasoningOnlyCorrectionAgent {
+        async fn correct(
+            &self,
+            input: CorrectionAgentInput,
+        ) -> Result<Option<crate::agents::CorrectionAgentOutput>> {
+            assert!(input.malformed_response.contains("assistant_reasoning:"));
+            assert!(input
+                .response_failures
+                .iter()
+                .any(|failure| failure.kind == ResponseFailureKind::EmptyAssistantOutput));
+            Ok(Some(crate::agents::CorrectionAgentOutput {
+                tool_calls: vec![ToolIntent {
+                    name: "read_file".to_string(),
+                    arguments: Some(json!({"path":"Cargo.toml"})),
+                    raw_arguments: r#"{"path":"Cargo.toml"}"#.to_string(),
+                    source: ToolIntentSource::CorrectionAgent,
+                    confidence: 0.92,
+                }],
+                content: Some("I will inspect the manifest first.".to_string()),
+                possible: true,
+                confidence: 0.92,
+                explanation: "reasoning-only stop contained a clear next tool action".to_string(),
+                raw_output: Some("reasoning-only correction fixture".to_string()),
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn reasoning_only_empty_output_routes_to_correction_agent() {
+        let normalized = request_with_tool_prompt("inspect the manifest", false);
+        let mut upstream = ChatCompletionResponse::empty_for_model("test");
+        let mut message = ChatMessage {
+            role: "assistant".to_string(),
+            ..ChatMessage::default()
+        };
+        message.extra.insert(
+            "reasoning".to_string(),
+            json!("I need to read Cargo.toml before answering."),
+        );
+        upstream.choices.push(ChatChoice {
+            index: 0,
+            message,
+            finish_reason: Some("stop".to_string()),
+            logprobs: None,
+            extra: Map::new(),
+        });
+        let interpreted =
+            crate::response_interpreter::interpret_response(&upstream, &normalized.tools);
+
+        assert!(interpreted.suspicious_stop);
+        assert!(interpreted.has_failure(ResponseFailureKind::EmptyAssistantOutput));
+
+        let outcome = repair_response(
+            &ProxyConfig::default(),
+            &normalized,
+            &ModelProfile::qwen(),
+            &upstream,
+            &interpreted,
+            &ReasoningOnlyCorrectionAgent,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let message = &outcome.final_response.choices[0].message;
+        assert_eq!(
+            message.content_text().as_deref(),
+            Some("I will inspect the manifest first.")
+        );
+        assert_eq!(
+            message.tool_calls.as_ref().unwrap()[0].function.name,
+            "read_file"
+        );
+        assert!(outcome
+            .actions
+            .iter()
+            .any(|action| action.action == "correction_agent_tool_recovery"));
     }
 
     struct DuplicateReadmeCorrectionAgent;

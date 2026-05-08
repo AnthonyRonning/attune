@@ -1,11 +1,14 @@
 use std::{
+    collections::HashMap,
     fmt,
-    panic::{catch_unwind, AssertUnwindSafe},
+    panic::{self, AssertUnwindSafe},
 };
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use dspy_rs::{adapter::Adapter, example, ChatAdapter, MetaSignature, Prediction, Signature, LM};
+use dspy_rs::{
+    adapter::Adapter, example, ChatAdapter, Message, MetaSignature, Prediction, Signature, LM,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -238,19 +241,137 @@ impl CorrectionAgent for DsrsCorrectionAgent {
             .await
             .context("DSRs correction LM call failed")?;
         let raw_output = response.output.content().to_string();
-        let parsed = catch_unwind(AssertUnwindSafe(|| {
-            adapter.parse_response(&signature, response.output)
-        }))
-        .map_err(|_| {
-            CorrectionAgentError::invalid_dsrs_output(
-                raw_output.clone(),
-                "typed DSRs fields could not be parsed",
-            )
-        })?;
+        let parsed =
+            parse_correction_prediction_data(&adapter, &signature, response.output, &raw_output)?;
         let prediction = Prediction::new(parsed, response.usage);
 
         correction_output_from_prediction(&prediction, raw_output).map(Some)
     }
+}
+
+fn parse_correction_prediction_data(
+    adapter: &ChatAdapter,
+    signature: &CorrectMalformedToolResponse,
+    response: Message,
+    raw_output: &str,
+) -> Result<HashMap<String, Value>> {
+    match parse_chat_adapter_response_silently(adapter, signature, response) {
+        Ok(parsed) => Ok(parsed),
+        Err(adapter_detail) => parse_correction_output_fallback(raw_output).map_err(|detail| {
+            CorrectionAgentError::invalid_dsrs_output(
+                raw_output.to_string(),
+                format!("{adapter_detail}; fallback DSRs parser failed: {detail}"),
+            )
+            .into()
+        }),
+    }
+}
+
+fn parse_chat_adapter_response_silently(
+    adapter: &ChatAdapter,
+    signature: &CorrectMalformedToolResponse,
+    response: Message,
+) -> std::result::Result<HashMap<String, Value>, &'static str> {
+    let previous_hook = panic::take_hook();
+    panic::set_hook(Box::new(|_| {}));
+    let parsed = panic::catch_unwind(AssertUnwindSafe(|| {
+        adapter.parse_response(signature, response)
+    }));
+    panic::set_hook(previous_hook);
+
+    parsed.map_err(|_| "typed DSRs fields could not be parsed by dspy-rs ChatAdapter")
+}
+
+fn parse_correction_output_fallback(
+    raw_output: &str,
+) -> std::result::Result<HashMap<String, Value>, String> {
+    let mut data = HashMap::new();
+
+    let possible = parse_bool_field(required_dsrs_field(raw_output, "possible")?)
+        .ok_or_else(|| "possible field was not a boolean".to_string())?;
+    let confidence = parse_number_field(required_dsrs_field(raw_output, "confidence")?)
+        .ok_or_else(|| "confidence field was not a number".to_string())?
+        .clamp(0.0, 1.0);
+    let explanation = required_dsrs_field(raw_output, "explanation")?
+        .trim()
+        .to_string();
+    let content = required_dsrs_field(raw_output, "content")?
+        .trim()
+        .to_string();
+    let tool_calls = parse_json_lenient(required_dsrs_field(raw_output, "tool_calls")?)
+        .ok_or_else(|| "tool_calls field was not valid JSON or JSON5".to_string())?;
+    if !tool_calls.is_array() {
+        return Err("tool_calls field was not a JSON array".to_string());
+    }
+
+    data.insert("possible".to_string(), Value::Bool(possible));
+    data.insert("confidence".to_string(), serde_json::json!(confidence));
+    data.insert("explanation".to_string(), Value::String(explanation));
+    data.insert("content".to_string(), Value::String(content));
+    data.insert("tool_calls".to_string(), tool_calls);
+    Ok(data)
+}
+
+fn required_dsrs_field<'a>(
+    raw_output: &'a str,
+    field_name: &str,
+) -> std::result::Result<&'a str, String> {
+    extract_dsrs_field(raw_output, field_name)
+        .ok_or_else(|| format!("missing [[ ## {field_name} ## ]] field"))
+}
+
+fn extract_dsrs_field<'a>(raw_output: &'a str, field_name: &str) -> Option<&'a str> {
+    let marker = format!("[[ ## {field_name} ## ]]");
+    let (_, after_marker) = raw_output.split_once(&marker)?;
+    let end = after_marker.find("[[ ## ").unwrap_or(after_marker.len());
+    Some(after_marker[..end].trim())
+}
+
+fn parse_bool_field(value: &str) -> Option<bool> {
+    serde_json::from_str::<bool>(value.trim())
+        .ok()
+        .or_else(|| value.trim().parse::<bool>().ok())
+}
+
+fn parse_number_field(value: &str) -> Option<f64> {
+    serde_json::from_str::<f64>(value.trim())
+        .ok()
+        .or_else(|| value.trim().parse::<f64>().ok())
+}
+
+fn parse_json_lenient(input: &str) -> Option<Value> {
+    let cleaned = strip_json_fence(input.trim());
+    serde_json::from_str(cleaned)
+        .ok()
+        .or_else(|| json5::from_str(cleaned).ok())
+        .or_else(|| serde_json::from_str(&remove_trailing_commas(cleaned)).ok())
+}
+
+fn strip_json_fence(input: &str) -> &str {
+    input
+        .strip_prefix("```json")
+        .or_else(|| input.strip_prefix("```"))
+        .and_then(|value| value.strip_suffix("```"))
+        .unwrap_or(input)
+        .trim()
+}
+
+fn remove_trailing_commas(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let chars = input.chars().collect::<Vec<_>>();
+    for (index, ch) in chars.iter().enumerate() {
+        if *ch == ',' {
+            let mut cursor = index + 1;
+            while cursor < chars.len() && chars[cursor].is_whitespace() {
+                cursor += 1;
+            }
+            if cursor < chars.len() && (chars[cursor] == '}' || chars[cursor] == ']') {
+                continue;
+            }
+        }
+        out.push(*ch);
+    }
+    out
 }
 
 fn correction_output_from_prediction(
@@ -325,7 +446,12 @@ mod tests {
     fn parse_dsrs_correction_output(raw_output: &str) -> Result<CorrectionAgentOutput> {
         let signature = CorrectMalformedToolResponse::new();
         let adapter = ChatAdapter;
-        let parsed = adapter.parse_response(&signature, Message::assistant(raw_output));
+        let parsed = parse_correction_prediction_data(
+            &adapter,
+            &signature,
+            Message::assistant(raw_output),
+            raw_output,
+        )?;
         let prediction = Prediction::new(parsed, LmUsage::default());
         correction_output_from_prediction(&prediction, raw_output.to_string())
     }
@@ -411,5 +537,44 @@ This used the wrong tool-call schema.
         );
 
         assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn parses_typed_dsrs_correction_tool_calls_with_trailing_commas() {
+        let parsed = parse_dsrs_correction_output(
+            r#"[[ ## possible ## ]]
+true
+
+[[ ## confidence ## ]]
+0.95
+
+[[ ## explanation ## ]]
+Recovered a clear write call.
+
+[[ ## content ## ]]
+Writing the file now.
+
+[[ ## tool_calls ## ]]
+[
+  {
+    "name": "write_file",
+    "arguments": {
+      "path": "redis_api_cache/middleware.py",
+      "content": "hello",
+    },
+  },
+]
+
+[[ ## completed ## ]]"#,
+        )
+        .unwrap();
+
+        assert!(parsed.possible);
+        assert_eq!(parsed.content.as_deref(), Some("Writing the file now."));
+        assert_eq!(parsed.tool_calls[0].name, "write_file");
+        assert_eq!(
+            parsed.tool_calls[0].arguments.as_ref().unwrap()["path"],
+            "redis_api_cache/middleware.py"
+        );
     }
 }

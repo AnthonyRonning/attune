@@ -108,11 +108,12 @@ The report checks structural invariants:
 - final response parses as OpenAI-compatible JSON
 - no DSRs markers or field labels leak into user-facing content
 - no empty content plus empty tool calls
+- no generic unrecovered proxy fallback response, such as "The upstream model did not return a usable assistant response."
 - tool call names are known for the scenario
 - tool call arguments are JSON objects
 - duplicate identical final tool calls are warnings
 
-OpenAI-compatible assistant messages may contain content, tool calls, or both. The harness only treats empty content plus empty tool calls as structurally invalid.
+OpenAI-compatible assistant messages may contain content, tool calls, or both. Empty content plus empty tool calls is structurally invalid, and a generic unrecovered proxy fallback is treated as a failed scenario because it means the proxy kept the API shape valid but did not preserve a usable agent turn.
 
 The report is a review aid, not an automatic quality grade. A model can choose a different tool than the source trace and still be structurally valid. A model can also make a poor engineering choice that is outside this proxy's scope. The proxy is responsible for clean OpenAI-compatible structure, not for making every target model as smart as the source model.
 
@@ -128,6 +129,7 @@ Reviewed request-adapter examples live under `datasets/request-adapter/`. The cu
 
 ```text
 datasets/request-adapter/gemma-dsrs-conservative-trace-harness-curated.jsonl
+datasets/request-adapter/qwen-dsrs-trace-harness-curated.jsonl
 ```
 
 For the latest Gemma request-adapter GEPA run, combine the curated harness rows with the existing hand-labeled and trace-faithful datasets:

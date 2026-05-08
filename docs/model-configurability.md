@@ -36,7 +36,7 @@ The current implementation already has the core pipeline needed for this design:
 | Streaming behavior | Upstream is forced to `stream: false`; client streaming is synthesized after repair |
 | Token controls | Client `max_tokens` and `max_completion_tokens` pass through when present and remain unset when omitted |
 | Response interpretation | `src/response_interpreter.rs` detects native tool calls, DSRs, XML, tagged JSON, markdown JSON, direct JSON, and function-like known-tool calls |
-| Failure classification | Typed failures include DSRs contract violations, content outside tagged fields, empty DSRs output, invalid DSRs tool JSON, prompt echo, template leak, malformed known tool calls, premature tool stop, schema violation, and unknown tools |
+| Failure classification | Typed failures include DSRs contract violations, content outside tagged fields, empty DSRs output, empty assistant output, invalid DSRs tool JSON, prompt echo, template leak, malformed known tool calls, premature tool stop, schema violation, and unknown tools |
 | Repair policy | `src/repair.rs` uses deterministic and schema-guided repair first, then calls the correction agent for failures that need semantic recovery |
 | Correction agent | `src/agents.rs` uses a typed DSRs signature with `possible`, `confidence`, `explanation`, `content`, and `tool_calls` fields |
 | Correction traces | `src/trace.rs` writes correction-agent sidecar records with input, raw output, accepted state, confidence, explanation, content, and tool calls |
@@ -243,7 +243,7 @@ Implemented DSRs history formats:
 - `append_only`: default. Runtime context is sent first, then the original conversation is appended as chat messages. User turns remain normal user messages, prior assistant turns are rendered as DSRs `content` / `tool_calls` outputs, and tool results are rendered as observed tool-result messages.
 - `regenerated_context`: legacy format. The whole non-system conversation is regenerated into one serialized `conversation` field with `assistant_tool_calls` and tool-result text. This remains useful for models that respond better to a single compact transcript.
 
-The DSRs output contract allows the same assistant message shapes that OpenAI-compatible clients already allow: content only, tool calls only, or content plus tool calls. A syntactically valid DSRs response with empty or no-op content and empty `tool_calls` is still a failure because it would stop the agent loop without an answer or action.
+The DSRs output contract allows the same assistant message shapes that OpenAI-compatible clients already allow: content only, tool calls only, or content plus tool calls. A syntactically valid DSRs response with empty or no-op content and empty `tool_calls` is still a failure because it would stop the agent loop without an answer or action. The same applies to upstream responses that contain only hidden reasoning/thinking text with no visible `content` and no tool calls; reasoning is useful context for correction, but it is not a usable OpenAI assistant turn by itself.
 
 ### Response Interpreter
 
@@ -255,6 +255,7 @@ Configurable fields should include:
 - DSRs marker strictness
 - whether content outside DSRs fields is a correction-triggering violation
 - whether a syntactically valid DSRs response with empty `content` and empty `tool_calls` is treated as a correction-triggering premature stop
+- whether hidden reasoning with empty visible `content` and no tool calls is treated as correction-triggering empty assistant output
 - whether prompt echoes and template artifacts are correction-triggering violations
 - whether XML/tagged/direct JSON parses are accepted as valid tool intent or only used as hints
 - suspicious-stop detection sensitivity
@@ -325,7 +326,7 @@ The GEPA CLI defaults `--lm-max-tokens` to `100000` for both correction-agent an
 
 Request-adapter GEPA uses a local JSON adapter for the optimizer's own reflection/proposal signatures. That adapter is intentionally separate from the proxy runtime formatter, so candidate request-adapter instructions can contain literal DSRs marker examples without being parsed as the optimizer's outer field delimiters.
 
-For example, a model that emits a valid DSRs envelope with empty `content` and `[]` tool calls has failed at the request-adapter prompt layer, not the correction-agent layer. That trace belongs in a model/profile-specific request-adapter dataset so GEPA can improve the profile guidance, while runtime policy should still route the empty response through correction or a future retry path.
+For example, a model that emits a valid DSRs envelope with empty `content` and `[]` tool calls, or a reasoning-only stop with no visible content or tool calls, has failed at the request-adapter prompt layer, not the correction-agent layer. That trace belongs in a model/profile-specific request-adapter dataset so GEPA can improve the profile guidance, while runtime policy should still route the empty response through correction or a future retry path.
 
 Promotion is now explicit rather than automatic. The optimizer writes JSON artifacts for review; `promote-artifact` then validates `artifact_type`, `profile`, and layer metadata, updates the appropriate profile config field, carries `dsrs_history_format` from request-adapter artifacts into the profile config, and increments the profile revision. `promote-default-artifact` is the next promotion step: it updates `profiles/builtin-defaults.toml` so a reviewed artifact is validated by `build.rs` and embedded into shipped binaries. Both commands work for request-adapter artifacts and correction-agent artifacts, so every profile can follow the same dataset -> GEPA -> inspect -> config promotion -> default promotion loop. Formatter-comparison GEPA outputs are ignored by default until a specific artifact is reviewed and promoted.
 
@@ -334,6 +335,8 @@ The latest reviewed request-adapter matrix used 14 Gemma-focused examples from:
 - `datasets/request-adapter/gemma-dsrs-conservative.jsonl`
 - `datasets/request-adapter/gemma-dsrs-conservative-trace-faithful.jsonl`
 - `datasets/request-adapter/gemma-dsrs-conservative-trace-harness-curated.jsonl`
+
+Qwen now also has a small curated trace-harness dataset at `datasets/request-adapter/qwen-dsrs-trace-harness-curated.jsonl`. It covers representative failures from the Pi/Hermes 100-trace run, including contract violations, invalid tagged `tool_calls`, premature tool stops, empty DSRs output, and reasoning-only empty assistant output.
 
 Results:
 
@@ -460,7 +463,7 @@ Status: partially implemented. Eval reports now include model/profile/revision/a
 
 After correction-agent artifact loading works, add artifact loading for request-adapter profile guidance. Keep the DSRs signature stable, and let artifacts tune wording, examples, and profile guidance.
 
-Status: artifact loading is implemented through `request_adapter_artifact`. A dedicated request-adapter GEPA optimizer is now available through `optimize-request-adapter-prompt`; it evaluates candidate profile guidance by rendering the real runtime DSRs request format selected by `--dsrs-history-format`. `export-request-adapter-dataset` converts trace IDs into trace-faithful request-adapter rows with explicit labels. The current Gemma dataset combines hand-labeled rows, exact trace exports, and curated trace-harness examples. Separate append-only and regenerated-context GEPA artifacts can be generated for comparison. The reviewed append-only Gemma artifact has been promoted to `configs/gemma-dsrs-conservative.toml`; trial outputs should stay ignored unless promoted.
+Status: artifact loading is implemented through `request_adapter_artifact`. A dedicated request-adapter GEPA optimizer is now available through `optimize-request-adapter-prompt`; it evaluates candidate profile guidance by rendering the real runtime DSRs request format selected by `--dsrs-history-format`. `export-request-adapter-dataset` converts trace IDs into trace-faithful request-adapter rows with explicit labels. The current Gemma dataset combines hand-labeled rows, exact trace exports, and curated trace-harness examples; Qwen has its first curated trace-harness dataset for future model-specific GEPA runs. Separate append-only and regenerated-context GEPA artifacts can be generated for comparison. The reviewed append-only Gemma artifact has been promoted to `configs/gemma-dsrs-conservative.toml`; trial outputs should stay ignored unless promoted.
 
 ### Step 8: Add explicit artifact promotion
 

@@ -61,6 +61,7 @@ pub enum ResponseFailureKind {
     DsrsInvalidToolCallsShape,
     EmptyDsrsOutput,
     DsrsPlaceholderOnly,
+    EmptyAssistantOutput,
     TemplateLeak,
     PromptEcho,
     PrematureToolStop,
@@ -215,11 +216,26 @@ pub fn interpret_response(
         .as_deref()
         .map(|content| looks_like_malformed_tool_output(content, tools))
         .unwrap_or(false);
+    let finish_reason = choice.finish_reason.as_deref().unwrap_or("stop");
     let suspicious_tool_stop = tool_intents.is_empty()
         && tools_available(tools)
-        && choice.finish_reason.as_deref().unwrap_or("stop") == "stop"
+        && finish_reason == "stop"
         && (content_suggests_premature_tool || content_suggests_malformed_tool);
-    let suspicious_stop = suspicious_tool_stop || parsed_dsrs_empty_output;
+    let empty_visible_output_stop = !parsed_dsrs_empty_output
+        && tool_intents.is_empty()
+        && tools_available(tools)
+        && matches!(finish_reason, "stop" | "length")
+        && content
+            .as_deref()
+            .map(|content| content.trim().is_empty())
+            .unwrap_or(true)
+        && message
+            .tool_calls
+            .as_ref()
+            .map(|calls| calls.is_empty())
+            .unwrap_or(true);
+    let suspicious_stop =
+        suspicious_tool_stop || parsed_dsrs_empty_output || empty_visible_output_stop;
 
     if suspicious_tool_stop {
         parse_events.push(
@@ -239,6 +255,24 @@ pub fn interpret_response(
                 "assistant emitted malformed structured tool-call output",
             );
         }
+    }
+    if empty_visible_output_stop {
+        if reasoning
+            .as_deref()
+            .is_some_and(|reasoning| !reasoning.trim().is_empty())
+        {
+            parse_events.push(
+                "assistant emitted reasoning/thinking but no visible content or tool calls"
+                    .to_string(),
+            );
+        } else {
+            parse_events.push("assistant emitted empty content and no tool calls".to_string());
+        }
+        push_failure(
+            &mut failures,
+            ResponseFailureKind::EmptyAssistantOutput,
+            "assistant stopped without visible content or tool calls",
+        );
     }
 
     InterpretedResponse {
@@ -1093,5 +1127,14 @@ I will inspect the repository first.
             Some("Thinking Process:\nsecret")
         );
         assert!(interpreted.tool_intents.is_empty());
+        assert!(interpreted.suspicious_stop);
+        assert!(interpreted.has_failure(ResponseFailureKind::EmptyAssistantOutput));
+        assert!(
+            interpreted
+                .parse_events
+                .iter()
+                .any(|event| event
+                    .contains("reasoning/thinking but no visible content or tool calls"))
+        );
     }
 }
