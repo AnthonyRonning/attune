@@ -517,16 +517,20 @@ nix develop --command cargo run -- \
   --dataset-path datasets/corrections.jsonl \
   --output-path datasets/gepa-correction-prompt.json \
   --base-url https://openrouter.ai/api/v1 \
-  --model qwen/qwen3-8b \
+  --model anthropic/claude-sonnet-4.6 \
+  --judge-model anthropic/claude-sonnet-4.6 \
+  --target-model qwen/qwen3.5-9b \
   --iterations 3 \
   --max-examples 12
 ```
 
-This loads dataset rows as typed DSRs examples, runs GEPA against the correction-prompt program, and writes a report with the best discovered instruction, artifact metadata, and optimization statistics. The command also accepts `--target-model`, `--profile`, `--artifact-id`, and `--seed-artifact` so artifacts can be tied back to a runtime profile and future runs can continue from a reviewed previous instruction instead of starting from the built-in default.
+This loads dataset rows as typed DSRs examples, runs GEPA against the correction-prompt program, and writes a report with the best discovered instruction, artifact metadata, and optimization statistics. `--target-model` is required and names the model under test. `--model` is the GEPA reflection/proposal model and defaults to `anthropic/claude-sonnet-4.6` through `MCP_GEPA_REFLECTION_MODEL`; `--judge-model` is the GEPA scoring model and defaults to `anthropic/claude-sonnet-4.6` through `MCP_GEPA_JUDGE_MODEL`. The runner rejects configurations where the reflection or judge model is the same as the target model. The command also accepts `--profile`, `--artifact-id`, and `--seed-artifact` so artifacts can be tied back to a runtime profile and future runs can continue from a reviewed previous instruction instead of starting from the built-in default.
 
 Both GEPA commands expose `--lm-max-tokens`, defaulting to `100000`. This is separate from the live proxy request path: client `max_tokens` values are still passed through only when provided. The GEPA runner sets a high optimizer token budget because `dspy-rs` sends an explicit `max_tokens` value for its own optimizer, reflection, and target-model calls, and truncated optimizer instructions are not useful artifacts.
 
 Request-adapter GEPA uses a local JSON adapter for GEPA's own reflection/proposal calls instead of the default DSRs chat adapter. The runtime candidate still renders through the selected proxy `dsrs_history_format`; the JSON adapter only prevents GEPA's outer meta-parser from truncating optimized instructions that legitimately contain literal `[[ ## content ## ]]`, `[[ ## tool_calls ## ]]`, or `[[ ## completed ## ]]` text.
+
+GEPA labels are kept out of the reflected `Example` payload. The optimizer sees the real request, prediction, parser events, LLM-judge score, and generalized judge feedback; hidden labels such as `expected_output` and `expected_repair` stay in a side table available to the Sonnet judge only. Deterministic parser/scoring signals may be passed to the judge as context, but they are not the final GEPA judge.
 
 The optimized correction prompt report can be loaded by a profile using `correction_agent_artifact`.
 
@@ -552,7 +556,8 @@ nix develop --command cargo run -- \
   --dataset-path datasets/request-adapter/gemma-dsrs-conservative.jsonl \
   --output-path datasets/request-adapter/gemma-dsrs-conservative-draft-gepa.json \
   --base-url https://openrouter.ai/api/v1 \
-  --model google/gemma-4-26b-a4b-it \
+  --model anthropic/claude-sonnet-4.6 \
+  --judge-model anthropic/claude-sonnet-4.6 \
   --target-model google/gemma-4-26b-a4b-it \
   --profile gemma-dsrs-conservative \
   --profile-revision 3 \
@@ -564,7 +569,7 @@ nix develop --command cargo run -- \
   --lm-max-tokens 100000
 ```
 
-This optimizer uses the same runtime DSRs formatter as the proxy. GEPA mutates the profile guidance, the runner installs that candidate guidance into a model profile, renders the request through the selected `dsrs_history_format`, calls the target model, parses the DSRs response, and scores the result against the request-adapter dataset. Exact labeled tool calls or content score highest, but structurally valid different tool calls and real non-placeholder content receive strong partial credit so the optimizer does not overfit to one trace's arbitrary next action. To compare formatter behavior, run the same dataset twice with different `--dsrs-history-format` values and separate artifact IDs. Use `--seed-artifact` when iterating on an existing model/profile/history-format line so the new run starts from the current best reviewed instruction; generated reports record `seed_artifact_path` for auditability.
+This optimizer uses the same runtime DSRs formatter as the proxy. GEPA mutates the profile guidance, the runner installs that candidate guidance into a model profile, renders the request through the selected `dsrs_history_format`, calls the target model, parses the DSRs response, and sends the rollout to the Sonnet judge for scoring. The judge is instructed to reward structurally valid content-only, tool-only, and content-plus-tool outputs, and to penalize malformed DSRs, invalid tool JSON, missing completion markers, no-op content, and empty visible output. To compare formatter behavior, run the same dataset twice with different `--dsrs-history-format` values and separate artifact IDs. Use `--seed-artifact` when iterating on an existing model/profile/history-format line so the new run starts from the current best reviewed instruction; generated reports record `seed_artifact_path` for auditability.
 
 This writes a `request_adapter_instruction` artifact that records the target profile, profile revision, and history format. It can be loaded through `request_adapter_artifact`; promotion can also carry the artifact's `dsrs_history_format` into the profile config. See `configs/gemma-dsrs-conservative.toml` for a Gemma profile wired to an optimized artifact.
 
@@ -584,7 +589,7 @@ jq -c . \
   > /tmp/gemma-request-adapter-all.jsonl
 ```
 
-The latest full matrix used 14 reviewed rows and tested both DSRs history formats:
+The latest full matrix below is historical: it was produced before GEPA scoring moved to a separate Sonnet judge and before labels were removed from reflected examples. Treat these as provenance for the currently promoted Gemma artifact, not as comparable scores for future promotion decisions. New promotion candidates should be rerun with the current Sonnet reflection/judge workflow.
 
 | Target model | History format | Score | Result |
 | --- | --- | ---: | --- |

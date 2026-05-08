@@ -13,7 +13,7 @@ use model_correction_proxy::{
     model_profile::{DsrsHistoryFormat, ProviderRouting},
     optimization::{
         optimize_correction_prompt, optimize_request_adapter_prompt, GepaOptimizationConfig,
-        DEFAULT_GEPA_LM_MAX_TOKENS,
+        DEFAULT_GEPA_JUDGE_MODEL, DEFAULT_GEPA_LM_MAX_TOKENS, DEFAULT_GEPA_REFLECTION_MODEL,
     },
     promotion::{
         promote_artifact, promote_default_artifact, ArtifactPromotionConfig,
@@ -136,8 +136,14 @@ enum Command {
             default_value = "https://openrouter.ai/api/v1"
         )]
         base_url: String,
-        #[arg(long, env = "MCP_OPTIMIZATION_MODEL", default_value = "qwen/qwen3-8b")]
+        #[arg(
+            long,
+            env = "MCP_GEPA_REFLECTION_MODEL",
+            default_value = DEFAULT_GEPA_REFLECTION_MODEL
+        )]
         model: String,
+        #[arg(long, env = "MCP_GEPA_JUDGE_MODEL", default_value = DEFAULT_GEPA_JUDGE_MODEL)]
+        judge_model: String,
         #[arg(long)]
         target_model: Option<String>,
         #[arg(long)]
@@ -174,10 +180,12 @@ enum Command {
         base_url: String,
         #[arg(
             long,
-            env = "MCP_OPTIMIZATION_MODEL",
-            default_value = "google/gemma-4-26b-a4b-it"
+            env = "MCP_GEPA_REFLECTION_MODEL",
+            default_value = DEFAULT_GEPA_REFLECTION_MODEL
         )]
         model: String,
+        #[arg(long, env = "MCP_GEPA_JUDGE_MODEL", default_value = DEFAULT_GEPA_JUDGE_MODEL)]
+        judge_model: String,
         #[arg(long)]
         target_model: Option<String>,
         #[arg(long)]
@@ -441,6 +449,7 @@ async fn main() -> anyhow::Result<()> {
             output_path,
             base_url,
             model,
+            judge_model,
             target_model,
             profile,
             profile_revision,
@@ -456,6 +465,7 @@ async fn main() -> anyhow::Result<()> {
                 base_url,
                 api_key: std::env::var("OPENROUTER_API_KEY").ok(),
                 model,
+                judge_model,
                 target_model,
                 profile,
                 profile_revision,
@@ -475,6 +485,7 @@ async fn main() -> anyhow::Result<()> {
             output_path,
             base_url,
             model,
+            judge_model,
             target_model,
             profile,
             profile_revision,
@@ -491,6 +502,7 @@ async fn main() -> anyhow::Result<()> {
                 base_url,
                 api_key: std::env::var("OPENROUTER_API_KEY").ok(),
                 model,
+                judge_model,
                 target_model,
                 profile,
                 profile_revision,
