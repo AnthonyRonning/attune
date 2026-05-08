@@ -517,14 +517,14 @@ nix develop --command cargo run -- \
   --dataset-path datasets/corrections.jsonl \
   --output-path datasets/gepa-correction-prompt.json \
   --base-url https://openrouter.ai/api/v1 \
-  --model anthropic/claude-sonnet-4.6 \
-  --judge-model anthropic/claude-sonnet-4.6 \
+  --model anthropic:claude-sonnet-4-6 \
+  --judge-model anthropic:claude-sonnet-4-6 \
   --target-model qwen/qwen3.5-9b \
   --iterations 3 \
   --max-examples 12
 ```
 
-This loads dataset rows as typed DSRs examples, runs GEPA against the correction-prompt program, and writes a report with the best discovered instruction, artifact metadata, and optimization statistics. `--target-model` is required and names the model under test. `--model` is the GEPA reflection/proposal model and defaults to `anthropic/claude-sonnet-4.6` through `MCP_GEPA_REFLECTION_MODEL`; `--judge-model` is the GEPA scoring model and defaults to `anthropic/claude-sonnet-4.6` through `MCP_GEPA_JUDGE_MODEL`. The runner rejects configurations where the reflection or judge model is the same as the target model. The command also accepts `--profile`, `--artifact-id`, and `--seed-artifact` so artifacts can be tied back to a runtime profile and future runs can continue from a reviewed previous instruction instead of starting from the built-in default.
+This loads dataset rows as typed DSRs examples, runs GEPA against the correction-prompt program, and writes a report with the best discovered instruction, artifact metadata, and optimization statistics. `--target-model` is required and names the model under test. `--base-url` is the target-model OpenAI-compatible endpoint, normally OpenRouter for non-Anthropic target models. `--model` is the GEPA reflection/proposal model and defaults to native Anthropic `anthropic:claude-sonnet-4-6` through `MCP_GEPA_REFLECTION_MODEL`; `--judge-model` is the GEPA scoring model and defaults to native Anthropic `anthropic:claude-sonnet-4-6` through `MCP_GEPA_JUDGE_MODEL`. The runner rejects configurations where the reflection or judge model is the same as the target model. The command also accepts `--reflection-base-url`, `--reflection-api-key`, `--judge-base-url`, `--judge-api-key`, `--profile`, `--artifact-id`, and `--seed-artifact` so provider routing and artifacts can be controlled explicitly.
 
 Both GEPA commands expose `--lm-max-tokens`, defaulting to `100000`. This is separate from the live proxy request path: client `max_tokens` values are still passed through only when provided. The GEPA runner sets a high optimizer token budget because `dspy-rs` sends an explicit `max_tokens` value for its own optimizer, reflection, and target-model calls, and truncated optimizer instructions are not useful artifacts.
 
@@ -556,8 +556,8 @@ nix develop --command cargo run -- \
   --dataset-path datasets/request-adapter/gemma-dsrs-conservative.jsonl \
   --output-path datasets/request-adapter/gemma-dsrs-conservative-draft-gepa.json \
   --base-url https://openrouter.ai/api/v1 \
-  --model anthropic/claude-sonnet-4.6 \
-  --judge-model anthropic/claude-sonnet-4.6 \
+  --model anthropic:claude-sonnet-4-6 \
+  --judge-model anthropic:claude-sonnet-4-6 \
   --target-model google/gemma-4-26b-a4b-it \
   --profile gemma-dsrs-conservative \
   --profile-revision 3 \

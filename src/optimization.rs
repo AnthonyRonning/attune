@@ -24,8 +24,8 @@ use crate::{
 };
 
 pub const DEFAULT_GEPA_LM_MAX_TOKENS: u32 = 100_000;
-pub const DEFAULT_GEPA_REFLECTION_MODEL: &str = "anthropic/claude-sonnet-4.6";
-pub const DEFAULT_GEPA_JUDGE_MODEL: &str = "anthropic/claude-sonnet-4.6";
+pub const DEFAULT_GEPA_REFLECTION_MODEL: &str = "anthropic:claude-sonnet-4-6";
+pub const DEFAULT_GEPA_JUDGE_MODEL: &str = "anthropic:claude-sonnet-4-6";
 
 fn default_gepa_lm_max_tokens() -> u32 {
     DEFAULT_GEPA_LM_MAX_TOKENS
@@ -264,7 +264,11 @@ pub struct GepaOptimizationConfig {
     pub output_path: PathBuf,
     pub base_url: String,
     pub api_key: Option<String>,
+    pub reflection_base_url: Option<String>,
+    pub reflection_api_key: Option<String>,
     pub model: String,
+    pub judge_base_url: Option<String>,
+    pub judge_api_key: Option<String>,
     pub judge_model: String,
     pub target_model: Option<String>,
     pub profile: Option<String>,
@@ -790,9 +794,9 @@ impl FeedbackEvaluator for CorrectionPromptProgram {
 pub async fn optimize_correction_prompt(
     config: GepaOptimizationConfig,
 ) -> Result<GepaOptimizationReport> {
-    let Some(api_key) = config.api_key.clone() else {
+    let Some(target_api_key) = config.api_key.clone() else {
         anyhow::bail!(
-            "OPENROUTER_API_KEY or --api-key equivalent is required for GEPA optimization"
+            "OPENROUTER_API_KEY or target --api-key equivalent is required for GEPA target-model calls"
         );
     };
 
@@ -811,33 +815,33 @@ pub async fn optimize_correction_prompt(
     )?;
     let judge_cases = gepa_judge_cases(&rows, "expected_repair", "expected_repair_policy")?;
 
-    let optimizer_lm = LM::builder()
-        .base_url(config.base_url.clone())
-        .api_key(api_key.clone())
-        .model(config.model.clone())
-        .temperature(0.2)
-        .max_tokens(config.lm_max_tokens)
-        .build()
-        .await
-        .context("failed to build GEPA LM")?;
-    let target_lm = LM::builder()
-        .base_url(config.base_url.clone())
-        .api_key(api_key.clone())
-        .model(target_model.clone())
-        .temperature(0.2)
-        .max_tokens(config.lm_max_tokens)
-        .build()
-        .await
-        .context("failed to build correction-agent GEPA target LM")?;
-    let judge_lm = LM::builder()
-        .base_url(config.base_url.clone())
-        .api_key(api_key)
-        .model(config.judge_model.clone())
-        .temperature(0.0)
-        .max_tokens(config.lm_max_tokens)
-        .build()
-        .await
-        .context("failed to build correction-agent GEPA judge LM")?;
+    let optimizer_lm = build_gepa_lm(
+        "correction-agent GEPA reflection/proposal",
+        &config.model,
+        config.reflection_base_url.as_deref(),
+        config.reflection_api_key.clone(),
+        0.2,
+        config.lm_max_tokens,
+    )
+    .await?;
+    let target_lm = build_gepa_lm(
+        "correction-agent GEPA target",
+        &target_model,
+        Some(config.base_url.as_str()),
+        Some(target_api_key),
+        0.2,
+        config.lm_max_tokens,
+    )
+    .await?;
+    let judge_lm = build_gepa_lm(
+        "correction-agent GEPA judge",
+        &config.judge_model,
+        config.judge_base_url.as_deref(),
+        config.judge_api_key.clone(),
+        0.0,
+        config.lm_max_tokens,
+    )
+    .await?;
     configure(target_lm, ChatAdapter);
 
     let gepa = GEPA::builder()
@@ -904,9 +908,9 @@ pub async fn optimize_correction_prompt(
 pub async fn optimize_request_adapter_prompt(
     config: GepaOptimizationConfig,
 ) -> Result<GepaOptimizationReport> {
-    let Some(api_key) = config.api_key.clone() else {
+    let Some(target_api_key) = config.api_key.clone() else {
         anyhow::bail!(
-            "OPENROUTER_API_KEY or --api-key equivalent is required for GEPA optimization"
+            "OPENROUTER_API_KEY or target --api-key equivalent is required for GEPA target-model calls"
         );
     };
 
@@ -930,38 +934,33 @@ pub async fn optimize_request_adapter_prompt(
     )?;
     let judge_cases = gepa_judge_cases(&rows, "expected_output", "expected_adapter_policy")?;
 
-    let optimizer_lm = LM::builder()
-        .base_url(config.base_url.clone())
-        .api_key(api_key.clone())
-        .model(config.model.clone())
-        .temperature(0.2)
-        .max_tokens(config.lm_max_tokens)
-        .build()
-        .await
-        .context("failed to build request-adapter GEPA LM")?;
-    let runtime_lm = LM::builder()
-        .base_url(config.base_url.clone())
-        .api_key(
-            config
-                .api_key
-                .clone()
-                .expect("api key was checked before optimizer LM construction"),
-        )
-        .model(runtime_model.clone())
-        .temperature(0.2)
-        .max_tokens(config.lm_max_tokens)
-        .build()
-        .await
-        .context("failed to build request-adapter target GEPA LM")?;
-    let judge_lm = LM::builder()
-        .base_url(config.base_url.clone())
-        .api_key(api_key)
-        .model(config.judge_model.clone())
-        .temperature(0.0)
-        .max_tokens(config.lm_max_tokens)
-        .build()
-        .await
-        .context("failed to build request-adapter GEPA judge LM")?;
+    let optimizer_lm = build_gepa_lm(
+        "request-adapter GEPA reflection/proposal",
+        &config.model,
+        config.reflection_base_url.as_deref(),
+        config.reflection_api_key.clone(),
+        0.2,
+        config.lm_max_tokens,
+    )
+    .await?;
+    let runtime_lm = build_gepa_lm(
+        "request-adapter GEPA target",
+        &runtime_model,
+        Some(config.base_url.as_str()),
+        Some(target_api_key),
+        0.2,
+        config.lm_max_tokens,
+    )
+    .await?;
+    let judge_lm = build_gepa_lm(
+        "request-adapter GEPA judge",
+        &config.judge_model,
+        config.judge_base_url.as_deref(),
+        config.judge_api_key.clone(),
+        0.0,
+        config.lm_max_tokens,
+    )
+    .await?;
     configure(optimizer_lm.clone(), GepaJsonAdapter);
 
     let gepa = GEPA::builder()
@@ -1036,6 +1035,60 @@ fn default_request_adapter_artifact_id(
     format!("request-adapter/{target}")
 }
 
+async fn build_gepa_lm(
+    role: &str,
+    model: &str,
+    base_url: Option<&str>,
+    api_key: Option<String>,
+    temperature: f32,
+    max_tokens: u32,
+) -> Result<LM> {
+    let base_url = base_url.map(str::trim).filter(|value| !value.is_empty());
+    let api_key = api_key
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    match (base_url, api_key) {
+        (Some(base_url), Some(api_key)) => {
+            LM::builder()
+                .base_url(base_url.to_string())
+                .api_key(api_key)
+                .model(model.to_string())
+                .temperature(temperature)
+                .max_tokens(max_tokens)
+                .build()
+                .await
+        }
+        (Some(base_url), None) => {
+            LM::builder()
+                .base_url(base_url.to_string())
+                .model(model.to_string())
+                .temperature(temperature)
+                .max_tokens(max_tokens)
+                .build()
+                .await
+        }
+        (None, Some(api_key)) => {
+            LM::builder()
+                .api_key(api_key)
+                .model(model.to_string())
+                .temperature(temperature)
+                .max_tokens(max_tokens)
+                .build()
+                .await
+        }
+        (None, None) => {
+            LM::builder()
+                .model(model.to_string())
+                .temperature(temperature)
+                .max_tokens(max_tokens)
+                .build()
+                .await
+        }
+    }
+    .with_context(|| format!("failed to build {role} LM for model {model:?}"))
+}
+
 fn required_gepa_target_model(config: &GepaOptimizationConfig, layer: &str) -> Result<String> {
     let target_model = config
         .target_model
@@ -1070,7 +1123,15 @@ fn ensure_gepa_model_role_separation(
 }
 
 fn same_model_id(left: &str, right: &str) -> bool {
-    left.trim().eq_ignore_ascii_case(right.trim())
+    normalized_model_id(left) == normalized_model_id(right)
+}
+
+fn normalized_model_id(model: &str) -> String {
+    model
+        .trim()
+        .to_ascii_lowercase()
+        .replacen(':', "/", 1)
+        .replace('.', "-")
 }
 
 async fn request_adapter_initial_instruction(
@@ -2001,7 +2062,11 @@ mod tests {
                 output_path: PathBuf::from("artifact.json"),
                 base_url: "https://openrouter.ai/api/v1".to_string(),
                 api_key: None,
+                reflection_base_url: None,
+                reflection_api_key: None,
                 model: "google/gemma-4-26b-a4b-it".to_string(),
+                judge_base_url: None,
+                judge_api_key: None,
                 judge_model: DEFAULT_GEPA_JUDGE_MODEL.to_string(),
                 target_model: Some("google/gemma-4-26b-a4b-it".to_string()),
                 profile: Some("gemma-dsrs-conservative".to_string()),
@@ -2038,7 +2103,11 @@ mod tests {
                 output_path: PathBuf::from("artifact.json"),
                 base_url: "https://openrouter.ai/api/v1".to_string(),
                 api_key: None,
+                reflection_base_url: None,
+                reflection_api_key: None,
                 model: "google/gemma-4-26b-a4b-it".to_string(),
+                judge_base_url: None,
+                judge_api_key: None,
                 judge_model: DEFAULT_GEPA_JUDGE_MODEL.to_string(),
                 target_model: Some("google/gemma-4-26b-a4b-it".to_string()),
                 profile: Some("gemma-dsrs-conservative".to_string()),

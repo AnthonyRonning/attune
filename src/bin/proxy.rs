@@ -142,8 +142,16 @@ enum Command {
             default_value = DEFAULT_GEPA_REFLECTION_MODEL
         )]
         model: String,
+        #[arg(long, env = "MCP_GEPA_REFLECTION_BASE_URL")]
+        reflection_base_url: Option<String>,
+        #[arg(long, env = "MCP_GEPA_REFLECTION_API_KEY")]
+        reflection_api_key: Option<String>,
         #[arg(long, env = "MCP_GEPA_JUDGE_MODEL", default_value = DEFAULT_GEPA_JUDGE_MODEL)]
         judge_model: String,
+        #[arg(long, env = "MCP_GEPA_JUDGE_BASE_URL")]
+        judge_base_url: Option<String>,
+        #[arg(long, env = "MCP_GEPA_JUDGE_API_KEY")]
+        judge_api_key: Option<String>,
         #[arg(long)]
         target_model: Option<String>,
         #[arg(long)]
@@ -184,8 +192,16 @@ enum Command {
             default_value = DEFAULT_GEPA_REFLECTION_MODEL
         )]
         model: String,
+        #[arg(long, env = "MCP_GEPA_REFLECTION_BASE_URL")]
+        reflection_base_url: Option<String>,
+        #[arg(long, env = "MCP_GEPA_REFLECTION_API_KEY")]
+        reflection_api_key: Option<String>,
         #[arg(long, env = "MCP_GEPA_JUDGE_MODEL", default_value = DEFAULT_GEPA_JUDGE_MODEL)]
         judge_model: String,
+        #[arg(long, env = "MCP_GEPA_JUDGE_BASE_URL")]
+        judge_base_url: Option<String>,
+        #[arg(long, env = "MCP_GEPA_JUDGE_API_KEY")]
+        judge_api_key: Option<String>,
         #[arg(long)]
         target_model: Option<String>,
         #[arg(long)]
@@ -449,7 +465,11 @@ async fn main() -> anyhow::Result<()> {
             output_path,
             base_url,
             model,
+            reflection_base_url,
+            reflection_api_key,
             judge_model,
+            judge_base_url,
+            judge_api_key,
             target_model,
             profile,
             profile_revision,
@@ -464,7 +484,19 @@ async fn main() -> anyhow::Result<()> {
                 output_path: output_path.into(),
                 base_url,
                 api_key: std::env::var("OPENROUTER_API_KEY").ok(),
+                reflection_api_key: gepa_role_api_key(
+                    &model,
+                    reflection_base_url.as_deref(),
+                    reflection_api_key,
+                ),
+                reflection_base_url,
                 model,
+                judge_api_key: gepa_role_api_key(
+                    &judge_model,
+                    judge_base_url.as_deref(),
+                    judge_api_key,
+                ),
+                judge_base_url,
                 judge_model,
                 target_model,
                 profile,
@@ -485,7 +517,11 @@ async fn main() -> anyhow::Result<()> {
             output_path,
             base_url,
             model,
+            reflection_base_url,
+            reflection_api_key,
             judge_model,
+            judge_base_url,
+            judge_api_key,
             target_model,
             profile,
             profile_revision,
@@ -501,7 +537,19 @@ async fn main() -> anyhow::Result<()> {
                 output_path: output_path.into(),
                 base_url,
                 api_key: std::env::var("OPENROUTER_API_KEY").ok(),
+                reflection_api_key: gepa_role_api_key(
+                    &model,
+                    reflection_base_url.as_deref(),
+                    reflection_api_key,
+                ),
+                reflection_base_url,
                 model,
+                judge_api_key: gepa_role_api_key(
+                    &judge_model,
+                    judge_base_url.as_deref(),
+                    judge_api_key,
+                ),
+                judge_base_url,
                 judge_model,
                 target_model,
                 profile,
@@ -801,4 +849,28 @@ fn first_non_empty(values: impl IntoIterator<Item = Option<String>>) -> Option<S
         .into_iter()
         .flatten()
         .find(|value| !value.trim().is_empty())
+}
+
+fn gepa_role_api_key(
+    model: &str,
+    base_url: Option<&str>,
+    explicit: Option<String>,
+) -> Option<String> {
+    let provider_model = model.trim().to_ascii_lowercase();
+    let base_url = base_url.unwrap_or_default().to_ascii_lowercase();
+    first_non_empty([
+        explicit,
+        (provider_model.starts_with("anthropic:"))
+            .then(|| std::env::var("ANTHROPIC_API_KEY").ok())
+            .flatten(),
+        (provider_model.starts_with("openrouter:") || base_url.contains("openrouter.ai"))
+            .then(|| std::env::var("OPENROUTER_API_KEY").ok())
+            .flatten(),
+        (provider_model.starts_with("openai:"))
+            .then(|| std::env::var("OPENAI_API_KEY").ok())
+            .flatten(),
+        (provider_model.starts_with("gemini:"))
+            .then(|| std::env::var("GEMINI_API_KEY").ok())
+            .flatten(),
+    ])
 }
