@@ -329,7 +329,7 @@ Each artifact should record:
 
 Request-adapter prompts and correction-agent prompts should be optimized separately. Their datasets, metrics, and failure modes are different.
 
-The GEPA CLI defaults `--model` to native Anthropic `anthropic:claude-sonnet-4-6` for reflection/proposal and `--judge-model` to native Anthropic `anthropic:claude-sonnet-4-6` for scoring. `--target-model` is required and names the model under test. `--base-url` is the target-model OpenAI-compatible endpoint, normally OpenRouter for Qwen/Gemma target runs. Reflection and judge routing can be overridden independently with `--reflection-base-url`, `--reflection-api-key`, `--judge-base-url`, and `--judge-api-key`. The runner rejects any GEPA run where the reflection or judge model is the same as the target model. `--lm-max-tokens` defaults to `100000` for correction-agent and request-adapter optimization. This only affects optimizer/reflection/judge/target-model calls made by the GEPA runner; the live proxy path still leaves generation token controls unset unless the incoming API request provided them.
+The GEPA CLI defaults `--model` to native Anthropic `anthropic:claude-sonnet-4-6` for reflection/proposal and `--judge-model` to native Anthropic `anthropic:claude-sonnet-4-6` for scoring. `--target-model` is required and names the model under test. `--base-url` is the target-model OpenAI-compatible endpoint, normally OpenRouter for Qwen/Gemma target runs. Reflection and judge routing can be overridden independently with `--reflection-base-url`, `--reflection-api-key`, `--judge-base-url`, and `--judge-api-key`. The runner rejects any GEPA run where the reflection or judge model is the same as the target model. `--lm-max-tokens` defaults to `128000` for correction-agent and request-adapter optimization, matching the current maximum accepted output-token cap for the default Anthropic Sonnet optimizer/judge model. Known-invalid caps above that limit for `anthropic:claude-sonnet-4-6` are rejected before live calls start. This only affects optimizer/reflection/judge/target-model calls made by the GEPA runner; the live proxy path still leaves generation token controls unset unless the incoming API request provided them.
 
 Request-adapter GEPA uses a local JSON adapter for the optimizer's own reflection/proposal signatures. That adapter is intentionally separate from the proxy runtime formatter, so candidate request-adapter instructions can contain literal DSRs marker examples without being parsed as the optimizer's outer field delimiters.
 
@@ -353,16 +353,16 @@ The Gemma request-adapter dataset is assembled from reviewed examples in:
 
 Qwen now also has a small curated trace-harness dataset at `datasets/request-adapter/qwen-dsrs-trace-harness-curated.jsonl`. It covers representative failures from the Pi/Hermes 100-trace run, including contract violations, invalid tagged `tool_calls`, premature tool stops, empty DSRs output, and reasoning-only empty assistant output.
 
-The latest fresh request-adapter matrix was run from scratch with native Anthropic Claude Sonnet 4.6 for reflection/proposal and judging, OpenRouter only for target model calls, hidden labels outside reflected examples, and no seed artifact. Current promotion policy treats long and behavior-specific instructions as acceptable when the corrected GEPA workflow and artifact review support them; the main rejection criteria are hidden-label leakage, exact expected-output leakage, trace-specific answers, and brittle one-off rules.
+The latest promoted post-50 request-adapter matrix was run with native Anthropic Claude Sonnet 4.6 for reflection/proposal and judging, OpenRouter only for target model calls, hidden labels outside reflected examples, and the previous reviewed artifact as `--seed-artifact` for each model/history line. Current promotion policy treats long and behavior-specific instructions as acceptable when the corrected GEPA workflow and artifact review support them; the main rejection criteria are hidden-label leakage, exact expected-output leakage, trace-specific answers, and brittle one-off rules.
 
 | Target model | History format | Score | Promotion decision |
 | --- | --- | ---: | --- |
-| `qwen/qwen3.5-9b` | `append_only` | `0.7125` | reviewed and embedded as alternate |
-| `qwen/qwen3.5-9b` | `regenerated_context` | `0.8400` | promoted as Qwen built-in default |
-| `google/gemma-4-26b-a4b-it` | `append_only` | `0.9450` | promoted as Gemma built-in default |
-| `google/gemma-4-26b-a4b-it` | `regenerated_context` | `0.9083` | reviewed and embedded as alternate |
+| `qwen/qwen3.5-9b` | `append_only` | `0.6814` | not promoted; worse than regenerated-context on the expanded set |
+| `qwen/qwen3.5-9b` | `regenerated_context` | `0.8450` | promoted as Qwen built-in default |
+| `google/gemma-4-26b-a4b-it` | `append_only` | `0.9273` | promoted as Gemma built-in default |
+| `google/gemma-4-26b-a4b-it` | `regenerated_context` | `0.9227` | not promoted; close, but append-only still won |
 
-The active built-in Qwen artifact is `datasets/request-adapter/qwen-dsrs-sonnet-fresh-r1-regenerated-context-gepa.json` with `dsrs_history_format = "regenerated_context"`. The active built-in Gemma artifact is `datasets/request-adapter/gemma-dsrs-conservative-sonnet-fresh-r1-append-only-gepa.json` with `dsrs_history_format = "append_only"`. The other fresh Sonnet artifacts remain checked in as reviewed alternates so future comparisons do not depend on ignored local experiment files.
+The active built-in Qwen artifact is `datasets/request-adapter/qwen-dsrs-sonnet-post50-r2-regenerated-context-gepa.json` with `dsrs_history_format = "regenerated_context"`. The active built-in Gemma artifact is `datasets/request-adapter/gemma-dsrs-conservative-sonnet-post50-r2-append-only-gepa.json` with `dsrs_history_format = "append_only"`. Earlier fresh Sonnet artifacts remain checked in as reviewed alternates and provenance so future comparisons do not depend on ignored local experiment files.
 
 ### Traces and Datasets
 

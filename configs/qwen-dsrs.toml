@@ -1,0 +1,6 @@
+[[model_profiles]]
+name = "qwen-dsrs"
+model_patterns = ["qwen/qwen3.5-9b"]
+revision = 1
+request_adapter_artifact = "../datasets/request-adapter/qwen-dsrs-sonnet-post50-r2-regenerated-context-gepa.json"
+dsrs_history_format = "regenerated_context"

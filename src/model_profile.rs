@@ -439,11 +439,11 @@ mod tests {
         let profile = resolve_profile("google/gemma-4-26b-a4b-it", &[]);
 
         assert_eq!(profile.name, "gemma-dsrs-conservative");
-        assert_eq!(profile.revision, 7);
+        assert_eq!(profile.revision, 8);
         assert_eq!(profile.dsrs_history_format, DsrsHistoryFormat::AppendOnly);
         assert_eq!(
             profile.request_adapter_artifact.as_deref(),
-            Some("builtin:request-adapter/gemma-dsrs-conservative/sonnet-fresh-r1-append-only")
+            Some("builtin:request-adapter/gemma-dsrs-conservative/sonnet-post50-r2-append-only")
         );
         assert!(profile
             .tool_instruction
@@ -455,14 +455,14 @@ mod tests {
         let profile = resolve_profile("qwen/qwen3.5-9b", &[]);
 
         assert_eq!(profile.name, "qwen-dsrs");
-        assert_eq!(profile.revision, 3);
+        assert_eq!(profile.revision, 4);
         assert_eq!(
             profile.dsrs_history_format,
             DsrsHistoryFormat::RegeneratedContext
         );
         assert_eq!(
             profile.request_adapter_artifact.as_deref(),
-            Some("builtin:request-adapter/qwen-dsrs/sonnet-fresh-r1-regenerated-context")
+            Some("builtin:request-adapter/qwen-dsrs/sonnet-post50-r2-regenerated-context")
         );
         assert!(profile
             .tool_instruction

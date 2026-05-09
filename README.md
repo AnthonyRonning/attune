@@ -103,7 +103,7 @@ The DSRs response contract intentionally mirrors OpenAI-compatible assistant mes
 
 Built-in defaults are generated from [`profiles/builtin-defaults.toml`](profiles/builtin-defaults.toml) at build time. Reviewed artifacts listed there are validated by `build.rs` and embedded into the binary, so shipped binaries do not need local dataset files for their default profile prompts. Runtime config profiles still match before built-ins and can override the embedded defaults.
 
-The current built-in defaults embed `datasets/request-adapter/qwen-dsrs-sonnet-fresh-r1-regenerated-context-gepa.json` for Qwen at profile revision 3 and `datasets/request-adapter/gemma-dsrs-conservative-sonnet-fresh-r1-append-only-gepa.json` for Gemma at profile revision 7. [`configs/gemma-dsrs-conservative.toml`](configs/gemma-dsrs-conservative.toml) remains a filesystem-artifact example and local override path, updated to the same reviewed Gemma request-adapter instruction as the embedded built-in default.
+The current built-in defaults embed `datasets/request-adapter/qwen-dsrs-sonnet-post50-r2-regenerated-context-gepa.json` for Qwen at profile revision 4 and `datasets/request-adapter/gemma-dsrs-conservative-sonnet-post50-r2-append-only-gepa.json` for Gemma at profile revision 8. [`configs/qwen-dsrs.toml`](configs/qwen-dsrs.toml) and [`configs/gemma-dsrs-conservative.toml`](configs/gemma-dsrs-conservative.toml) remain filesystem-artifact examples and local override paths, updated to the same reviewed request-adapter instructions as the embedded built-in defaults.
 
 ## What the repair engine handles
 
@@ -579,7 +579,7 @@ nix develop --command cargo run -- \
 
 This loads dataset rows as typed DSRs examples, runs GEPA against the correction-prompt program, and writes a report with the best discovered instruction, artifact metadata, and optimization statistics. `--target-model` is required and names the model under test. `--base-url` is the target-model OpenAI-compatible endpoint, normally OpenRouter for non-Anthropic target models. `--model` is the GEPA reflection/proposal model and defaults to native Anthropic `anthropic:claude-sonnet-4-6` through `MCP_GEPA_REFLECTION_MODEL`; `--judge-model` is the GEPA scoring model and defaults to native Anthropic `anthropic:claude-sonnet-4-6` through `MCP_GEPA_JUDGE_MODEL`. The runner rejects configurations where the reflection or judge model is the same as the target model. The command also accepts `--reflection-base-url`, `--reflection-api-key`, `--judge-base-url`, `--judge-api-key`, `--profile`, `--artifact-id`, and `--seed-artifact` so provider routing and artifacts can be controlled explicitly.
 
-Both GEPA commands expose `--lm-max-tokens`, defaulting to `100000`. This is separate from the live proxy request path: client `max_tokens` values are still passed through only when provided. The GEPA runner sets a high optimizer token budget because `dspy-rs` sends an explicit `max_tokens` value for its own optimizer, reflection, and target-model calls, and truncated optimizer instructions are not useful artifacts.
+Both GEPA commands expose `--lm-max-tokens`, defaulting to `128000`, the current maximum accepted output-token cap for the default Anthropic Sonnet optimizer/judge model. This is separate from the live proxy request path: client `max_tokens` values are still passed through only when provided. The GEPA runner sets a high optimizer token budget because `dspy-rs` sends an explicit `max_tokens` value for its own optimizer, reflection, judge, and target-model calls, and truncated optimizer instructions are not useful artifacts. Do not raise the default above the provider's accepted cap; Anthropic rejects `200000` for `claude-sonnet-4-6`, and the runner now rejects that known-invalid cap before starting live calls.
 
 Request-adapter GEPA uses a local JSON adapter for GEPA's own reflection/proposal calls instead of the default DSRs chat adapter. The runtime candidate still renders through the selected proxy `dsrs_history_format`; the JSON adapter only prevents GEPA's outer meta-parser from truncating optimized instructions that legitimately contain literal `[[ ## content ## ]]`, `[[ ## tool_calls ## ]]`, or `[[ ## completed ## ]]` text.
 
@@ -615,13 +615,13 @@ nix develop --command cargo run -- \
   --judge-model anthropic:claude-sonnet-4-6 \
   --target-model google/gemma-4-26b-a4b-it \
   --profile gemma-dsrs-conservative \
-  --profile-revision 7 \
+  --profile-revision 8 \
   --dsrs-history-format append_only \
-  --seed-artifact datasets/request-adapter/gemma-dsrs-conservative-sonnet-fresh-r1-append-only-gepa.json \
+  --seed-artifact datasets/request-adapter/gemma-dsrs-conservative-sonnet-post50-r2-append-only-gepa.json \
   --artifact-id request-adapter/gemma-dsrs-conservative/append-only \
   --iterations 3 \
   --max-examples 3 \
-  --lm-max-tokens 100000
+  --lm-max-tokens 128000
 ```
 
 This optimizer uses the same runtime DSRs formatter as the proxy. GEPA mutates the profile guidance, the runner installs that candidate guidance into a model profile, renders the request through the selected `dsrs_history_format`, calls the target model, parses the DSRs response, and sends the rollout to the Sonnet judge for scoring. The judge is instructed to reward structurally valid content-only, tool-only, and content-plus-tool outputs, and to penalize malformed DSRs, invalid tool JSON, missing completion markers, no-op content, and empty visible output. To compare formatter behavior, run the same dataset twice with different `--dsrs-history-format` values and separate artifact IDs. Use `--seed-artifact` when iterating on an existing model/profile/history-format line so the new run starts from the current best reviewed instruction; generated reports record `seed_artifact_path` for auditability.
@@ -646,16 +646,16 @@ jq -c . \
   > /tmp/gemma-request-adapter-all.jsonl
 ```
 
-The latest fresh matrix was run from scratch with native Anthropic Claude Sonnet 4.6 for reflection/proposal and judging, OpenRouter only for target model calls, hidden labels outside reflected examples, and no seed artifact:
+The latest promoted post-50 matrix was run with native Anthropic Claude Sonnet 4.6 for reflection/proposal and judging, OpenRouter only for target model calls, hidden labels outside reflected examples, and the previous reviewed artifact as `--seed-artifact` for each model/history line:
 
 | Target model | History format | Score | Result |
 | --- | --- | ---: | --- |
-| `qwen/qwen3.5-9b` | `append_only` | `0.7125` | reviewed and embedded as an alternate built-in artifact |
-| `qwen/qwen3.5-9b` | `regenerated_context` | `0.8400` | promoted as Qwen built-in default |
-| `google/gemma-4-26b-a4b-it` | `append_only` | `0.9450` | promoted as Gemma built-in default |
-| `google/gemma-4-26b-a4b-it` | `regenerated_context` | `0.9083` | reviewed and embedded as an alternate built-in artifact |
+| `qwen/qwen3.5-9b` | `append_only` | `0.6814` | not promoted; worse than regenerated-context on the expanded set |
+| `qwen/qwen3.5-9b` | `regenerated_context` | `0.8450` | promoted as Qwen built-in default |
+| `google/gemma-4-26b-a4b-it` | `append_only` | `0.9273` | promoted as Gemma built-in default |
+| `google/gemma-4-26b-a4b-it` | `regenerated_context` | `0.9227` | not promoted; close, but append-only still won |
 
-The current shipped defaults are `datasets/request-adapter/qwen-dsrs-sonnet-fresh-r1-regenerated-context-gepa.json` for `qwen-dsrs` and `datasets/request-adapter/gemma-dsrs-conservative-sonnet-fresh-r1-append-only-gepa.json` for `gemma-dsrs-conservative`. The other two fresh Sonnet artifacts are also checked in and listed in [`profiles/builtin-defaults.toml`](profiles/builtin-defaults.toml) as reviewed alternates, but they are not the active profile defaults. The previous Gemma r4 artifact remains checked in as historical provenance.
+The current shipped defaults are `datasets/request-adapter/qwen-dsrs-sonnet-post50-r2-regenerated-context-gepa.json` for `qwen-dsrs` and `datasets/request-adapter/gemma-dsrs-conservative-sonnet-post50-r2-append-only-gepa.json` for `gemma-dsrs-conservative`. The earlier fresh Sonnet artifacts remain checked in and listed in [`profiles/builtin-defaults.toml`](profiles/builtin-defaults.toml) as reviewed alternates and provenance, but they are not the active profile defaults. The previous Gemma r4 artifact remains checked in as historical provenance.
 
 After inspecting a GEPA artifact, first promote it into a model-profile config explicitly:
 
@@ -663,7 +663,7 @@ After inspecting a GEPA artifact, first promote it into a model-profile config e
 nix develop --command cargo run -- \
   promote-artifact \
   --config-path configs/gemma-dsrs-conservative.toml \
-  --artifact-path datasets/request-adapter/gemma-dsrs-conservative-sonnet-fresh-r1-append-only-gepa.json \
+  --artifact-path datasets/request-adapter/gemma-dsrs-conservative-sonnet-post50-r2-append-only-gepa.json \
   --profile gemma-dsrs-conservative
 ```
 
@@ -674,7 +674,7 @@ After the config path has been tested, promote the same artifact into built-in d
 ```sh
 nix develop --command cargo run -- \
   promote-default-artifact \
-  --artifact-path datasets/request-adapter/gemma-dsrs-conservative-sonnet-fresh-r1-append-only-gepa.json \
+  --artifact-path datasets/request-adapter/gemma-dsrs-conservative-sonnet-post50-r2-append-only-gepa.json \
   --profile gemma-dsrs-conservative \
   --model-pattern gemma
 ```

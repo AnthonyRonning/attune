@@ -1,8 +1,8 @@
 [[model_profiles]]
 name = "gemma-dsrs-conservative"
 model_patterns = ["google/gemma-4-26b-a4b-it"]
-revision = 6
-request_adapter_artifact = "../datasets/request-adapter/gemma-dsrs-conservative-sonnet-fresh-r1-append-only-gepa.json"
+revision = 7
+request_adapter_artifact = "../datasets/request-adapter/gemma-dsrs-conservative-sonnet-post50-r2-append-only-gepa.json"
 tool_mode = "proxy_owned"
 tool_format = "dsrs"
 dsrs_history_format = "append_only"

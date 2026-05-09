@@ -177,7 +177,7 @@ nix develop --command cargo run -- \
   --artifact-id correction-agent/qwen-dsrs/local-r1 \
   --iterations 3 \
   --max-examples 12 \
-  --lm-max-tokens 100000
+  --lm-max-tokens 128000
 ```
 
 Rules:
@@ -213,7 +213,7 @@ jq -c . \
   > /tmp/qwen-request-adapter-all.jsonl
 ```
 
-Run Gemma append-only from scratch:
+Reproduce the promoted Gemma append-only post-50 optimization line:
 
 ```sh
 export OPENROUTER_API_KEY="..."
@@ -222,7 +222,7 @@ export ANTHROPIC_API_KEY="..."
 nix develop --command cargo run -- \
   optimize-request-adapter-prompt \
   --dataset-path /tmp/gemma-request-adapter-all.jsonl \
-  --output-path datasets/request-adapter/gemma-dsrs-conservative-sonnet-fresh-r1-append-only-gepa.json \
+  --output-path datasets/request-adapter/gemma-dsrs-conservative-sonnet-post50-r2-append-only-gepa.json \
   --base-url https://openrouter.ai/api/v1 \
   --model anthropic:claude-sonnet-4-6 \
   --judge-model anthropic:claude-sonnet-4-6 \
@@ -230,13 +230,14 @@ nix develop --command cargo run -- \
   --profile gemma-dsrs-conservative \
   --profile-revision 7 \
   --dsrs-history-format append_only \
-  --artifact-id request-adapter/gemma-dsrs-conservative/sonnet-fresh-r1-append-only \
+  --seed-artifact datasets/request-adapter/gemma-dsrs-conservative-sonnet-fresh-r1-append-only-gepa.json \
+  --artifact-id request-adapter/gemma-dsrs-conservative/sonnet-post50-r2-append-only \
   --iterations 5 \
   --max-examples 6 \
-  --lm-max-tokens 100000
+  --lm-max-tokens 128000
 ```
 
-Run Qwen regenerated-context from scratch:
+Reproduce the promoted Qwen regenerated-context post-50 optimization line:
 
 ```sh
 export OPENROUTER_API_KEY="..."
@@ -245,7 +246,7 @@ export ANTHROPIC_API_KEY="..."
 nix develop --command cargo run -- \
   optimize-request-adapter-prompt \
   --dataset-path /tmp/qwen-request-adapter-all.jsonl \
-  --output-path datasets/request-adapter/qwen-dsrs-sonnet-fresh-r1-regenerated-context-gepa.json \
+  --output-path datasets/request-adapter/qwen-dsrs-sonnet-post50-r2-regenerated-context-gepa.json \
   --base-url https://openrouter.ai/api/v1 \
   --model anthropic:claude-sonnet-4-6 \
   --judge-model anthropic:claude-sonnet-4-6 \
@@ -253,10 +254,11 @@ nix develop --command cargo run -- \
   --profile qwen-dsrs \
   --profile-revision 3 \
   --dsrs-history-format regenerated_context \
-  --artifact-id request-adapter/qwen-dsrs/sonnet-fresh-r1-regenerated-context \
+  --seed-artifact datasets/request-adapter/qwen-dsrs-sonnet-fresh-r1-regenerated-context-gepa.json \
+  --artifact-id request-adapter/qwen-dsrs/sonnet-post50-r2-regenerated-context \
   --iterations 5 \
   --max-examples 8 \
-  --lm-max-tokens 100000
+  --lm-max-tokens 128000
 ```
 
 Add `MCP_GEPA_DEBUG=1` when diagnosing optimizer behavior. It prints one line
@@ -271,16 +273,16 @@ history format and a different output/artifact ID:
 
 | Profile | History format | Output path | Artifact ID |
 | --- | --- | --- | --- |
-| `gemma-dsrs-conservative` | `append_only` | `datasets/request-adapter/gemma-dsrs-conservative-sonnet-fresh-r1-append-only-gepa.json` | `request-adapter/gemma-dsrs-conservative/sonnet-fresh-r1-append-only` |
+| `gemma-dsrs-conservative` | `append_only` | `datasets/request-adapter/gemma-dsrs-conservative-sonnet-post50-r2-append-only-gepa.json` | `request-adapter/gemma-dsrs-conservative/sonnet-post50-r2-append-only` |
 | `gemma-dsrs-conservative` | `regenerated_context` | `datasets/request-adapter/gemma-dsrs-conservative-sonnet-fresh-r1-regenerated-context-gepa.json` | `request-adapter/gemma-dsrs-conservative/sonnet-fresh-r1-regenerated-context` |
 | `qwen-dsrs` | `append_only` | `datasets/request-adapter/qwen-dsrs-sonnet-fresh-r1-append-only-gepa.json` | `request-adapter/qwen-dsrs/sonnet-fresh-r1-append-only` |
-| `qwen-dsrs` | `regenerated_context` | `datasets/request-adapter/qwen-dsrs-sonnet-fresh-r1-regenerated-context-gepa.json` | `request-adapter/qwen-dsrs/sonnet-fresh-r1-regenerated-context` |
+| `qwen-dsrs` | `regenerated_context` | `datasets/request-adapter/qwen-dsrs-sonnet-post50-r2-regenerated-context-gepa.json` | `request-adapter/qwen-dsrs/sonnet-post50-r2-regenerated-context` |
 
 When continuing an existing line of experimentation, seed from the current best
 artifact:
 
 ```sh
-  --seed-artifact datasets/request-adapter/gemma-dsrs-conservative-sonnet-fresh-r1-append-only-gepa.json
+  --seed-artifact datasets/request-adapter/gemma-dsrs-conservative-sonnet-post50-r2-append-only-gepa.json
 ```
 
 ## Promote GEPA Artifacts
@@ -291,7 +293,7 @@ First promote to a runtime config for local testing:
 nix develop --command cargo run -- \
   promote-artifact \
   --config-path configs/gemma-dsrs-conservative.toml \
-  --artifact-path datasets/request-adapter/gemma-dsrs-conservative-sonnet-fresh-r1-append-only-gepa.json \
+  --artifact-path datasets/request-adapter/gemma-dsrs-conservative-sonnet-post50-r2-append-only-gepa.json \
   --profile gemma-dsrs-conservative \
   --dry-run
 ```
@@ -302,7 +304,7 @@ Then run without `--dry-run` only after reviewing the report and artifact:
 nix develop --command cargo run -- \
   promote-artifact \
   --config-path configs/gemma-dsrs-conservative.toml \
-  --artifact-path datasets/request-adapter/gemma-dsrs-conservative-sonnet-fresh-r1-append-only-gepa.json \
+  --artifact-path datasets/request-adapter/gemma-dsrs-conservative-sonnet-post50-r2-append-only-gepa.json \
   --profile gemma-dsrs-conservative
 ```
 
@@ -312,7 +314,7 @@ built-in defaults:
 ```sh
 nix develop --command cargo run -- \
   promote-default-artifact \
-  --artifact-path datasets/request-adapter/gemma-dsrs-conservative-sonnet-fresh-r1-append-only-gepa.json \
+  --artifact-path datasets/request-adapter/gemma-dsrs-conservative-sonnet-post50-r2-append-only-gepa.json \
   --profile gemma-dsrs-conservative \
   --model-pattern gemma \
   --dry-run
@@ -323,7 +325,7 @@ Then run without `--dry-run`:
 ```sh
 nix develop --command cargo run -- \
   promote-default-artifact \
-  --artifact-path datasets/request-adapter/gemma-dsrs-conservative-sonnet-fresh-r1-append-only-gepa.json \
+  --artifact-path datasets/request-adapter/gemma-dsrs-conservative-sonnet-post50-r2-append-only-gepa.json \
   --profile gemma-dsrs-conservative \
   --model-pattern gemma
 ```

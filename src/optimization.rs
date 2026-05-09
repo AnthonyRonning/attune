@@ -27,9 +27,10 @@ use crate::{
     openai::{ChatCompletionRequest, ChatMessage, OpenAiFunctionTool, OpenAiTool},
 };
 
-pub const DEFAULT_GEPA_LM_MAX_TOKENS: u32 = 100_000;
+pub const DEFAULT_GEPA_LM_MAX_TOKENS: u32 = ANTHROPIC_SONNET_4_6_MAX_OUTPUT_TOKENS;
 pub const DEFAULT_GEPA_REFLECTION_MODEL: &str = "anthropic:claude-sonnet-4-6";
 pub const DEFAULT_GEPA_JUDGE_MODEL: &str = "anthropic:claude-sonnet-4-6";
+const ANTHROPIC_SONNET_4_6_MAX_OUTPUT_TOKENS: u32 = 128_000;
 
 fn default_gepa_lm_max_tokens() -> u32 {
     DEFAULT_GEPA_LM_MAX_TOKENS
@@ -552,10 +553,17 @@ impl RequestAdapterPromptProgram {
             chat.push(role, &message.content_text().unwrap_or_default());
         }
 
-        let response = lm
-            .call(chat, Vec::new())
-            .await
-            .context("request-adapter GEPA target LM call failed")?;
+        let response = match lm.call(chat, Vec::new()).await {
+            Ok(response) => response,
+            Err(error) if gepa_empty_target_response_error(&error) => {
+                return Ok(empty_request_adapter_target_prediction(format!(
+                    "{error:#}"
+                )));
+            }
+            Err(error) => {
+                return Err(error).context("request-adapter GEPA target LM call failed");
+            }
+        };
         let raw_output = response.output.content();
         let parsed = parse_tool_contract_response(&raw_output);
         let (content, tool_calls, parser_events) = match parsed {
@@ -599,6 +607,28 @@ impl RequestAdapterPromptProgram {
             response.usage,
         ))
     }
+}
+
+fn gepa_empty_target_response_error(error: &anyhow::Error) -> bool {
+    format!("{error:#}").contains("Response contained no message or tool call (empty)")
+}
+
+fn empty_request_adapter_target_prediction(reason: String) -> Prediction {
+    Prediction::new(
+        HashMap::from([
+            ("content".to_string(), Value::String(String::new())),
+            ("tool_calls".to_string(), Value::Array(Vec::new())),
+            ("raw_output".to_string(), Value::String(String::new())),
+            (
+                "parser_events".to_string(),
+                json!([
+                    "target LM returned empty assistant response",
+                    format!("target_empty_response_error: {reason}")
+                ]),
+            ),
+        ]),
+        LmUsage::default(),
+    )
 }
 
 impl Module for RequestAdapterPromptProgram {
@@ -1064,6 +1094,8 @@ async fn build_gepa_lm(
     temperature: f32,
     max_tokens: u32,
 ) -> Result<LM> {
+    ensure_gepa_lm_max_tokens_supported(role, model, max_tokens)?;
+
     let base_url = base_url.map(str::trim).filter(|value| !value.is_empty());
     let api_key = api_key
         .map(|value| value.trim().to_string())
@@ -1108,6 +1140,25 @@ async fn build_gepa_lm(
         }
     }
     .with_context(|| format!("failed to build {role} LM for model {model:?}"))
+}
+
+fn ensure_gepa_lm_max_tokens_supported(role: &str, model: &str, max_tokens: u32) -> Result<()> {
+    if let Some(limit) = known_gepa_lm_max_tokens(model) {
+        if max_tokens > limit {
+            anyhow::bail!(
+                "{role} --lm-max-tokens {max_tokens} exceeds the known provider cap {limit} for model {model:?}; lower --lm-max-tokens before starting live GEPA calls"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn known_gepa_lm_max_tokens(model: &str) -> Option<u32> {
+    let normalized = model
+        .trim()
+        .strip_prefix("anthropic:")
+        .unwrap_or_else(|| model.trim());
+    (normalized == "claude-sonnet-4-6").then_some(ANTHROPIC_SONNET_4_6_MAX_OUTPUT_TOKENS)
 }
 
 fn required_gepa_target_model(config: &GepaOptimizationConfig, layer: &str) -> Result<String> {
@@ -1256,6 +1307,15 @@ async fn judge_request_adapter_prediction(
         "request": parse_maybe_json_string(example.get("request", None)),
         "messages": parse_maybe_json_string(example.get("messages", None)),
         "available_tools": parse_maybe_json_string(example.get("available_tools", None)),
+        "scoring_contract": {
+            "valid_assistant_shapes": [
+                "content only with [] tool_calls",
+                "tool_calls only with empty content",
+                "content plus one or more tool_calls"
+            ],
+            "hidden_label_content_semantics": "If hidden_expected_output.content is empty while hidden_expected_output.tool_calls is non-empty, that means user-facing content is optional/not required. It does not mean content is forbidden.",
+            "content_with_tool_calls_policy": "Do not penalize a prediction solely because it includes brief useful user-facing content alongside valid tool_calls. Penalize only empty/no-op content with [] tool_calls, malformed DSRs, invalid JSON/tool schema, missing completed markers, or content that prevents a required tool action from being represented."
+        },
         "hidden_expected_output": judge_case.expected,
         "expected_policy": judge_case.policy,
         "observed_failure_kind": judge_case.observed_failure_kind,
@@ -1384,9 +1444,11 @@ fn ensure_no_gepa_fatal_errors(layer: &str, errors: &GepaFatalErrors) -> Result<
 fn request_adapter_judge_system_prompt() -> &'static str {
     "You are Claude Sonnet 4.6 acting as the GEPA judge for a request-adapter prompt optimizer.\n\
 Judge whether the target model produced a structurally usable OpenAI-compatible assistant turn after the proxy's DSRs formatting.\n\
-The proxy is optimizing structure and contract following, not task intelligence. Valid outputs include content only, tool calls only, or content plus tool calls. Empty visible content with [] tool_calls is a failure.\n\
-Use hidden_expected_output only as private scoring context. Do not quote hidden labels, exact commands, exact file paths, exact answer text, field names such as expected_output, dataset/test/eval metadata, or answer-key language in feedback.\n\
-Give high scores to clean structurally valid behavior even when the tool choice is different but reasonable. Penalize malformed DSRs, missing completed markers, invalid tool-call JSON, no-op content, and unusable empty turns.\n\
+The proxy is optimizing structure and contract following, not task intelligence. Valid outputs include content only, tool calls only, and content plus tool calls. Empty visible content with [] tool_calls is a failure.\n\
+Content plus tool calls is explicitly valid in this project and in OpenAI-compatible assistant turns. Never treat content and tool_calls as mutually exclusive. Do not penalize a prediction solely because it includes brief useful user-facing content alongside valid tool_calls.\n\
+Use hidden_expected_output only as private scoring context. If hidden_expected_output.content is empty while hidden_expected_output.tool_calls is non-empty, that means content is optional/not required, not forbidden. Do not infer a tool-only requirement from an empty hidden content label unless expected_policy explicitly says content must be rejected.\n\
+Do not quote hidden labels, exact commands, exact file paths, exact answer text, field names such as expected_output, dataset/test/eval metadata, or answer-key language in feedback.\n\
+Give high scores to clean structurally valid behavior even when the tool choice is different but reasonable. Penalize malformed DSRs, missing completed markers, invalid tool-call JSON, no-op content, unusable empty turns, and action-announcing content that emits [] tool_calls when a tool action is clearly required.\n\
 Return exactly one JSON object: {\"score\": number between 0 and 1, \"feedback\": \"brief generalized feedback for prompt reflection\"}."
 }
 
@@ -2057,6 +2119,107 @@ mod tests {
 
         ensure_no_gepa_fatal_errors("GEPA test run", &errors)
             .expect("scoreable model failures should not abort as infrastructure errors");
+    }
+
+    #[test]
+    fn gepa_lm_max_tokens_rejects_known_provider_over_cap_before_live_call() {
+        let error = ensure_gepa_lm_max_tokens_supported(
+            "request-adapter GEPA judge",
+            "anthropic:claude-sonnet-4-6",
+            ANTHROPIC_SONNET_4_6_MAX_OUTPUT_TOKENS + 1,
+        )
+        .expect_err("known invalid token cap should be rejected before LM calls");
+
+        assert!(error.to_string().contains("exceeds the known provider cap"));
+        assert!(error.to_string().contains("128000"));
+    }
+
+    #[test]
+    fn gepa_lm_max_tokens_allows_known_provider_cap() {
+        ensure_gepa_lm_max_tokens_supported(
+            "request-adapter GEPA judge",
+            "anthropic:claude-sonnet-4-6",
+            ANTHROPIC_SONNET_4_6_MAX_OUTPUT_TOKENS,
+        )
+        .expect("provider cap should be accepted");
+    }
+
+    #[test]
+    fn request_adapter_target_empty_response_becomes_scoreable_prediction() {
+        let error =
+            anyhow::anyhow!("ResponseError: Response contained no message or tool call (empty)");
+        assert!(gepa_empty_target_response_error(&error));
+
+        let prediction = empty_request_adapter_target_prediction(format!("{error:#}"));
+        let predicted = prediction_to_adapter_value(&prediction);
+        let expected = json!({
+            "content": "",
+            "tool_calls": [
+                {
+                    "name": "read",
+                    "arguments": { "path": "README.md" }
+                }
+            ]
+        });
+        let feedback = score_request_adapter_prediction(&expected, &predicted);
+
+        assert_eq!(predicted["content"], "");
+        assert_eq!(predicted["tool_calls"], json!([]));
+        assert_eq!(feedback.score, 0.0);
+        assert!(feedback.feedback.contains("empty/no-op content"));
+        assert!(prediction
+            .data
+            .get("parser_events")
+            .and_then(Value::as_array)
+            .is_some_and(
+                |events| events.iter().any(|event| event.as_str().is_some_and(
+                    |event| event.contains("target LM returned empty assistant response")
+                ))
+            ));
+    }
+
+    #[test]
+    fn request_adapter_judge_prompt_allows_content_with_tools() {
+        let prompt = request_adapter_judge_system_prompt();
+
+        assert!(prompt.contains("Content plus tool calls is explicitly valid"));
+        assert!(prompt.contains("Never treat content and tool_calls as mutually exclusive"));
+        assert!(prompt.contains("content is optional/not required, not forbidden"));
+    }
+
+    #[test]
+    fn curated_request_adapter_policies_do_not_reintroduce_tool_only_requirement() {
+        let datasets = [
+            include_str!(
+                "../datasets/request-adapter/gemma-dsrs-conservative-trace-faithful.jsonl"
+            ),
+            include_str!(
+                "../datasets/request-adapter/gemma-dsrs-conservative-trace-harness-curated.jsonl"
+            ),
+        ];
+        let stale_policy_fragments = [
+            "When tool_calls is non-empty, leave content empty",
+            "When a tool call is needed, leave content empty",
+            "with empty content",
+            "tool-only turns",
+            "content must be empty",
+        ];
+
+        for dataset in datasets {
+            for line in dataset.lines().filter(|line| !line.trim().is_empty()) {
+                let row: Value = serde_json::from_str(line).expect("request-adapter dataset row");
+                let prompt_goal = row
+                    .pointer("/expected_adapter_policy/prompt_goal")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                for fragment in stale_policy_fragments {
+                    assert!(
+                        !prompt_goal.contains(fragment),
+                        "curated request-adapter prompt_goal still contains stale policy fragment: {fragment}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

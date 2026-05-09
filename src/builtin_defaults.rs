@@ -78,10 +78,10 @@ mod tests {
     #[test]
     fn gemma_request_adapter_artifact_is_embedded() {
         let profile = profile_default("gemma-dsrs-conservative").unwrap();
-        assert_eq!(profile.revision, 7);
+        assert_eq!(profile.revision, 8);
         assert_eq!(
             profile.request_adapter_artifact,
-            Some("request-adapter/gemma-dsrs-conservative/sonnet-fresh-r1-append-only")
+            Some("request-adapter/gemma-dsrs-conservative/sonnet-post50-r2-append-only")
         );
 
         let instruction = instruction_for_id(profile.request_adapter_artifact.unwrap()).unwrap();
@@ -92,14 +92,14 @@ mod tests {
     #[test]
     fn qwen_request_adapter_artifact_is_embedded() {
         let profile = profile_default("qwen-dsrs").unwrap();
-        assert_eq!(profile.revision, 3);
+        assert_eq!(profile.revision, 4);
         assert_eq!(
             profile.dsrs_history_format,
             Some(DsrsHistoryFormat::RegeneratedContext)
         );
         assert_eq!(
             profile.request_adapter_artifact,
-            Some("request-adapter/qwen-dsrs/sonnet-fresh-r1-regenerated-context")
+            Some("request-adapter/qwen-dsrs/sonnet-post50-r2-regenerated-context")
         );
 
         let instruction = instruction_for_id(profile.request_adapter_artifact.unwrap()).unwrap();
