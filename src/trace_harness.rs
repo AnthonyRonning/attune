@@ -5,15 +5,20 @@ use std::{
     io::Write,
     net::SocketAddr,
     path::{Path, PathBuf},
-    time::Instant,
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{anyhow, Context, Result};
 use axum::Router;
+use futures::{stream, StreamExt};
 use regex::Regex;
+use reqwest::{
+    header::{HeaderMap, HeaderValue, RETRY_AFTER},
+    StatusCode,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
-use tokio::task::JoinHandle;
+use tokio::{task::JoinHandle, time::Duration};
 
 use crate::{
     config::ProxyConfig,
@@ -43,6 +48,10 @@ pub struct TraceHarnessRunConfig {
     pub proxy_url: Option<String>,
     pub model: Option<String>,
     pub limit: usize,
+    pub request_timeout_seconds: u64,
+    pub retries: usize,
+    pub retry_backoff_ms: u64,
+    pub parallel: usize,
     pub provider: Option<ProviderRouting>,
     pub proxy_config: ProxyConfig,
 }
@@ -55,6 +64,10 @@ pub struct TraceHarnessCompareConfig {
     pub baseline_base_url: Option<String>,
     pub model: Option<String>,
     pub limit: usize,
+    pub request_timeout_seconds: u64,
+    pub retries: usize,
+    pub retry_backoff_ms: u64,
+    pub parallel: usize,
     pub provider: Option<ProviderRouting>,
     pub proxy_config: ProxyConfig,
 }
@@ -91,6 +104,10 @@ pub struct TraceHarnessRunReport {
     pub output_path: PathBuf,
     pub proxy_url: String,
     pub model: Option<String>,
+    pub request_timeout_seconds: u64,
+    pub retries: usize,
+    pub retry_backoff_ms: u64,
+    pub parallel: usize,
     pub total: usize,
     pub passed: usize,
     pub failed: usize,
@@ -124,6 +141,10 @@ pub struct TraceHarnessCompareReport {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy_correction_trace_path: Option<PathBuf>,
     pub model: Option<String>,
+    pub request_timeout_seconds: u64,
+    pub retries: usize,
+    pub retry_backoff_ms: u64,
+    pub parallel: usize,
     pub total: usize,
     pub baseline_passed: usize,
     pub baseline_failed: usize,
@@ -179,6 +200,22 @@ pub struct TraceHarnessEndpointReport {
     pub raw_response_preview: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub retry_attempts: usize,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub rate_limit_headers: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TraceHarnessHttpOptions {
+    retries: usize,
+    retry_backoff_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+struct TraceHarnessRequestTag {
+    scenario_id: String,
+    case_index: usize,
 }
 
 pub async fn import_pi_trace_scenarios(
@@ -226,24 +263,51 @@ pub async fn run_trace_harness(config: TraceHarnessRunConfig) -> Result<TraceHar
         start_proxy(config.proxy_config.clone(), &config.output_path).await?
     };
 
-    let client = reqwest::Client::new();
-    let mut cases = Vec::new();
-    for scenario in scenarios.into_iter().take(config.limit) {
-        let mut request = scenario.request.clone();
-        if let Some(model) = &config.model {
-            request.model = model.clone();
-        }
-        if let Some(provider) = &config.provider {
-            if !provider.is_empty() {
-                request
-                    .extra
-                    .insert("provider".to_string(), serde_json::to_value(provider)?);
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(config.request_timeout_seconds))
+        .build()?;
+    let http_options = TraceHarnessHttpOptions {
+        retries: config.retries,
+        retry_backoff_ms: config.retry_backoff_ms,
+    };
+    let parallel = config.parallel.max(1);
+    let provider = config.provider.clone();
+    let model = config.model.clone();
+    let cases = stream::iter(scenarios.into_iter().take(config.limit).enumerate().map(
+        |(case_index, scenario)| {
+            let client = client.clone();
+            let proxy_url = proxy_url.clone();
+            let provider = provider.clone();
+            let model = model.clone();
+            async move {
+                let mut request = scenario.request.clone();
+                if let Some(model) = &model {
+                    request.model = model.clone();
+                }
+                if let Some(provider) = &provider {
+                    if !provider.is_empty() {
+                        request
+                            .extra
+                            .insert("provider".to_string(), serde_json::to_value(provider)?);
+                    }
+                }
+                request.stream = Some(false);
+                let tag = TraceHarnessRequestTag {
+                    scenario_id: scenario.id.clone(),
+                    case_index,
+                };
+                Ok::<_, anyhow::Error>(
+                    run_one_scenario(&client, &proxy_url, scenario, request, http_options, tag)
+                        .await,
+                )
             }
-        }
-        request.stream = Some(false);
-        let report = run_one_scenario(&client, &proxy_url, scenario, request).await;
-        cases.push(report);
-    }
+        },
+    ))
+    .buffered(parallel)
+    .collect::<Vec<_>>()
+    .await
+    .into_iter()
+    .collect::<Result<Vec<_>>>()?;
 
     if let Some(handle) = server_handle {
         handle.abort();
@@ -257,6 +321,10 @@ pub async fn run_trace_harness(config: TraceHarnessRunConfig) -> Result<TraceHar
         output_path: config.output_path.clone(),
         proxy_url,
         model: config.model,
+        request_timeout_seconds: config.request_timeout_seconds,
+        retries: config.retries,
+        retry_backoff_ms: config.retry_backoff_ms,
+        parallel,
         total: cases.len(),
         passed,
         failed,
@@ -296,43 +364,86 @@ pub async fn run_trace_harness_compare(
     };
     let proxy_chat_url = format!("{}/v1/chat/completions", proxy_url.trim_end_matches('/'));
 
-    let client = reqwest::Client::new();
-    let mut cases = Vec::new();
-    for scenario in scenarios.into_iter().take(config.limit) {
-        let mut request = scenario.request.clone();
-        if let Some(model) = &config.model {
-            request.model = model.clone();
-        }
-        if let Some(provider) = &config.provider {
-            if !provider.is_empty() {
-                request
-                    .extra
-                    .insert("provider".to_string(), serde_json::to_value(provider)?);
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(config.request_timeout_seconds))
+        .build()?;
+    let http_options = TraceHarnessHttpOptions {
+        retries: config.retries,
+        retry_backoff_ms: config.retry_backoff_ms,
+    };
+    let parallel = config.parallel.max(1);
+    let provider = config.provider.clone();
+    let model = config.model.clone();
+    let mut cases = stream::iter(scenarios.into_iter().take(config.limit).enumerate().map(
+        |(case_index, scenario)| {
+            let client = client.clone();
+            let baseline_url = baseline_url.clone();
+            let proxy_chat_url = proxy_chat_url.clone();
+            let api_key = api_key.clone();
+            let provider = provider.clone();
+            let model = model.clone();
+            async move {
+                let mut request = scenario.request.clone();
+                if let Some(model) = &model {
+                    request.model = model.clone();
+                }
+                if let Some(provider) = &provider {
+                    if !provider.is_empty() {
+                        request
+                            .extra
+                            .insert("provider".to_string(), serde_json::to_value(provider)?);
+                    }
+                }
+                request.stream = Some(false);
+                let tag = TraceHarnessRequestTag {
+                    scenario_id: scenario.id.clone(),
+                    case_index,
+                };
+
+                let baseline = call_chat_endpoint(
+                    &client,
+                    &baseline_url,
+                    &request,
+                    Some(&api_key),
+                    "baseline",
+                    http_options,
+                    None,
+                )
+                .await;
+                let proxy = call_chat_endpoint(
+                    &client,
+                    &proxy_chat_url,
+                    &request,
+                    Some(&api_key),
+                    "proxy",
+                    http_options,
+                    Some(&tag),
+                )
+                .await;
+                let outcome = compare_outcome(baseline.passed, proxy.passed).to_string();
+
+                Ok::<_, anyhow::Error>(TraceHarnessCompareCaseReport {
+                    scenario_id: scenario.id,
+                    dataset: scenario.dataset,
+                    source_id: scenario.source_id,
+                    turn_index: scenario.turn_index,
+                    model: request.model,
+                    outcome,
+                    baseline,
+                    proxy,
+                    proxy_trace_id: None,
+                    proxy_repair_actions: Vec::new(),
+                    proxy_policy_decisions: Vec::new(),
+                    proxy_correction_attempts: Vec::new(),
+                })
             }
-        }
-        request.stream = Some(false);
-
-        let baseline =
-            call_chat_endpoint(&client, &baseline_url, &request, Some(&api_key), "baseline").await;
-        let proxy =
-            call_chat_endpoint(&client, &proxy_chat_url, &request, Some(&api_key), "proxy").await;
-        let outcome = compare_outcome(baseline.passed, proxy.passed).to_string();
-
-        cases.push(TraceHarnessCompareCaseReport {
-            scenario_id: scenario.id,
-            dataset: scenario.dataset,
-            source_id: scenario.source_id,
-            turn_index: scenario.turn_index,
-            model: request.model,
-            outcome,
-            baseline,
-            proxy,
-            proxy_trace_id: None,
-            proxy_repair_actions: Vec::new(),
-            proxy_policy_decisions: Vec::new(),
-            proxy_correction_attempts: Vec::new(),
-        });
-    }
+        },
+    ))
+    .buffered(parallel)
+    .collect::<Vec<_>>()
+    .await
+    .into_iter()
+    .collect::<Result<Vec<_>>>()?;
 
     if let Some(handle) = server_handle {
         handle.abort();
@@ -349,6 +460,10 @@ pub async fn run_trace_harness_compare(
         proxy_url,
         trace_paths,
         config.model,
+        config.request_timeout_seconds,
+        config.retries,
+        config.retry_backoff_ms,
+        parallel,
         cases,
     );
     write_json_pretty(&config.output_path, &report).await?;
@@ -403,62 +518,21 @@ async fn run_one_scenario(
     proxy_url: &str,
     scenario: TraceHarnessScenario,
     request: ChatCompletionRequest,
+    http_options: TraceHarnessHttpOptions,
+    tag: TraceHarnessRequestTag,
 ) -> TraceHarnessCaseReport {
     let model = request.model.clone();
-    let response = client
-        .post(format!("{proxy_url}/v1/chat/completions"))
-        .json(&request)
-        .send()
-        .await;
-
-    let mut failures = Vec::new();
-    let mut warnings = Vec::new();
-    let mut final_content_len = 0usize;
-    let mut final_content_preview = None;
-    let mut final_tool_calls = Vec::new();
-
-    match response {
-        Ok(response) if response.status().is_success() => match response.text().await {
-            Ok(body) => match serde_json::from_str::<Value>(&body) {
-                Ok(value) => {
-                    validate_proxy_response(&request, &value, &mut failures, &mut warnings);
-                    if let Some(content) = value
-                        .pointer("/choices/0/message/content")
-                        .and_then(Value::as_str)
-                    {
-                        final_content_len = content.len();
-                        final_content_preview = Some(preview(content));
-                    }
-                    if let Some(calls) = value
-                        .pointer("/choices/0/message/tool_calls")
-                        .and_then(Value::as_array)
-                    {
-                        for call in calls {
-                            let name = call
-                                .pointer("/function/name")
-                                .and_then(Value::as_str)
-                                .unwrap_or("<missing>");
-                            let args = call
-                                .pointer("/function/arguments")
-                                .and_then(Value::as_str)
-                                .unwrap_or("");
-                            final_tool_calls.push(format!("{name} {args}"));
-                        }
-                    }
-                }
-                Err(error) => {
-                    failures.push(format!("proxy returned invalid JSON: {error}: {body}"))
-                }
-            },
-            Err(error) => failures.push(format!("failed to read proxy response body: {error}")),
-        },
-        Ok(response) => {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            failures.push(format!("proxy returned HTTP {status}: {}", preview(&body)));
-        }
-        Err(error) => failures.push(format!("proxy request failed: {error}")),
-    }
+    let endpoint_url = format!("{proxy_url}/v1/chat/completions");
+    let endpoint_report = call_chat_endpoint(
+        client,
+        &endpoint_url,
+        &request,
+        None,
+        "proxy",
+        http_options,
+        Some(&tag),
+    )
+    .await;
 
     TraceHarnessCaseReport {
         scenario_id: scenario.id,
@@ -466,12 +540,12 @@ async fn run_one_scenario(
         source_id: scenario.source_id,
         turn_index: scenario.turn_index,
         model,
-        passed: failures.is_empty(),
-        failures,
-        warnings,
-        final_content_len,
-        final_content_preview,
-        final_tool_calls,
+        passed: endpoint_report.passed,
+        failures: endpoint_report.failures,
+        warnings: endpoint_report.warnings,
+        final_content_len: endpoint_report.final_content_len,
+        final_content_preview: endpoint_report.final_content_preview,
+        final_tool_calls: endpoint_report.final_tool_calls,
     }
 }
 
@@ -481,18 +555,10 @@ async fn call_chat_endpoint(
     request: &ChatCompletionRequest,
     api_key: Option<&str>,
     label: &str,
+    http_options: TraceHarnessHttpOptions,
+    tag: Option<&TraceHarnessRequestTag>,
 ) -> TraceHarnessEndpointReport {
     let started = Instant::now();
-    let mut builder = client
-        .post(endpoint_url)
-        .header("content-type", "application/json")
-        .header("X-Title", "model-correction-proxy-trace-harness")
-        .json(request);
-    if let Some(api_key) = api_key {
-        builder = builder.bearer_auth(api_key);
-    }
-
-    let response = builder.send().await;
     let mut report = TraceHarnessEndpointReport {
         passed: false,
         failures: Vec::new(),
@@ -505,57 +571,188 @@ async fn call_chat_endpoint(
         finish_reason: None,
         raw_response_preview: None,
         error: None,
+        retry_attempts: 0,
+        rate_limit_headers: BTreeMap::new(),
     };
 
-    match response {
-        Ok(response) => {
-            report.http_status = Some(response.status().as_u16());
-            let status = response.status();
-            match response.text().await {
-                Ok(body) => {
-                    report.raw_response_preview = Some(preview(&body));
-                    if !status.is_success() {
-                        report.failures.push(format!(
-                            "{label} returned HTTP {status}: {}",
-                            preview(&body)
-                        ));
-                    } else {
-                        match serde_json::from_str::<Value>(&body) {
-                            Ok(value) => {
-                                validate_proxy_response(
-                                    request,
-                                    &value,
-                                    &mut report.failures,
-                                    &mut report.warnings,
-                                );
-                                fill_endpoint_response_summary(&mut report, &value);
-                            }
-                            Err(error) => report.failures.push(format!(
-                                "{label} returned invalid JSON: {error}: {}",
+    for attempt in 0..=http_options.retries {
+        let mut builder = client
+            .post(endpoint_url)
+            .header("content-type", "application/json")
+            .header("X-Title", "model-correction-proxy-trace-harness")
+            .json(request);
+        if let Some(api_key) = api_key {
+            builder = builder.bearer_auth(api_key);
+        }
+        if let Some(tag) = tag {
+            builder = builder
+                .header("X-Trace-Harness-Scenario-Id", &tag.scenario_id)
+                .header("X-Trace-Harness-Case-Index", tag.case_index.to_string());
+        }
+
+        let response = builder.send().await;
+        match response {
+            Ok(response) => {
+                report.http_status = Some(response.status().as_u16());
+                let status = response.status();
+                report.rate_limit_headers = rate_limit_headers(response.headers());
+                let retry_delay =
+                    retry_delay_for_status(status, response.headers(), attempt, http_options);
+                match response.text().await {
+                    Ok(body) => {
+                        report.raw_response_preview = Some(preview(&body));
+                        if let Some(delay) = retry_delay {
+                            report.retry_attempts += 1;
+                            report.warnings.push(format!(
+                                "{label} returned retryable HTTP {status}; retrying in {} ms",
+                                delay.as_millis()
+                            ));
+                            tokio::time::sleep(delay).await;
+                            continue;
+                        } else if !status.is_success() {
+                            report.failures.push(format!(
+                                "{label} returned HTTP {status}: {}",
                                 preview(&body)
-                            )),
+                            ));
+                        } else {
+                            report.error = None;
+                            match serde_json::from_str::<Value>(&body) {
+                                Ok(value) => {
+                                    validate_proxy_response(
+                                        request,
+                                        &value,
+                                        &mut report.failures,
+                                        &mut report.warnings,
+                                    );
+                                    fill_endpoint_response_summary(&mut report, &value);
+                                }
+                                Err(error) => report.failures.push(format!(
+                                    "{label} returned invalid JSON: {error}: {}",
+                                    preview(&body)
+                                )),
+                            }
                         }
                     }
-                }
-                Err(error) => {
-                    report.error = Some(error.to_string());
-                    report
-                        .failures
-                        .push(format!("failed to read {label} response body: {error}"));
+                    Err(error) => {
+                        if attempt < http_options.retries {
+                            let delay = retry_backoff_delay(attempt, http_options);
+                            report.retry_attempts += 1;
+                            report.error = Some(error.to_string());
+                            report.warnings.push(format!(
+                                "failed to read {label} response body: {error}; retrying in {} ms",
+                                delay.as_millis()
+                            ));
+                            tokio::time::sleep(delay).await;
+                            continue;
+                        }
+                        report.error = Some(error.to_string());
+                        report
+                            .failures
+                            .push(format!("failed to read {label} response body: {error}"));
+                    }
                 }
             }
+            Err(error) => {
+                if attempt < http_options.retries {
+                    let delay = retry_backoff_delay(attempt, http_options);
+                    report.retry_attempts += 1;
+                    report.error = Some(error.to_string());
+                    report.warnings.push(format!(
+                        "{label} request failed: {error}; retrying in {} ms",
+                        delay.as_millis()
+                    ));
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+                report.error = Some(error.to_string());
+                report
+                    .failures
+                    .push(format!("{label} request failed: {error}"));
+            }
         }
-        Err(error) => {
-            report.error = Some(error.to_string());
-            report
-                .failures
-                .push(format!("{label} request failed: {error}"));
-        }
+        break;
     }
 
     report.elapsed_ms = started.elapsed().as_millis();
     report.passed = report.failures.is_empty();
     report
+}
+
+fn retry_delay_for_status(
+    status: StatusCode,
+    headers: &HeaderMap,
+    attempt: usize,
+    http_options: TraceHarnessHttpOptions,
+) -> Option<Duration> {
+    if attempt >= http_options.retries || !is_retryable_status(status) {
+        return None;
+    }
+    Some(
+        retry_after_delay(headers)
+            .or_else(|| rate_limit_reset_delay(headers))
+            .unwrap_or_else(|| retry_backoff_delay(attempt, http_options))
+            .min(Duration::from_secs(120)),
+    )
+}
+
+fn is_retryable_status(status: StatusCode) -> bool {
+    status == StatusCode::TOO_MANY_REQUESTS
+        || status == StatusCode::REQUEST_TIMEOUT
+        || status.as_u16() == 425
+        || status.is_server_error()
+}
+
+fn retry_backoff_delay(attempt: usize, http_options: TraceHarnessHttpOptions) -> Duration {
+    let multiplier = 1_u64 << attempt.min(6);
+    Duration::from_millis(
+        http_options
+            .retry_backoff_ms
+            .saturating_mul(multiplier)
+            .max(1),
+    )
+    .min(Duration::from_secs(120))
+}
+
+fn retry_after_delay(headers: &HeaderMap) -> Option<Duration> {
+    let seconds = header_seconds(headers.get(RETRY_AFTER)?)?;
+    Some(Duration::from_secs(seconds))
+}
+
+fn rate_limit_reset_delay(headers: &HeaderMap) -> Option<Duration> {
+    let value = header_seconds(headers.get("x-ratelimit-reset")?)?;
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+    if value > now && value.saturating_sub(now) <= 300 {
+        Some(Duration::from_secs(value - now))
+    } else if value <= 300 {
+        Some(Duration::from_secs(value))
+    } else {
+        None
+    }
+}
+
+fn header_seconds(value: &HeaderValue) -> Option<u64> {
+    value.to_str().ok()?.trim().parse::<u64>().ok()
+}
+
+fn rate_limit_headers(headers: &HeaderMap) -> BTreeMap<String, String> {
+    headers
+        .iter()
+        .filter_map(|(name, value)| {
+            let key = name.as_str().to_ascii_lowercase();
+            if key == "retry-after" || key.starts_with("x-ratelimit") {
+                value
+                    .to_str()
+                    .ok()
+                    .map(|value| (key, value.chars().take(256).collect()))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn is_zero_usize(value: &usize) -> bool {
+    *value == 0
 }
 
 fn fill_endpoint_response_summary(report: &mut TraceHarnessEndpointReport, value: &Value) {
@@ -693,21 +890,42 @@ fn looks_like_premature_tool_action(content: &str) -> bool {
         .collect::<Vec<_>>()
         .join(" ")
         .to_ascii_lowercase();
-    let starts_like_action = [
+    let prefixes = [
         "let me ",
         "i'll ",
         "i will ",
         "i am going to ",
         "i'm going to ",
-    ]
-    .iter()
-    .any(|prefix| lower.starts_with(prefix) || lower.contains(&format!(". {prefix}")));
-    if !starts_like_action {
+    ];
+    prefixes.iter().any(|prefix| {
+        action_phrase_has_tool_verb(&lower, prefix)
+            || [". ", "! ", "? ", "\n"]
+                .iter()
+                .any(|boundary| action_phrase_has_tool_verb(&lower, &format!("{boundary}{prefix}")))
+    })
+}
+
+fn action_phrase_has_tool_verb(lower: &str, marker: &str) -> bool {
+    let Some(index) = lower.find(marker) else {
         return false;
+    };
+    let mut tail = lower[index + marker.len()..].trim_start();
+    for filler in [
+        "go ahead and ",
+        "now ",
+        "first ",
+        "try to ",
+        "attempt to ",
+        "attempting to ",
+    ] {
+        if let Some(stripped) = tail.strip_prefix(filler) {
+            tail = stripped.trim_start();
+        }
     }
-    [
+    let tool_action_verbs = [
         "read",
         "check",
+        "compile",
         "inspect",
         "open",
         "list",
@@ -724,9 +942,8 @@ fn looks_like_premature_tool_action(content: &str) -> bool {
         "edit",
         "modify",
         "update",
-    ]
-    .iter()
-    .any(|verb| lower.contains(verb))
+    ];
+    tool_action_verbs.iter().any(|verb| tail.starts_with(verb))
 }
 
 fn compare_outcome(baseline_passed: bool, proxy_passed: bool) -> &'static str {
@@ -745,24 +962,52 @@ async fn enrich_compare_cases_with_proxy_traces(
     let Ok(records) = read_trace_records(&trace_path.to_path_buf()).await else {
         return;
     };
-    for (case, record) in cases.iter_mut().zip(records.iter()) {
-        case.proxy_trace_id = Some(record.trace_id.clone());
-        case.proxy_repair_actions = record
-            .repair_actions
-            .iter()
-            .map(|action| action.action.clone())
-            .collect();
-        case.proxy_policy_decisions = record
-            .policy_decisions
-            .iter()
-            .map(|decision| format!("{}:{}", decision.stage, decision.decision))
-            .collect();
-        case.proxy_correction_attempts = record
-            .correction_attempts
-            .iter()
-            .map(|attempt| attempt.result.clone())
-            .collect();
+    let records_by_case_index = records
+        .iter()
+        .filter_map(|record| trace_harness_case_index(record).map(|index| (index, record)))
+        .collect::<BTreeMap<_, _>>();
+    if !records_by_case_index.is_empty() {
+        for (case_index, case) in cases.iter_mut().enumerate() {
+            if let Some(record) = records_by_case_index.get(&case_index) {
+                enrich_compare_case_with_proxy_trace(case, record);
+            }
+        }
+    } else {
+        for (case, record) in cases.iter_mut().zip(records.iter()) {
+            enrich_compare_case_with_proxy_trace(case, record);
+        }
     }
+}
+
+fn trace_harness_case_index(record: &crate::trace::TraceRecord) -> Option<usize> {
+    record
+        .metadata
+        .pointer("/headers/x-trace-harness-case-index")
+        .and_then(Value::as_str)?
+        .parse()
+        .ok()
+}
+
+fn enrich_compare_case_with_proxy_trace(
+    case: &mut TraceHarnessCompareCaseReport,
+    record: &crate::trace::TraceRecord,
+) {
+    case.proxy_trace_id = Some(record.trace_id.clone());
+    case.proxy_repair_actions = record
+        .repair_actions
+        .iter()
+        .map(|action| action.action.clone())
+        .collect();
+    case.proxy_policy_decisions = record
+        .policy_decisions
+        .iter()
+        .map(|decision| format!("{}:{}", decision.stage, decision.decision))
+        .collect();
+    case.proxy_correction_attempts = record
+        .correction_attempts
+        .iter()
+        .map(|attempt| attempt.result.clone())
+        .collect();
 }
 
 fn build_compare_report(
@@ -772,6 +1017,10 @@ fn build_compare_report(
     proxy_url: String,
     trace_paths: Option<(PathBuf, PathBuf)>,
     model: Option<String>,
+    request_timeout_seconds: u64,
+    retries: usize,
+    retry_backoff_ms: u64,
+    parallel: usize,
     cases: Vec<TraceHarnessCompareCaseReport>,
 ) -> TraceHarnessCompareReport {
     let total = cases.len();
@@ -827,6 +1076,10 @@ fn build_compare_report(
         proxy_trace_path: trace_paths.as_ref().map(|paths| paths.0.clone()),
         proxy_correction_trace_path: trace_paths.as_ref().map(|paths| paths.1.clone()),
         model,
+        request_timeout_seconds,
+        retries,
+        retry_backoff_ms,
+        parallel,
         total,
         baseline_passed,
         baseline_failed: total.saturating_sub(baseline_passed),
@@ -1783,6 +2036,19 @@ mod tests {
             .iter()
             .any(|failure| failure.contains("announce a tool/action")));
         assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn premature_tool_action_detector_requires_action_verb_near_marker() {
+        assert!(looks_like_premature_tool_action(
+            "Let me read the README first."
+        ));
+        assert!(looks_like_premature_tool_action(
+            "I'll compile and run the chat server."
+        ));
+        assert!(!looks_like_premature_tool_action(
+            "I attempted to save the API convention to memory, but memory is disabled. I will keep this information in my current context. Additionally, my search for `.graphql` files found nothing."
+        ));
     }
 
     #[test]

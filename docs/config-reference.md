@@ -191,6 +191,14 @@ The trace harness also has provider flags for one-off live comparisons:
 `--provider-order`, `--provider-only`, `--provider-ignore`,
 `--disable-provider-fallbacks`, and `--require-provider-parameters`.
 
+Live harness commands also accept transport controls:
+`--request-timeout-seconds` (default `180`), `--retries` (default `3`),
+`--retry-backoff-ms` (default `1000`), and `--parallel` (default `1`). Retries
+cover request errors, response-body read errors, HTTP 429, HTTP 408, HTTP 425,
+and 5xx responses. The harness records `Retry-After` and `x-ratelimit-*`
+headers in endpoint reports and honors `Retry-After` / `x-ratelimit-reset`
+when deciding retry delay.
+
 ## Artifact References
 
 Artifacts may be:
@@ -248,4 +256,3 @@ dsrs_history_format = "regenerated_context"
 [model_profiles.provider]
 ignore = ["venice"]
 ```
-

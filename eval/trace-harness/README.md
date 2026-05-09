@@ -121,12 +121,18 @@ cargo run -- \
   --output-path eval/trace-harness/results/qwen-ignore-venice-pi-hermes-25.compare.local.json \
   --model qwen/qwen3.5-9b \
   --provider-ignore venice \
-  --limit 25
+  --limit 25 \
+  --parallel 4 \
+  --request-timeout-seconds 180 \
+  --retries 3
 ```
 
 The report includes direct/proxy pass counts, `proxy_fixed_baseline_failure`,
 `proxy_regressed_baseline_success`, failure categories, latency, and proxy
-repair/correction usage when the proxy is started in-process.
+repair/correction usage when the proxy is started in-process. Live request
+flags default to `--request-timeout-seconds 180`, `--retries 3`,
+`--retry-backoff-ms 1000`, and `--parallel 1`; increase `--parallel` for larger
+exploratory runs after a provider smoke test passes.
 
 The report checks structural invariants:
 
@@ -137,6 +143,8 @@ The report checks structural invariants:
 - tool call names are known for the scenario
 - tool call arguments are JSON objects
 - duplicate identical final tool calls are warnings
+- retryable transport/provider failures are retried and recorded separately from
+  structural failures
 
 OpenAI-compatible assistant messages may contain content, tool calls, or both. Empty content plus empty tool calls is structurally invalid, and a generic unrecovered proxy fallback is treated as a failed scenario because it means the proxy kept the API shape valid but did not preserve a usable agent turn.
 

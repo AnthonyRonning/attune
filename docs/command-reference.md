@@ -259,6 +259,13 @@ nix develop --command cargo run -- \
   --lm-max-tokens 100000
 ```
 
+Add `MCP_GEPA_DEBUG=1` when diagnosing optimizer behavior. It prints one line
+per scored rollout with the layer, case ID, score, generalized judge feedback,
+and parsed prediction. GEPA infrastructure failures are intentionally fatal:
+target-model HTTP failures, judge HTTP failures, non-JSON judge responses, and
+invalid judge JSON abort the command and do not write artifacts. Model behavior
+failures, such as empty content with empty tool calls, are still scoreable data.
+
 To compare history format behavior, run the same dataset again with the other
 history format and a different output/artifact ID:
 
@@ -391,7 +398,10 @@ nix develop --command cargo run -- \
   --scenarios-path eval/trace-harness/scenarios/pi-hermes-100.local.jsonl \
   --output-path eval/trace-harness/results/gemma-pi-hermes-100.local.json \
   --model google/gemma-4-26b-a4b-it \
-  --limit 100
+  --limit 100 \
+  --parallel 4 \
+  --request-timeout-seconds 180 \
+  --retries 3
 ```
 
 Run Qwen while ignoring the problematic Venice provider:
@@ -405,7 +415,10 @@ nix develop --command cargo run -- \
   --output-path eval/trace-harness/results/qwen-ignore-venice-pi-hermes-100.local.json \
   --model qwen/qwen3.5-9b \
   --provider-ignore venice \
-  --limit 100
+  --limit 100 \
+  --parallel 4 \
+  --request-timeout-seconds 180 \
+  --retries 3
 ```
 
 Compare direct upstream baseline against the proxy on a smaller smoke set:
@@ -419,7 +432,10 @@ nix develop --command cargo run -- \
   --output-path eval/trace-harness/results/qwen-ignore-venice-pi-hermes-25.compare.local.json \
   --model qwen/qwen3.5-9b \
   --provider-ignore venice \
-  --limit 25
+  --limit 25 \
+  --parallel 4 \
+  --request-timeout-seconds 180 \
+  --retries 3
 ```
 
 The compare report records:
@@ -433,6 +449,15 @@ The compare report records:
 - proxy repair actions and correction-agent attempts when the proxy is started
   in-process
 - latency for each endpoint call
+- retry attempts and any `Retry-After` / `x-ratelimit-*` response headers
+
+`trace-harness run` and `trace-harness compare` default to
+`--request-timeout-seconds 180`, `--retries 3`, `--retry-backoff-ms 1000`, and
+`--parallel 1`. Increase `--parallel` for exploratory live runs once the model
+and provider are stable. Retries are used for request/response read failures,
+HTTP 429, HTTP 408, HTTP 425, and 5xx responses; `Retry-After` and
+`x-ratelimit-reset` are honored when present, otherwise exponential backoff is
+used.
 
 Use `--baseline-base-url` to compare against another OpenAI-compatible target
 endpoint. Use `--proxy-url` when you already have a proxy process running and do

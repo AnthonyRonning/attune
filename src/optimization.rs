@@ -1,4 +1,8 @@
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -406,6 +410,7 @@ struct GepaJudgeCase {
 }
 
 type GepaJudgeCases = Arc<HashMap<String, GepaJudgeCase>>;
+type GepaFatalErrors = Arc<Mutex<Vec<String>>>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct GepaJudgeDecision {
@@ -488,6 +493,7 @@ pub struct RequestAdapterPromptProgram {
     lm: Option<LM>,
     judge_lm: Option<LM>,
     judge_cases: GepaJudgeCases,
+    fatal_errors: GepaFatalErrors,
 }
 
 impl Default for RequestAdapterPromptProgram {
@@ -497,6 +503,7 @@ impl Default for RequestAdapterPromptProgram {
             lm: None,
             judge_lm: None,
             judge_cases: Arc::new(HashMap::new()),
+            fatal_errors: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
@@ -507,6 +514,7 @@ impl RequestAdapterPromptProgram {
         initial_instruction: Option<String>,
         judge_lm: LM,
         judge_cases: GepaJudgeCases,
+        fatal_errors: GepaFatalErrors,
     ) -> Self {
         let mut signature = RequestAdapterPromptSignature::new();
         if let Some(instruction) =
@@ -519,6 +527,7 @@ impl RequestAdapterPromptProgram {
             lm: Some(lm),
             judge_lm: Some(judge_lm),
             judge_cases,
+            fatal_errors,
         }
     }
 
@@ -543,23 +552,10 @@ impl RequestAdapterPromptProgram {
             chat.push(role, &message.content_text().unwrap_or_default());
         }
 
-        let response = match lm.call(chat, Vec::new()).await {
-            Ok(response) => response,
-            Err(error) => {
-                return Ok(Prediction::new(
-                    HashMap::from([
-                        ("content".to_string(), Value::String(String::new())),
-                        ("tool_calls".to_string(), Value::Array(Vec::new())),
-                        ("raw_output".to_string(), Value::String(String::new())),
-                        (
-                            "parser_events".to_string(),
-                            json!([format!("request-adapter runtime LM call failed: {error}")]),
-                        ),
-                    ]),
-                    LmUsage::default(),
-                ));
-            }
-        };
+        let response = lm
+            .call(chat, Vec::new())
+            .await
+            .context("request-adapter GEPA target LM call failed")?;
         let raw_output = response.output.content();
         let parsed = parse_tool_contract_response(&raw_output);
         let (content, tool_calls, parser_events) = match parsed {
@@ -651,7 +647,7 @@ impl FeedbackEvaluator for RequestAdapterPromptProgram {
         let Some(judge_lm) = &self.judge_lm else {
             return deterministic;
         };
-        judge_request_adapter_prediction(
+        let judged = judge_request_adapter_prediction(
             judge_lm,
             example,
             prediction,
@@ -659,7 +655,10 @@ impl FeedbackEvaluator for RequestAdapterPromptProgram {
             &predicted,
             deterministic,
         )
-        .await
+        .await;
+        record_gepa_fatal_feedback(&self.fatal_errors, &judged);
+        log_gepa_debug("request_adapter", &case_id, &predicted, &judged);
+        judged
     }
 }
 
@@ -715,6 +714,7 @@ pub struct CorrectionPromptProgram {
     predictor: Predict,
     judge_lm: Option<LM>,
     judge_cases: GepaJudgeCases,
+    fatal_errors: GepaFatalErrors,
 }
 
 impl Default for CorrectionPromptProgram {
@@ -723,16 +723,22 @@ impl Default for CorrectionPromptProgram {
             predictor: Predict::new(CorrectionPromptSignature::new()),
             judge_lm: None,
             judge_cases: Arc::new(HashMap::new()),
+            fatal_errors: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
 
 impl CorrectionPromptProgram {
-    fn with_judge(judge_lm: LM, judge_cases: GepaJudgeCases) -> Self {
+    fn with_judge(
+        judge_lm: LM,
+        judge_cases: GepaJudgeCases,
+        fatal_errors: GepaFatalErrors,
+    ) -> Self {
         Self {
             predictor: Predict::new(CorrectionPromptSignature::new()),
             judge_lm: Some(judge_lm),
             judge_cases,
+            fatal_errors,
         }
     }
 }
@@ -779,7 +785,7 @@ impl FeedbackEvaluator for CorrectionPromptProgram {
         let Some(judge_lm) = &self.judge_lm else {
             return deterministic;
         };
-        judge_correction_prediction(
+        let judged = judge_correction_prediction(
             judge_lm,
             example,
             prediction,
@@ -787,7 +793,10 @@ impl FeedbackEvaluator for CorrectionPromptProgram {
             &predicted,
             deterministic,
         )
-        .await
+        .await;
+        record_gepa_fatal_feedback(&self.fatal_errors, &judged);
+        log_gepa_debug("correction_agent", &case_id, &predicted, &judged);
+        judged
     }
 }
 
@@ -853,7 +862,9 @@ pub async fn optimize_correction_prompt(
         .maybe_max_lm_calls(Some((config.iterations.max(1) * 16) + 16))
         .build();
 
-    let mut program = CorrectionPromptProgram::with_judge(judge_lm, judge_cases);
+    let fatal_errors = Arc::new(Mutex::new(Vec::new()));
+    let mut program =
+        CorrectionPromptProgram::with_judge(judge_lm, judge_cases, fatal_errors.clone());
     if let Some(seed_instruction) = seed_instruction_from_artifact(&config).await? {
         program
             .predictor
@@ -865,6 +876,7 @@ pub async fn optimize_correction_prompt(
         .compile_with_feedback(&mut program, examples.clone())
         .await
         .context("GEPA correction prompt optimization failed")?;
+    ensure_no_gepa_fatal_errors("GEPA correction prompt optimization", &fatal_errors)?;
 
     if let Some(parent) = config.output_path.parent() {
         tokio::fs::create_dir_all(parent)
@@ -873,6 +885,9 @@ pub async fn optimize_correction_prompt(
     }
     let artifact_type = "correction_agent_instruction".to_string();
     let best_instruction = result.best_candidate.instruction.clone();
+    if best_instruction.trim().is_empty() {
+        anyhow::bail!("GEPA correction-prompt optimization produced an empty best instruction; refusing to write an unusable artifact");
+    }
     let report = GepaOptimizationReport {
         artifact_id: config.artifact_id.clone().unwrap_or_else(|| {
             default_correction_artifact_id(
@@ -972,16 +987,19 @@ pub async fn optimize_request_adapter_prompt(
         .build();
 
     let initial_instruction = request_adapter_initial_instruction(&config, &runtime_model).await?;
+    let fatal_errors = Arc::new(Mutex::new(Vec::new()));
     let mut program = RequestAdapterPromptProgram::runtime(
         runtime_lm,
         initial_instruction,
         judge_lm,
         judge_cases,
+        fatal_errors.clone(),
     );
     let result: GEPAResult = gepa
         .compile_with_feedback(&mut program, examples.clone())
         .await
         .context("GEPA request-adapter prompt optimization failed")?;
+    ensure_no_gepa_fatal_errors("GEPA request-adapter prompt optimization", &fatal_errors)?;
 
     if let Some(parent) = config.output_path.parent() {
         tokio::fs::create_dir_all(parent)
@@ -990,6 +1008,9 @@ pub async fn optimize_request_adapter_prompt(
     }
     let artifact_type = "request_adapter_instruction".to_string();
     let best_instruction = result.best_candidate.instruction.clone();
+    if best_instruction.trim().is_empty() {
+        anyhow::bail!("GEPA request-adapter optimization produced an empty best instruction; refusing to write an unusable artifact");
+    }
     let report = GepaOptimizationReport {
         artifact_id: config.artifact_id.clone().unwrap_or_else(|| {
             default_request_adapter_artifact_id(
@@ -1299,28 +1320,65 @@ async fn call_gepa_judge(
     let response = match judge_lm.call(chat, Vec::new()).await {
         Ok(response) => response.output.content(),
         Err(error) => {
-            return FeedbackMetric::new(0.0, format!("LLM judge call failed: {error}"));
+            let message = format!("LLM judge call failed: {error}");
+            return fatal_gepa_feedback(message);
         }
     };
     let Some(value) = extract_json_object(&response) else {
-        return FeedbackMetric::new(
-            0.0,
-            format!(
-                "LLM judge returned non-JSON output: {}",
-                truncate_for_feedback(&response)
-            ),
+        let message = format!(
+            "LLM judge returned non-JSON output: {}",
+            truncate_for_feedback(&response)
         );
+        return fatal_gepa_feedback(message);
     };
     let decision = match serde_json::from_value::<GepaJudgeDecision>(value) {
         Ok(decision) => decision,
         Err(error) => {
-            return FeedbackMetric::new(0.0, format!("LLM judge JSON was invalid: {error}"));
+            return fatal_gepa_feedback(format!("LLM judge JSON was invalid: {error}"));
         }
     };
     FeedbackMetric::new(
         decision.score.clamp(0.0, 1.0),
         sanitize_gepa_judge_feedback(&decision.feedback),
     )
+}
+
+fn fatal_gepa_feedback(message: String) -> FeedbackMetric {
+    FeedbackMetric::with_metadata(
+        0.0,
+        message.clone(),
+        HashMap::from([("fatal_error".to_string(), Value::String(message))]),
+    )
+}
+
+fn record_gepa_fatal_feedback(errors: &GepaFatalErrors, feedback: &FeedbackMetric) {
+    let Some(message) = feedback.metadata.get("fatal_error").and_then(Value::as_str) else {
+        return;
+    };
+    if let Ok(mut errors) = errors.lock() {
+        errors.push(message.to_string());
+    }
+}
+
+fn ensure_no_gepa_fatal_errors(layer: &str, errors: &GepaFatalErrors) -> Result<()> {
+    let errors = errors
+        .lock()
+        .map(|errors| errors.clone())
+        .unwrap_or_else(|poisoned| poisoned.into_inner().clone());
+    if errors.is_empty() {
+        return Ok(());
+    }
+
+    let mut details = errors
+        .iter()
+        .take(3)
+        .map(|error| format!("- {}", truncate_for_feedback(error)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if errors.len() > 3 {
+        details.push_str(&format!("\n- ... {} more", errors.len() - 3));
+    }
+    anyhow::bail!("{layer} encountered fatal rollout infrastructure errors:\n{details}");
 }
 
 fn request_adapter_judge_system_prompt() -> &'static str {
@@ -1352,6 +1410,20 @@ fn sanitize_gepa_judge_feedback(feedback: &str) -> String {
         .replace("eval", "review")
         .replace("answer key", "hidden label");
     truncate_for_feedback(&sanitized)
+}
+
+fn log_gepa_debug(layer: &str, case_id: &str, predicted: &Value, feedback: &FeedbackMetric) {
+    if std::env::var_os("MCP_GEPA_DEBUG").is_none() {
+        return;
+    }
+    let predicted =
+        serde_json::to_string(predicted).unwrap_or_else(|_| "<unserializable>".to_string());
+    eprintln!(
+        "GEPA_DEBUG layer={layer} case_id={case_id} score={:.3} feedback={} predicted={}",
+        feedback.score,
+        truncate_for_feedback(&feedback.feedback),
+        truncate_for_feedback(&predicted)
+    );
 }
 
 fn truncate_for_feedback(value: &str) -> String {
@@ -1956,6 +2028,35 @@ mod tests {
                 .expect("instruction parsed"),
             "keep [[ ## content ## ]] literal"
         );
+    }
+
+    #[test]
+    fn gepa_fatal_feedback_aborts_artifact_flow() {
+        let errors = Arc::new(Mutex::new(Vec::new()));
+        let feedback =
+            fatal_gepa_feedback("LLM judge call failed: network unavailable".to_string());
+
+        record_gepa_fatal_feedback(&errors, &feedback);
+
+        let error = ensure_no_gepa_fatal_errors("GEPA test run", &errors)
+            .expect_err("fatal feedback must abort");
+        assert!(error
+            .to_string()
+            .contains("GEPA test run encountered fatal rollout infrastructure errors"));
+        assert!(error
+            .to_string()
+            .contains("LLM judge call failed: network unavailable"));
+    }
+
+    #[test]
+    fn gepa_nonfatal_feedback_does_not_abort_artifact_flow() {
+        let errors = Arc::new(Mutex::new(Vec::new()));
+        let feedback = FeedbackMetric::new(0.0, "model produced an empty assistant turn");
+
+        record_gepa_fatal_feedback(&errors, &feedback);
+
+        ensure_no_gepa_fatal_errors("GEPA test run", &errors)
+            .expect("scoreable model failures should not abort as infrastructure errors");
     }
 
     #[test]

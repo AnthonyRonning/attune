@@ -317,6 +317,14 @@ enum TraceHarnessCommand {
         model: Option<String>,
         #[arg(long, default_value_t = 24)]
         limit: usize,
+        #[arg(long, default_value_t = 180)]
+        request_timeout_seconds: u64,
+        #[arg(long, default_value_t = 3)]
+        retries: usize,
+        #[arg(long, default_value_t = 1000)]
+        retry_backoff_ms: u64,
+        #[arg(long, default_value_t = 1)]
+        parallel: usize,
         #[arg(long = "provider-order", value_delimiter = ',')]
         provider_order: Vec<String>,
         #[arg(long = "provider-only", value_delimiter = ',')]
@@ -341,6 +349,14 @@ enum TraceHarnessCommand {
         model: Option<String>,
         #[arg(long, default_value_t = 24)]
         limit: usize,
+        #[arg(long, default_value_t = 180)]
+        request_timeout_seconds: u64,
+        #[arg(long, default_value_t = 3)]
+        retries: usize,
+        #[arg(long, default_value_t = 1000)]
+        retry_backoff_ms: u64,
+        #[arg(long, default_value_t = 1)]
+        parallel: usize,
         #[arg(long = "provider-order", value_delimiter = ',')]
         provider_order: Vec<String>,
         #[arg(long = "provider-only", value_delimiter = ',')]
@@ -714,6 +730,10 @@ async fn main() -> anyhow::Result<()> {
                 proxy_url,
                 model,
                 limit,
+                request_timeout_seconds,
+                retries,
+                retry_backoff_ms,
+                parallel,
                 provider_order,
                 provider_only,
                 provider_ignore,
@@ -728,6 +748,10 @@ async fn main() -> anyhow::Result<()> {
                     proxy_url,
                     model,
                     limit,
+                    request_timeout_seconds,
+                    retries,
+                    retry_backoff_ms,
+                    parallel,
                     provider: provider_routing_from_flags(
                         provider_order,
                         provider_only,
@@ -748,6 +772,10 @@ async fn main() -> anyhow::Result<()> {
                 baseline_base_url,
                 model,
                 limit,
+                request_timeout_seconds,
+                retries,
+                retry_backoff_ms,
+                parallel,
                 provider_order,
                 provider_only,
                 provider_ignore,
@@ -763,6 +791,10 @@ async fn main() -> anyhow::Result<()> {
                     baseline_base_url,
                     model,
                     limit,
+                    request_timeout_seconds,
+                    retries,
+                    retry_backoff_ms,
+                    parallel,
                     provider: provider_routing_from_flags(
                         provider_order,
                         provider_only,

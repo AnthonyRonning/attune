@@ -382,13 +382,17 @@ nix develop --command cargo run -- \
   --output-path eval/trace-harness/results/qwen-pi-compare.local.json \
   --model qwen/qwen3.5-9b \
   --provider-ignore venice \
-  --limit 25
+  --limit 25 \
+  --parallel 4 \
+  --request-timeout-seconds 180 \
+  --retries 3
 ```
 
 The comparison report counts baseline failures, proxy failures, cases the proxy
 fixed, cases the proxy regressed, failure categories, repair actions, and
-correction-agent usage. It still scores structural usability, not whether the
-model made the smartest engineering choice.
+correction-agent usage. It also records retry attempts and rate-limit headers
+when providers return them. It still scores structural usability, not whether
+the model made the smartest engineering choice.
 
 Trace-harness scenarios preserve the source conversation prefix and tool definitions, then ask the live proxy/model for the next assistant turn. They do not execute source harness tools and they do not grade whether the model made the best engineering choice. They only check whether the final proxy response stays structurally usable for an OpenAI-compatible agent loop. See [`eval/trace-harness/README.md`](eval/trace-harness/README.md).
 
@@ -578,6 +582,8 @@ This loads dataset rows as typed DSRs examples, runs GEPA against the correction
 Both GEPA commands expose `--lm-max-tokens`, defaulting to `100000`. This is separate from the live proxy request path: client `max_tokens` values are still passed through only when provided. The GEPA runner sets a high optimizer token budget because `dspy-rs` sends an explicit `max_tokens` value for its own optimizer, reflection, and target-model calls, and truncated optimizer instructions are not useful artifacts.
 
 Request-adapter GEPA uses a local JSON adapter for GEPA's own reflection/proposal calls instead of the default DSRs chat adapter. The runtime candidate still renders through the selected proxy `dsrs_history_format`; the JSON adapter only prevents GEPA's outer meta-parser from truncating optimized instructions that legitimately contain literal `[[ ## content ## ]]`, `[[ ## tool_calls ## ]]`, or `[[ ## completed ## ]]` text.
+
+GEPA treats infrastructure failures as fatal. Target-model HTTP errors, judge HTTP errors, invalid judge JSON, and non-JSON judge responses abort the run instead of becoming `0.0` score examples. The optimizer also refuses to write an artifact when the selected instruction is empty. Set `MCP_GEPA_DEBUG=1` to print per-case rollout scores, judge feedback, and parsed predictions while debugging a run.
 
 GEPA labels are kept out of the reflected `Example` payload. The optimizer sees the real request, prediction, parser events, LLM-judge score, and generalized judge feedback; hidden labels such as `expected_output` and `expected_repair` stay in a side table available to the Sonnet judge only. Deterministic parser/scoring signals may be passed to the judge as context, but they are not the final GEPA judge.
 
