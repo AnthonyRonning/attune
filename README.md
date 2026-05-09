@@ -325,7 +325,7 @@ Run any command through Nix as `nix develop --command cargo run -- <command> ...
 | `promote-default-artifact` | Deliberately promote a reviewed GEPA artifact into `profiles/builtin-defaults.toml` so it is embedded into shipped binaries. |
 | `trace-harness` | Import third-party harness traces into neutral scenarios, inspect them, and run sampled live structural checks through the proxy. |
 
-The `trace-harness` subcommands currently include `import-pi`, `import-hermes-rows`, `inspect`, and `run`. Use `import-*` commands to build local scenario JSONL from downloaded datasets, `inspect` to review the scenario shape before spending API calls, and `run` to sample live proxy/model behavior.
+The `trace-harness` subcommands currently include `import-pi`, `import-hermes-rows`, `inspect`, `run`, and `compare`. Use `import-*` commands to build local scenario JSONL from downloaded datasets, `inspect` to review the scenario shape before spending API calls, `run` to sample live proxy/model behavior, and `compare` to run the same scenarios against direct upstream baseline and the proxy.
 
 The normal reliability loop is:
 
@@ -372,6 +372,23 @@ Use `--provider-order`, `--provider-only`, `--provider-ignore`,
 provider behavior without changing the source scenarios. Normal proxy requests
 can also pass an OpenRouter-compatible `provider` object directly; profile-level
 provider routing is only injected when the caller did not send one.
+
+For direct baseline versus proxy comparisons, use `trace-harness compare`:
+
+```sh
+nix develop --command cargo run -- \
+  trace-harness compare \
+  --scenarios-path eval/trace-harness/scenarios/pi-mono.local.jsonl \
+  --output-path eval/trace-harness/results/qwen-pi-compare.local.json \
+  --model qwen/qwen3.5-9b \
+  --provider-ignore venice \
+  --limit 25
+```
+
+The comparison report counts baseline failures, proxy failures, cases the proxy
+fixed, cases the proxy regressed, failure categories, repair actions, and
+correction-agent usage. It still scores structural usability, not whether the
+model made the smartest engineering choice.
 
 Trace-harness scenarios preserve the source conversation prefix and tool definitions, then ask the live proxy/model for the next assistant turn. They do not execute source harness tools and they do not grade whether the model made the best engineering choice. They only check whether the final proxy response stays structurally usable for an OpenAI-compatible agent loop. See [`eval/trace-harness/README.md`](eval/trace-harness/README.md).
 

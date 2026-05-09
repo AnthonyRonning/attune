@@ -106,6 +106,28 @@ Use `--provider-order deepinfra/bf16`, `--provider-order together`,
 `--require-provider-parameters` to isolate provider behavior. The trace harness
 override is explicit and does not edit the scenario file.
 
+## Compare Direct Baseline Against Proxy
+
+`trace-harness compare` runs each scenario twice: once directly against the
+OpenAI-compatible upstream with native tools, and once through the proxy. This
+is the main release-quality baseline check because it shows where the proxy
+fixes direct provider/tool-template failures and where it regresses a direct
+success.
+
+```bash
+cargo run -- \
+  trace-harness compare \
+  --scenarios-path eval/trace-harness/scenarios/pi-hermes-100.local.jsonl \
+  --output-path eval/trace-harness/results/qwen-ignore-venice-pi-hermes-25.compare.local.json \
+  --model qwen/qwen3.5-9b \
+  --provider-ignore venice \
+  --limit 25
+```
+
+The report includes direct/proxy pass counts, `proxy_fixed_baseline_failure`,
+`proxy_regressed_baseline_success`, failure categories, latency, and proxy
+repair/correction usage when the proxy is started in-process.
+
 The report checks structural invariants:
 
 - final response parses as OpenAI-compatible JSON

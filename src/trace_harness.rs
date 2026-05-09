@@ -5,6 +5,7 @@ use std::{
     io::Write,
     net::SocketAddr,
     path::{Path, PathBuf},
+    time::Instant,
 };
 
 use anyhow::{anyhow, Context, Result};
@@ -20,6 +21,7 @@ use crate::{
     model_profile::ProviderRouting,
     openai::{ChatCompletionRequest, ChatMessage, OpenAiFunctionTool, OpenAiTool, OpenAiToolCall},
     repair::is_unrecovered_fallback_content,
+    trace::read_trace_records,
 };
 
 #[derive(Debug, Clone)]
@@ -39,6 +41,18 @@ pub struct TraceHarnessRunConfig {
     pub scenarios_path: PathBuf,
     pub output_path: PathBuf,
     pub proxy_url: Option<String>,
+    pub model: Option<String>,
+    pub limit: usize,
+    pub provider: Option<ProviderRouting>,
+    pub proxy_config: ProxyConfig,
+}
+
+#[derive(Debug, Clone)]
+pub struct TraceHarnessCompareConfig {
+    pub scenarios_path: PathBuf,
+    pub output_path: PathBuf,
+    pub proxy_url: Option<String>,
+    pub baseline_base_url: Option<String>,
     pub model: Option<String>,
     pub limit: usize,
     pub provider: Option<ProviderRouting>,
@@ -97,6 +111,74 @@ pub struct TraceHarnessCaseReport {
     pub final_content_len: usize,
     pub final_content_preview: Option<String>,
     pub final_tool_calls: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TraceHarnessCompareReport {
+    pub scenarios_path: PathBuf,
+    pub output_path: PathBuf,
+    pub baseline_url: String,
+    pub proxy_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_trace_path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_correction_trace_path: Option<PathBuf>,
+    pub model: Option<String>,
+    pub total: usize,
+    pub baseline_passed: usize,
+    pub baseline_failed: usize,
+    pub proxy_passed: usize,
+    pub proxy_failed: usize,
+    pub both_passed: usize,
+    pub both_failed: usize,
+    pub proxy_fixed_baseline_failure: usize,
+    pub proxy_regressed_baseline_success: usize,
+    pub warnings: usize,
+    pub baseline_failure_categories: BTreeMap<String, usize>,
+    pub proxy_failure_categories: BTreeMap<String, usize>,
+    pub proxy_repair_actions: BTreeMap<String, usize>,
+    pub proxy_correction_attempts: usize,
+    pub cases: Vec<TraceHarnessCompareCaseReport>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TraceHarnessCompareCaseReport {
+    pub scenario_id: String,
+    pub dataset: String,
+    pub source_id: String,
+    pub turn_index: usize,
+    pub model: String,
+    pub outcome: String,
+    pub baseline: TraceHarnessEndpointReport,
+    pub proxy: TraceHarnessEndpointReport,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_trace_id: Option<String>,
+    #[serde(default)]
+    pub proxy_repair_actions: Vec<String>,
+    #[serde(default)]
+    pub proxy_policy_decisions: Vec<String>,
+    #[serde(default)]
+    pub proxy_correction_attempts: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TraceHarnessEndpointReport {
+    pub passed: bool,
+    pub failures: Vec<String>,
+    pub warnings: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_status: Option<u16>,
+    pub elapsed_ms: u128,
+    pub final_content_len: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_content_preview: Option<String>,
+    pub final_tool_calls: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finish_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_response_preview: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 pub async fn import_pi_trace_scenarios(
@@ -181,6 +263,94 @@ pub async fn run_trace_harness(config: TraceHarnessRunConfig) -> Result<TraceHar
         warnings,
         cases,
     };
+    write_json_pretty(&config.output_path, &report).await?;
+    Ok(report)
+}
+
+pub async fn run_trace_harness_compare(
+    config: TraceHarnessCompareConfig,
+) -> Result<TraceHarnessCompareReport> {
+    let scenarios = read_scenarios(&config.scenarios_path).await?;
+    let api_key = live_api_key(&config.proxy_config).ok_or_else(|| {
+        anyhow!("OPENROUTER_API_KEY or MCP_UPSTREAM_API_KEY is required for live compare runs")
+    })?;
+    let baseline_base_url = config
+        .baseline_base_url
+        .clone()
+        .unwrap_or_else(|| config.proxy_config.upstream.base_url.clone());
+    let baseline_url = endpoint_url(&baseline_base_url, "chat/completions");
+    let (proxy_trace_path, proxy_correction_trace_path) =
+        trace_paths_for_output(&config.output_path);
+    let (proxy_url, server_handle, trace_paths) = if let Some(url) = config.proxy_url.clone() {
+        (url.trim_end_matches('/').to_string(), None, None)
+    } else {
+        let (url, handle) = start_proxy(config.proxy_config.clone(), &config.output_path).await?;
+        (
+            url,
+            handle,
+            Some((
+                proxy_trace_path.clone(),
+                proxy_correction_trace_path.clone(),
+            )),
+        )
+    };
+    let proxy_chat_url = format!("{}/v1/chat/completions", proxy_url.trim_end_matches('/'));
+
+    let client = reqwest::Client::new();
+    let mut cases = Vec::new();
+    for scenario in scenarios.into_iter().take(config.limit) {
+        let mut request = scenario.request.clone();
+        if let Some(model) = &config.model {
+            request.model = model.clone();
+        }
+        if let Some(provider) = &config.provider {
+            if !provider.is_empty() {
+                request
+                    .extra
+                    .insert("provider".to_string(), serde_json::to_value(provider)?);
+            }
+        }
+        request.stream = Some(false);
+
+        let baseline =
+            call_chat_endpoint(&client, &baseline_url, &request, Some(&api_key), "baseline").await;
+        let proxy =
+            call_chat_endpoint(&client, &proxy_chat_url, &request, Some(&api_key), "proxy").await;
+        let outcome = compare_outcome(baseline.passed, proxy.passed).to_string();
+
+        cases.push(TraceHarnessCompareCaseReport {
+            scenario_id: scenario.id,
+            dataset: scenario.dataset,
+            source_id: scenario.source_id,
+            turn_index: scenario.turn_index,
+            model: request.model,
+            outcome,
+            baseline,
+            proxy,
+            proxy_trace_id: None,
+            proxy_repair_actions: Vec::new(),
+            proxy_policy_decisions: Vec::new(),
+            proxy_correction_attempts: Vec::new(),
+        });
+    }
+
+    if let Some(handle) = server_handle {
+        handle.abort();
+    }
+
+    if let Some((trace_path, _)) = &trace_paths {
+        enrich_compare_cases_with_proxy_traces(&mut cases, trace_path).await;
+    }
+
+    let report = build_compare_report(
+        config.scenarios_path,
+        config.output_path.clone(),
+        baseline_url,
+        proxy_url,
+        trace_paths,
+        config.model,
+        cases,
+    );
     write_json_pretty(&config.output_path, &report).await?;
     Ok(report)
 }
@@ -305,6 +475,119 @@ async fn run_one_scenario(
     }
 }
 
+async fn call_chat_endpoint(
+    client: &reqwest::Client,
+    endpoint_url: &str,
+    request: &ChatCompletionRequest,
+    api_key: Option<&str>,
+    label: &str,
+) -> TraceHarnessEndpointReport {
+    let started = Instant::now();
+    let mut builder = client
+        .post(endpoint_url)
+        .header("content-type", "application/json")
+        .header("X-Title", "model-correction-proxy-trace-harness")
+        .json(request);
+    if let Some(api_key) = api_key {
+        builder = builder.bearer_auth(api_key);
+    }
+
+    let response = builder.send().await;
+    let mut report = TraceHarnessEndpointReport {
+        passed: false,
+        failures: Vec::new(),
+        warnings: Vec::new(),
+        http_status: None,
+        elapsed_ms: 0,
+        final_content_len: 0,
+        final_content_preview: None,
+        final_tool_calls: Vec::new(),
+        finish_reason: None,
+        raw_response_preview: None,
+        error: None,
+    };
+
+    match response {
+        Ok(response) => {
+            report.http_status = Some(response.status().as_u16());
+            let status = response.status();
+            match response.text().await {
+                Ok(body) => {
+                    report.raw_response_preview = Some(preview(&body));
+                    if !status.is_success() {
+                        report.failures.push(format!(
+                            "{label} returned HTTP {status}: {}",
+                            preview(&body)
+                        ));
+                    } else {
+                        match serde_json::from_str::<Value>(&body) {
+                            Ok(value) => {
+                                validate_proxy_response(
+                                    request,
+                                    &value,
+                                    &mut report.failures,
+                                    &mut report.warnings,
+                                );
+                                fill_endpoint_response_summary(&mut report, &value);
+                            }
+                            Err(error) => report.failures.push(format!(
+                                "{label} returned invalid JSON: {error}: {}",
+                                preview(&body)
+                            )),
+                        }
+                    }
+                }
+                Err(error) => {
+                    report.error = Some(error.to_string());
+                    report
+                        .failures
+                        .push(format!("failed to read {label} response body: {error}"));
+                }
+            }
+        }
+        Err(error) => {
+            report.error = Some(error.to_string());
+            report
+                .failures
+                .push(format!("{label} request failed: {error}"));
+        }
+    }
+
+    report.elapsed_ms = started.elapsed().as_millis();
+    report.passed = report.failures.is_empty();
+    report
+}
+
+fn fill_endpoint_response_summary(report: &mut TraceHarnessEndpointReport, value: &Value) {
+    report.finish_reason = value
+        .pointer("/choices/0/finish_reason")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    if let Some(content) = value
+        .pointer("/choices/0/message/content")
+        .and_then(Value::as_str)
+    {
+        report.final_content_len = content.len();
+        report.final_content_preview = Some(preview(content));
+    }
+    if let Some(calls) = value
+        .pointer("/choices/0/message/tool_calls")
+        .and_then(Value::as_array)
+    {
+        for call in calls {
+            let name = call
+                .pointer("/function/name")
+                .and_then(Value::as_str)
+                .unwrap_or("<missing>");
+            let args = call
+                .pointer("/function/arguments")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            report.final_tool_calls.push(format!("{name} {args}"));
+        }
+    }
+}
+
 fn validate_proxy_response(
     request: &ChatCompletionRequest,
     response: &Value,
@@ -347,6 +630,16 @@ fn validate_proxy_response(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    if tool_calls.is_empty() && !known_tools.is_empty() {
+        if looks_like_text_tool_call(content_text) {
+            failures.push("assistant emitted tool-like text but no OpenAI tool_calls".to_string());
+        }
+        if looks_like_premature_tool_action(content_text) {
+            failures.push(
+                "assistant appeared to announce a tool/action without a tool call".to_string(),
+            );
+        }
+    }
     let mut seen_calls = BTreeMap::<String, usize>::new();
     for call in tool_calls {
         let name = call.pointer("/function/name").and_then(Value::as_str);
@@ -383,18 +676,205 @@ fn validate_proxy_response(
     }
 }
 
+fn looks_like_text_tool_call(content: &str) -> bool {
+    let lower = content.to_ascii_lowercase();
+    lower.contains("<tool_call")
+        || lower.contains("</tool_call>")
+        || lower.contains("[[ ## tool_calls ## ]]")
+        || lower.contains("[[## tool_calls ##]]")
+        || lower.contains("tool_calls:")
+        || lower.contains("\"tool_calls\"")
+}
+
+fn looks_like_premature_tool_action(content: &str) -> bool {
+    let lower = content
+        .split_whitespace()
+        .take(40)
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase();
+    let starts_like_action = [
+        "let me ",
+        "i'll ",
+        "i will ",
+        "i am going to ",
+        "i'm going to ",
+    ]
+    .iter()
+    .any(|prefix| lower.starts_with(prefix) || lower.contains(&format!(". {prefix}")));
+    if !starts_like_action {
+        return false;
+    }
+    [
+        "read",
+        "check",
+        "inspect",
+        "open",
+        "list",
+        "search",
+        "run",
+        "execute",
+        "call",
+        "use the",
+        "look at",
+        "look into",
+        "continue with",
+        "create",
+        "write",
+        "edit",
+        "modify",
+        "update",
+    ]
+    .iter()
+    .any(|verb| lower.contains(verb))
+}
+
+fn compare_outcome(baseline_passed: bool, proxy_passed: bool) -> &'static str {
+    match (baseline_passed, proxy_passed) {
+        (true, true) => "both_passed",
+        (false, true) => "proxy_fixed_baseline_failure",
+        (true, false) => "proxy_regressed_baseline_success",
+        (false, false) => "both_failed",
+    }
+}
+
+async fn enrich_compare_cases_with_proxy_traces(
+    cases: &mut [TraceHarnessCompareCaseReport],
+    trace_path: &Path,
+) {
+    let Ok(records) = read_trace_records(&trace_path.to_path_buf()).await else {
+        return;
+    };
+    for (case, record) in cases.iter_mut().zip(records.iter()) {
+        case.proxy_trace_id = Some(record.trace_id.clone());
+        case.proxy_repair_actions = record
+            .repair_actions
+            .iter()
+            .map(|action| action.action.clone())
+            .collect();
+        case.proxy_policy_decisions = record
+            .policy_decisions
+            .iter()
+            .map(|decision| format!("{}:{}", decision.stage, decision.decision))
+            .collect();
+        case.proxy_correction_attempts = record
+            .correction_attempts
+            .iter()
+            .map(|attempt| attempt.result.clone())
+            .collect();
+    }
+}
+
+fn build_compare_report(
+    scenarios_path: PathBuf,
+    output_path: PathBuf,
+    baseline_url: String,
+    proxy_url: String,
+    trace_paths: Option<(PathBuf, PathBuf)>,
+    model: Option<String>,
+    cases: Vec<TraceHarnessCompareCaseReport>,
+) -> TraceHarnessCompareReport {
+    let total = cases.len();
+    let baseline_passed = cases.iter().filter(|case| case.baseline.passed).count();
+    let proxy_passed = cases.iter().filter(|case| case.proxy.passed).count();
+    let both_passed = cases
+        .iter()
+        .filter(|case| case.outcome == "both_passed")
+        .count();
+    let both_failed = cases
+        .iter()
+        .filter(|case| case.outcome == "both_failed")
+        .count();
+    let proxy_fixed_baseline_failure = cases
+        .iter()
+        .filter(|case| case.outcome == "proxy_fixed_baseline_failure")
+        .count();
+    let proxy_regressed_baseline_success = cases
+        .iter()
+        .filter(|case| case.outcome == "proxy_regressed_baseline_success")
+        .count();
+    let warnings = cases
+        .iter()
+        .map(|case| case.baseline.warnings.len() + case.proxy.warnings.len())
+        .sum();
+    let mut baseline_failure_categories = BTreeMap::new();
+    let mut proxy_failure_categories = BTreeMap::new();
+    let mut proxy_repair_actions = BTreeMap::new();
+    for case in &cases {
+        for failure in &case.baseline.failures {
+            *baseline_failure_categories
+                .entry(failure_category(failure))
+                .or_default() += 1;
+        }
+        for failure in &case.proxy.failures {
+            *proxy_failure_categories
+                .entry(failure_category(failure))
+                .or_default() += 1;
+        }
+        for action in &case.proxy_repair_actions {
+            *proxy_repair_actions.entry(action.clone()).or_default() += 1;
+        }
+    }
+    let proxy_correction_attempts = cases
+        .iter()
+        .map(|case| case.proxy_correction_attempts.len())
+        .sum();
+    TraceHarnessCompareReport {
+        scenarios_path,
+        output_path,
+        baseline_url,
+        proxy_url,
+        proxy_trace_path: trace_paths.as_ref().map(|paths| paths.0.clone()),
+        proxy_correction_trace_path: trace_paths.as_ref().map(|paths| paths.1.clone()),
+        model,
+        total,
+        baseline_passed,
+        baseline_failed: total.saturating_sub(baseline_passed),
+        proxy_passed,
+        proxy_failed: total.saturating_sub(proxy_passed),
+        both_passed,
+        both_failed,
+        proxy_fixed_baseline_failure,
+        proxy_regressed_baseline_success,
+        warnings,
+        baseline_failure_categories,
+        proxy_failure_categories,
+        proxy_repair_actions,
+        proxy_correction_attempts,
+        cases,
+    }
+}
+
+fn failure_category(failure: &str) -> String {
+    let lower = failure.to_ascii_lowercase();
+    if lower.contains("tool-like text") {
+        "tool_like_text_without_openai_tool_calls".to_string()
+    } else if lower.contains("announce a tool/action") {
+        "premature_tool_action_without_tool_call".to_string()
+    } else if lower.contains("empty content and no tool calls") {
+        "empty_content_empty_tool_calls".to_string()
+    } else if lower.contains("unrecovered fallback") {
+        "unrecovered_proxy_fallback".to_string()
+    } else if lower.contains("unknown tool") {
+        "unknown_tool_name".to_string()
+    } else if lower.contains("not valid json") {
+        "invalid_json".to_string()
+    } else if lower.contains("not a json object") {
+        "tool_arguments_not_object".to_string()
+    } else if lower.contains("dsrs") {
+        "dsrs_leak_or_contract_violation".to_string()
+    } else if lower.contains("http") {
+        "http_error".to_string()
+    } else {
+        "other".to_string()
+    }
+}
+
 async fn start_proxy(
     mut config: ProxyConfig,
     output_path: &Path,
 ) -> Result<(String, Option<JoinHandle<()>>)> {
-    config.upstream.api_key = config
-        .upstream
-        .api_key
-        .clone()
-        .or_else(|| env_key("OPENROUTER_API_KEY"))
-        .or_else(|| read_env_key("OPENROUTER_API_KEY"))
-        .or_else(|| env_key("MCP_UPSTREAM_API_KEY"))
-        .or_else(|| read_env_key("MCP_UPSTREAM_API_KEY"));
+    config.upstream.api_key = live_api_key(&config);
     if config.upstream.api_key.is_none() {
         return Err(anyhow!(
             "OPENROUTER_API_KEY or MCP_UPSTREAM_API_KEY is required for in-process live proxy runs"
@@ -403,14 +883,11 @@ async fn start_proxy(
     if config.upstream.base_url.trim().is_empty() {
         config.upstream.base_url = "https://openrouter.ai/api/v1".to_string();
     }
-    let stem = output_path
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or("trace-harness-run");
+    let (trace_path, correction_path) = trace_paths_for_output(output_path);
     let parent = output_path.parent().unwrap_or_else(|| Path::new("."));
     tokio::fs::create_dir_all(parent).await?;
-    config.trace.path = parent.join(format!("{stem}-proxy-traces.local.jsonl"));
-    config.trace.correction_path = parent.join(format!("{stem}-corrections.local.jsonl"));
+    config.trace.path = trace_path;
+    config.trace.correction_path = correction_path;
 
     let gateway = Gateway::new(config)?;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
@@ -422,6 +899,37 @@ async fn start_proxy(
         }
     });
     Ok((format!("http://{addr}"), Some(handle)))
+}
+
+fn trace_paths_for_output(output_path: &Path) -> (PathBuf, PathBuf) {
+    let stem = output_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("trace-harness-run");
+    let parent = output_path.parent().unwrap_or_else(|| Path::new("."));
+    (
+        parent.join(format!("{stem}-proxy-traces.local.jsonl")),
+        parent.join(format!("{stem}-corrections.local.jsonl")),
+    )
+}
+
+fn endpoint_url(base_url: &str, endpoint: &str) -> String {
+    format!(
+        "{}/{}",
+        base_url.trim_end_matches('/'),
+        endpoint.trim_start_matches('/')
+    )
+}
+
+fn live_api_key(config: &ProxyConfig) -> Option<String> {
+    config
+        .upstream
+        .api_key
+        .clone()
+        .or_else(|| env_key("OPENROUTER_API_KEY"))
+        .or_else(|| read_env_key("OPENROUTER_API_KEY"))
+        .or_else(|| env_key("MCP_UPSTREAM_API_KEY"))
+        .or_else(|| read_env_key("MCP_UPSTREAM_API_KEY"))
 }
 
 fn pi_scenarios_from_jsonl(
@@ -1183,6 +1691,109 @@ mod tests {
             .iter()
             .any(|failure| failure.contains("unrecovered fallback")));
         assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn validate_proxy_response_fails_tool_like_text_without_tool_calls() {
+        let request = ChatCompletionRequest {
+            model: "test/model".to_string(),
+            messages: vec![ChatMessage::new("user", "Read README.md")],
+            tools: Some(vec![OpenAiTool {
+                tool_type: "function".to_string(),
+                function: OpenAiFunctionTool {
+                    name: "read_file".to_string(),
+                    description: None,
+                    parameters: json!({
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                        "required": ["path"]
+                    }),
+                },
+            }]),
+            tool_choice: None,
+            parallel_tool_calls: None,
+            stream: None,
+            temperature: None,
+            top_p: None,
+            max_tokens: None,
+            max_completion_tokens: None,
+            response_format: None,
+            extra: Map::new(),
+        };
+        let response = json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "<tool_call name=\"read_file\">{\"path\":\"README.md\"}</tool_call>"
+                }
+            }]
+        });
+        let mut failures = Vec::new();
+        let mut warnings = Vec::new();
+
+        validate_proxy_response(&request, &response, &mut failures, &mut warnings);
+
+        assert!(failures
+            .iter()
+            .any(|failure| failure.contains("tool-like text")));
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn validate_proxy_response_fails_announced_tool_action_without_tool_call() {
+        let request = ChatCompletionRequest {
+            model: "test/model".to_string(),
+            messages: vec![ChatMessage::new("user", "Read README.md")],
+            tools: Some(vec![OpenAiTool {
+                tool_type: "function".to_string(),
+                function: OpenAiFunctionTool {
+                    name: "read_file".to_string(),
+                    description: None,
+                    parameters: json!({
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                        "required": ["path"]
+                    }),
+                },
+            }]),
+            tool_choice: None,
+            parallel_tool_calls: None,
+            stream: None,
+            temperature: None,
+            top_p: None,
+            max_tokens: None,
+            max_completion_tokens: None,
+            response_format: None,
+            extra: Map::new(),
+        };
+        let response = json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "Let me read the README first."
+                }
+            }]
+        });
+        let mut failures = Vec::new();
+        let mut warnings = Vec::new();
+
+        validate_proxy_response(&request, &response, &mut failures, &mut warnings);
+
+        assert!(failures
+            .iter()
+            .any(|failure| failure.contains("announce a tool/action")));
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn compare_outcome_classifies_baseline_vs_proxy() {
+        assert_eq!(compare_outcome(true, true), "both_passed");
+        assert_eq!(compare_outcome(false, true), "proxy_fixed_baseline_failure");
+        assert_eq!(
+            compare_outcome(true, false),
+            "proxy_regressed_baseline_success"
+        );
+        assert_eq!(compare_outcome(false, false), "both_failed");
     }
 
     #[test]

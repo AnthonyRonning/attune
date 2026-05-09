@@ -222,6 +222,7 @@ pub async fn export_dataset_file(config: DatasetExportConfig) -> Result<DatasetE
         file.write_all(&line).await?;
         rows_written += 1;
     }
+    file.flush().await?;
 
     Ok(DatasetExportReport {
         traces_seen: records.len(),
@@ -272,6 +273,7 @@ pub async fn export_request_adapter_dataset_file(
         file.write_all(&line).await?;
         rows_written += 1;
     }
+    file.flush().await?;
 
     Ok(RequestAdapterDatasetExportReport {
         traces_seen: records.len(),

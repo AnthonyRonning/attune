@@ -23,7 +23,8 @@ use model_correction_proxy::{
     trace::{read_trace_records, trace_summaries, TraceSummary},
     trace_harness::{
         import_hermes_rows_scenarios, import_pi_trace_scenarios, inspect_trace_harness_scenarios,
-        run_trace_harness, TraceHarnessImportConfig, TraceHarnessRunConfig,
+        run_trace_harness, run_trace_harness_compare, TraceHarnessCompareConfig,
+        TraceHarnessImportConfig, TraceHarnessRunConfig,
     },
 };
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
@@ -312,6 +313,30 @@ enum TraceHarnessCommand {
         output_path: String,
         #[arg(long)]
         proxy_url: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long, default_value_t = 24)]
+        limit: usize,
+        #[arg(long = "provider-order", value_delimiter = ',')]
+        provider_order: Vec<String>,
+        #[arg(long = "provider-only", value_delimiter = ',')]
+        provider_only: Vec<String>,
+        #[arg(long = "provider-ignore", value_delimiter = ',')]
+        provider_ignore: Vec<String>,
+        #[arg(long)]
+        disable_provider_fallbacks: bool,
+        #[arg(long)]
+        require_provider_parameters: bool,
+    },
+    Compare {
+        #[arg(long)]
+        scenarios_path: String,
+        #[arg(long, default_value = "eval/trace-harness/results/compare.local.json")]
+        output_path: String,
+        #[arg(long)]
+        proxy_url: Option<String>,
+        #[arg(long)]
+        baseline_base_url: Option<String>,
         #[arg(long)]
         model: Option<String>,
         #[arg(long, default_value_t = 24)]
@@ -701,6 +726,41 @@ async fn main() -> anyhow::Result<()> {
                     scenarios_path: scenarios_path.into(),
                     output_path: output_path.into(),
                     proxy_url,
+                    model,
+                    limit,
+                    provider: provider_routing_from_flags(
+                        provider_order,
+                        provider_only,
+                        provider_ignore,
+                        disable_provider_fallbacks,
+                        require_provider_parameters,
+                    ),
+                    proxy_config,
+                })
+                .await?;
+                println!("{}", serde_json::to_string_pretty(&report)?);
+                Ok(())
+            }
+            TraceHarnessCommand::Compare {
+                scenarios_path,
+                output_path,
+                proxy_url,
+                baseline_base_url,
+                model,
+                limit,
+                provider_order,
+                provider_only,
+                provider_ignore,
+                disable_provider_fallbacks,
+                require_provider_parameters,
+            } => {
+                let proxy_config =
+                    ProxyConfig::from_optional_path(runtime_config_path.as_deref()).await?;
+                let report = run_trace_harness_compare(TraceHarnessCompareConfig {
+                    scenarios_path: scenarios_path.into(),
+                    output_path: output_path.into(),
+                    proxy_url,
+                    baseline_base_url,
                     model,
                     limit,
                     provider: provider_routing_from_flags(

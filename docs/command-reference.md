@@ -408,6 +408,36 @@ nix develop --command cargo run -- \
   --limit 100
 ```
 
+Compare direct upstream baseline against the proxy on a smaller smoke set:
+
+```sh
+export OPENROUTER_API_KEY="..."
+
+nix develop --command cargo run -- \
+  trace-harness compare \
+  --scenarios-path eval/trace-harness/scenarios/pi-hermes-100.local.jsonl \
+  --output-path eval/trace-harness/results/qwen-ignore-venice-pi-hermes-25.compare.local.json \
+  --model qwen/qwen3.5-9b \
+  --provider-ignore venice \
+  --limit 25
+```
+
+The compare report records:
+
+- direct baseline structural pass/fail
+- proxy structural pass/fail
+- `proxy_fixed_baseline_failure`
+- `proxy_regressed_baseline_success`
+- `both_passed` / `both_failed`
+- categorized failures, such as tool-like text without OpenAI `tool_calls`
+- proxy repair actions and correction-agent attempts when the proxy is started
+  in-process
+- latency for each endpoint call
+
+Use `--baseline-base-url` to compare against another OpenAI-compatible target
+endpoint. Use `--proxy-url` when you already have a proxy process running and do
+not want the harness to start one in-process.
+
 If you already have a proxy running externally, pass `--proxy-url` to avoid the
 in-process proxy:
 
@@ -477,4 +507,3 @@ nix develop --command cargo test --all-targets --all-features
 
 Use the serial test command when validating a branch before a commit. The normal
 parallel run is still useful for catching order-dependent test flakes.
-
