@@ -8,6 +8,9 @@ defaults layer is the final promotion step for artifacts that should work even
 when someone installs or ships `model-correction-proxy` as a standalone binary
 with no local `datasets/` directory.
 
+For the runtime config schema that can override these built-ins, see
+[`../docs/config-reference.md`](../docs/config-reference.md).
+
 ## Promotion Ladder
 
 1. Run GEPA and write an experiment artifact under `datasets/`.
@@ -45,6 +48,21 @@ Profile entries can set:
 The build script embeds the referenced artifact contents with `include_str!`.
 At runtime, built-in profiles expose artifact references as `builtin:<artifact-id>`
 in traces and profile metadata.
+
+## Current Shipped Defaults
+
+| Profile | Active history format | Active artifact | Revision |
+| --- | --- | --- | ---: |
+| `qwen-dsrs` | `regenerated_context` | `request-adapter/qwen-dsrs/sonnet-fresh-r1-regenerated-context` | 3 |
+| `gemma-dsrs-conservative` | `append_only` | `request-adapter/gemma-dsrs-conservative/sonnet-fresh-r1-append-only` | 7 |
+
+The fresh Sonnet-judged append-only Qwen artifact and regenerated-context Gemma
+artifact are also embedded as reviewed alternates, but they are not active
+profile defaults. The older Gemma r4 artifact remains embedded for provenance.
+
+Runtime config files still match before these built-ins. For example,
+`configs/gemma-dsrs-conservative.toml` is a filesystem-artifact override that
+points at the same reviewed Gemma instruction as the embedded default.
 
 ## Commands
 

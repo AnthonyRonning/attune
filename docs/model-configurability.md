@@ -2,6 +2,11 @@
 
 This document describes how the proxy should evolve from today's code-level model profiles into a durable configuration layer for model-specific behavior.
 
+For the implemented runtime configuration fields, defaults, precedence rules,
+and examples, see [`config-reference.md`](config-reference.md). This document is
+the architecture/status companion: it explains why those fields exist and where
+the profile system should go next.
+
 The goal is not just "load settings from a file." The goal is to make every model-specific behavior explicit, versioned, testable, traceable, and optimizable while keeping shared parsing and repair logic reusable.
 
 ## Why this matters
@@ -471,7 +476,7 @@ Status: partially implemented. Eval reports now include model/profile/revision/a
 
 After correction-agent artifact loading works, add artifact loading for request-adapter profile guidance. Keep the DSRs signature stable, and let artifacts tune wording, examples, and profile guidance.
 
-Status: artifact loading is implemented through `request_adapter_artifact`. A dedicated request-adapter GEPA optimizer is now available through `optimize-request-adapter-prompt`; it evaluates candidate profile guidance by rendering the real runtime DSRs request format selected by `--dsrs-history-format`. `export-request-adapter-dataset` converts trace IDs into trace-faithful request-adapter rows with explicit labels. The current Gemma dataset combines hand-labeled rows, exact trace exports, and curated trace-harness examples; Qwen has its first curated trace-harness dataset for future model-specific GEPA runs. Separate append-only and regenerated-context GEPA artifacts can be generated for comparison, and `--seed-artifact` lets each line continue from its previous best reviewed artifact. The reviewed append-only Gemma artifact has been promoted to `configs/gemma-dsrs-conservative.toml`; trial outputs should stay ignored unless promoted.
+Status: artifact loading is implemented through `request_adapter_artifact`. A dedicated request-adapter GEPA optimizer is now available through `optimize-request-adapter-prompt`; it evaluates candidate profile guidance by rendering the real runtime DSRs request format selected by `--dsrs-history-format`. `export-request-adapter-dataset` converts trace IDs into trace-faithful request-adapter rows with explicit labels. The current Gemma dataset combines hand-labeled rows, exact trace exports, and curated trace-harness examples; Qwen has its first curated trace-harness dataset from the Pi/Hermes 100-trace run. Separate append-only and regenerated-context GEPA artifacts can be generated for comparison, and `--seed-artifact` lets each line continue from its previous best reviewed artifact. Fresh Sonnet-judged runs promoted Qwen regenerated-context and Gemma append-only as active embedded built-in defaults, while the alternate history-format artifacts remain checked in for future comparisons. Trial outputs should stay ignored unless promoted.
 
 ### Step 8: Add explicit artifact promotion
 

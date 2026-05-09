@@ -95,7 +95,7 @@ Built-in profiles are selected by model-name substring:
 
 Profiles can be provided in TOML, JSON, or JSON5 through `--config` or `MCP_CONFIG_PATH`. Configured profiles are matched before built-ins, so users can tune or replace a built-in profile without recompiling. Unknown models still fall back to `balanced-default`.
 
-Profiles support revision/source metadata plus request-adapter and correction-agent artifact IDs. When `request_adapter_artifact` or `correction_agent_artifact` points at a JSON GEPA report, text prompt file, or `builtin:<artifact-id>` reference, the proxy loads the instruction and records the artifact IDs in traces. See [`docs/model-configurability.md`](docs/model-configurability.md).
+Profiles support revision/source metadata plus request-adapter and correction-agent artifact IDs. When `request_adapter_artifact` or `correction_agent_artifact` points at a JSON GEPA report, text prompt file, or `builtin:<artifact-id>` reference, the proxy loads the instruction and records the artifact IDs in traces. See [`docs/config-reference.md`](docs/config-reference.md) for the implemented config schema and [`docs/model-configurability.md`](docs/model-configurability.md) for the longer-term architecture.
 
 DSRs profiles also support `dsrs_history_format`. The default is `append_only`, which keeps user turns as chat messages and renders prior assistant turns in the same DSRs `content` / `tool_calls` shape expected for the next answer. The previous single regenerated transcript format is still available as `regenerated_context` for models that perform better with one serialized conversation block.
 
@@ -223,6 +223,37 @@ nix develop --command cargo test --all-targets
 
 Running Cargo outside Nix may require installing a system C toolchain and TLS dependencies manually.
 
+## Quick start
+
+Start with embedded built-in profile defaults:
+
+```sh
+export OPENROUTER_API_KEY="..."
+nix develop --command cargo run --
+```
+
+Then point any OpenAI-compatible client at `http://127.0.0.1:8080/v1`.
+Unknown models fall back to `balanced-default`; known Qwen and Gemma models use
+the current embedded request-adapter defaults.
+
+The most common local workflows are:
+
+| Task | Command |
+| --- | --- |
+| Start the proxy | `nix develop --command cargo run -- serve` |
+| Inspect recent traces | `nix develop --command cargo run -- inspect-traces --limit 20` |
+| Replay traces through current repair code | `nix develop --command cargo run -- replay` |
+| Run unit/e2e tests | `nix develop --command cargo test --all-targets --all-features -- --test-threads=1` |
+| Run third-party trace samples | `nix develop --command cargo run -- trace-harness run ...` |
+| Run request-adapter GEPA | `nix develop --command cargo run -- optimize-request-adapter-prompt ...` |
+| Promote a reviewed artifact | `nix develop --command cargo run -- promote-artifact ...` |
+
+For the full command playbook, including GEPA, promotion, Hugging Face trace
+harness runs, and live OpenRouter smoke tests, see
+[`docs/command-reference.md`](docs/command-reference.md). For the implemented
+runtime config schema and precedence rules, see
+[`docs/config-reference.md`](docs/config-reference.md).
+
 ## Running the proxy
 
 Serve is the default command:
@@ -278,7 +309,7 @@ If no upstream API key is configured, the proxy forwards the inbound `Authorizat
 
 ## Command Reference
 
-Run any command through Nix as `nix develop --command cargo run -- <command> ...`. Use `cargo run -- <command> --help` for the full flag list.
+Run any command through Nix as `nix develop --command cargo run -- <command> ...`. Use `cargo run -- <command> --help` for the full flag list. The reproducible workflow commands we use for traces, GEPA, promotion, live OpenRouter tests, and trace-harness sampling are collected in [`docs/command-reference.md`](docs/command-reference.md).
 
 | Command | Purpose |
 | --- | --- |
@@ -511,6 +542,7 @@ After exporting a dataset, run:
 
 ```sh
 export OPENROUTER_API_KEY="..."
+export ANTHROPIC_API_KEY="..."
 
 nix develop --command cargo run -- \
   optimize-prompts \
@@ -560,7 +592,7 @@ nix develop --command cargo run -- \
   --judge-model anthropic:claude-sonnet-4-6 \
   --target-model google/gemma-4-26b-a4b-it \
   --profile gemma-dsrs-conservative \
-  --profile-revision 3 \
+  --profile-revision 7 \
   --dsrs-history-format append_only \
   --seed-artifact datasets/request-adapter/gemma-dsrs-conservative-sonnet-fresh-r1-append-only-gepa.json \
   --artifact-id request-adapter/gemma-dsrs-conservative/append-only \
@@ -683,6 +715,8 @@ nix flake check
 ├── brainstorming-guidelines.md
 ├── intent.md
 ├── docs/
+│   ├── command-reference.md
+│   ├── config-reference.md
 │   └── model-configurability.md
 ├── profiles/
 │   ├── README.md
@@ -776,7 +810,7 @@ Prefer regression cases based on real traces. A good case should include:
 - Upstream token streaming is not implemented. Upstream responses are buffered, then optionally returned to streaming clients as corrected SSE.
 - API coverage is intentionally small: `/health`, `/v1/models`, and `/v1/chat/completions`.
 - Runtime configuration now supports config files and prompt artifacts, but the parser/repair policy schema is still a first pass and not every future per-model knob is exposed yet.
-- Built-in default artifacts are embedded at build time, but promotion is still a manual review step and currently covers only the reviewed Gemma request-adapter artifact.
+- Built-in default artifacts are embedded at build time, but promotion is still a manual review step. Current shipped request-adapter defaults cover reviewed Qwen regenerated-context and Gemma append-only artifacts, with additional reviewed alternates embedded for comparison.
 - Retry/continue policy is represented in configuration but not implemented as an upstream retry loop yet.
 - GEPA optimization now covers the correction agent and request-adapter profile guidance, and artifacts can be promoted into profile config with `promote-artifact` or shipped defaults with `promote-default-artifact`; label quality and dataset curation are still deliberate review steps.
 - Provider-specific adapters beyond generic OpenAI-compatible HTTP are not implemented yet.

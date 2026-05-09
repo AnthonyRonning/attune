@@ -12,6 +12,9 @@ The flow is:
 6. Promote only reviewed failures into GEPA datasets.
 
 Raw downloads, local scenario files, and run reports are ignored by git.
+The broader command playbook, including GEPA and promotion commands that use
+trace-harness outputs, lives in
+[`../../docs/command-reference.md`](../../docs/command-reference.md).
 
 ## Scenario Format
 
@@ -145,21 +148,25 @@ jq -c . \
 Then run the request-adapter optimizer for the history format being tested:
 
 ```bash
+export OPENROUTER_API_KEY="..."
+export ANTHROPIC_API_KEY="..."
+
 cargo run -- optimize-request-adapter-prompt \
   --dataset-path /tmp/gemma-request-adapter-all.jsonl \
-  --output-path datasets/request-adapter/gemma-dsrs-conservative-r4-append-only-gepa.json \
+  --output-path datasets/request-adapter/gemma-dsrs-conservative-sonnet-fresh-r1-append-only-gepa.json \
   --base-url https://openrouter.ai/api/v1 \
-  --model google/gemma-4-26b-a4b-it \
+  --model anthropic:claude-sonnet-4-6 \
+  --judge-model anthropic:claude-sonnet-4-6 \
   --target-model google/gemma-4-26b-a4b-it \
   --profile gemma-dsrs-conservative \
-  --profile-revision 4 \
+  --profile-revision 7 \
   --dsrs-history-format append_only \
-  --artifact-id request-adapter/gemma-dsrs-conservative/r4-append-only-content-tools-json-meta \
-  --iterations 3 \
-  --max-examples 14 \
+  --artifact-id request-adapter/gemma-dsrs-conservative/sonnet-fresh-r1-append-only \
+  --iterations 5 \
+  --max-examples 6 \
   --lm-max-tokens 100000
 ```
 
-Run the same dataset with `--dsrs-history-format regenerated_context` and a separate output path when comparing history renderers. Promote only after reading the artifact and confirming it improves the profile without overfitting to source-harness paths or one-off commands.
+Run the same dataset with `--dsrs-history-format regenerated_context` and a separate output path when comparing history renderers. Keep `--model` and `--judge-model` separate from `--target-model`; GEPA should use a strong reflection/judge model to score the target model under test, not the target model to judge itself. Promote only after reading the artifact and confirming it improves the profile without hidden-label leakage, exact expected-output leakage, trace-specific answers, or brittle one-off dataset rules.
 
 Promotion has two stages. `promote-artifact` moves a reviewed artifact into a config profile for local testing. `promote-default-artifact` moves a fully reviewed and tested artifact into `profiles/builtin-defaults.toml`, where `build.rs` validates and embeds it into shipped binaries.
