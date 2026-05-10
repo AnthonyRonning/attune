@@ -165,6 +165,12 @@ datasets/request-adapter/gemma-dsrs-conservative-trace-harness-curated.jsonl
 datasets/request-adapter/qwen-dsrs-trace-harness-curated.jsonl
 ```
 
+The Gemma curated file includes reviewed failures from a 500-scenario Pi/Hermes
+comparison run against `google/gemma-4-26b-a4b-it`. Direct baseline passed
+475/500 structural checks, while Attune passed 497/500. The three proxy
+regressions from that run were added as request-adapter GEPA examples, and the
+one correction-agent failure was added to `datasets/corrections.jsonl`.
+
 For the latest Gemma request-adapter GEPA run, combine the curated harness rows with the existing hand-labeled and trace-faithful datasets:
 
 ```bash

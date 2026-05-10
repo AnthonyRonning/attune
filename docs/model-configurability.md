@@ -351,6 +351,13 @@ The Gemma request-adapter dataset is assembled from reviewed examples in:
 - `datasets/request-adapter/gemma-dsrs-conservative-trace-faithful.jsonl`
 - `datasets/request-adapter/gemma-dsrs-conservative-trace-harness-curated.jsonl`
 
+The Gemma trace-harness curated file includes reviewed cases from the 500-scenario
+Pi/Hermes baseline-vs-proxy comparison. That run produced 475/500 direct
+baseline structural passes and 497/500 Attune proxy structural passes for
+`google/gemma-4-26b-a4b-it`. The three proxy regressions were added as
+request-adapter failures, and the malformed large `write_file` correction-agent
+failure from that run was added to `datasets/corrections.jsonl`.
+
 Qwen now also has a small curated trace-harness dataset at `datasets/request-adapter/qwen-dsrs-trace-harness-curated.jsonl`. It covers representative failures from the Pi/Hermes 100-trace run, including contract violations, invalid tagged `tool_calls`, premature tool stops, empty DSRs output, and reasoning-only empty assistant output.
 
 The latest promoted post-50 request-adapter matrix was run with native Anthropic Claude Sonnet 4.6 for reflection/proposal and judging, OpenRouter only for target model calls, hidden labels outside reflected examples, and the previous reviewed artifact as `--seed-artifact` for each model/history line. Current promotion policy treats long and behavior-specific instructions as acceptable when the corrected GEPA workflow and artifact review support them; the main rejection criteria are hidden-label leakage, exact expected-output leakage, trace-specific answers, and brittle one-off rules.

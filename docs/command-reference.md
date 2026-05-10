@@ -63,6 +63,74 @@ nix develop --command cargo run -- \
 
 `serve` is the default command, so `cargo run --` also starts Attune.
 
+## Example Request
+
+Attune accepts normal OpenAI-compatible chat completion requests. This example
+asks a Qwen model to call a file-reading tool:
+
+```sh
+curl http://127.0.0.1:8080/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -d '{
+    "model": "qwen/qwen3.5-9b",
+    "temperature": 0,
+    "messages": [
+      {
+        "role": "user",
+        "content": "Read Cargo.toml"
+      }
+    ],
+    "parallel_tool_calls": false,
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "read_file",
+          "description": "Read a project file",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "path": { "type": "string" }
+            },
+            "required": ["path"]
+          }
+        }
+      }
+    ]
+  }'
+```
+
+If the upstream model emits a non-OpenAI tool shape such as:
+
+```xml
+<tool_call name="read_file">{pth:"Cargo.toml",}</tool_call>
+```
+
+Attune can repair it into an OpenAI-compatible assistant message:
+
+```json
+{
+  "choices": [
+    {
+      "message": {
+        "role": "assistant",
+        "content": null,
+        "tool_calls": [
+          {
+            "type": "function",
+            "function": {
+              "name": "read_file",
+              "arguments": "{\"path\":\"Cargo.toml\"}"
+            }
+          }
+        ]
+      },
+      "finish_reason": "tool_calls"
+    }
+  ]
+}
+```
+
 ## Inspect And Manage Traces
 
 Show compact summaries:
@@ -440,6 +508,32 @@ nix develop --command cargo run -- \
   --retries 3
 ```
 
+For larger MVP evidence runs, use the same `compare` path with a larger
+scenario file and higher parallelism. The latest reviewed Gemma comparison used
+a 500-scenario Pi/Hermes file built from the same import commands above, with
+larger Hugging Face samples:
+
+```sh
+export OPENROUTER_API_KEY="..."
+
+nix develop --command cargo run -- \
+  trace-harness compare \
+  --scenarios-path eval/trace-harness/scenarios/pi-hermes-500.local.jsonl \
+  --output-path eval/trace-harness/results/gemma-pi-hermes-500.compare.local.json \
+  --model google/gemma-4-26b-a4b-it \
+  --provider-ignore venice \
+  --limit 500 \
+  --parallel 8 \
+  --request-timeout-seconds 180 \
+  --retries 3
+```
+
+That run produced 475/500 direct baseline structural passes and 497/500 proxy
+passes. The three proxy regressions were reviewed and added to
+`datasets/request-adapter/gemma-dsrs-conservative-trace-harness-curated.jsonl`;
+the correction-agent failure from one of those cases was added to
+`datasets/corrections.jsonl`.
+
 The compare report records:
 
 - direct baseline structural pass/fail
@@ -464,6 +558,12 @@ used.
 Use `--baseline-base-url` to compare against another OpenAI-compatible target
 endpoint. Use `--proxy-url` when you already have a proxy process running and do
 not want the harness to start one in-process.
+
+When running very slow models or providers, make sure the harness timeout and
+the in-process proxy upstream timeout are aligned. A paused Qwen 500-scenario
+run used `--request-timeout-seconds 360`, but exposed that the embedded proxy
+path still had a lower upstream timeout. Treat partial comparison results from
+that run as diagnostic only until it is rerun with matching timeouts.
 
 If you already have a proxy running externally, pass `--proxy-url` to avoid the
 in-process proxy:
