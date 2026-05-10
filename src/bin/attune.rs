@@ -108,6 +108,12 @@ enum Command {
         repair_actions: Vec<String>,
         #[arg(long = "correction-result")]
         correction_results: Vec<String>,
+        #[arg(long)]
+        expected_repair_json: Option<String>,
+        #[arg(long)]
+        expected_repair_path: Option<String>,
+        #[arg(long)]
+        append: bool,
     },
     ExportRequestAdapterDataset {
         #[arg(long, default_value = "traces/attune.jsonl")]
@@ -437,7 +443,12 @@ async fn main() -> anyhow::Result<()> {
             failure_kinds,
             repair_actions,
             correction_results,
+            expected_repair_json,
+            expected_repair_path,
+            append,
         } => {
+            let expected_repair =
+                read_optional_json_value(expected_repair_json, expected_repair_path).await?;
             export_dataset(DatasetExportConfig {
                 trace_path: trace_path.into(),
                 output_path: output_path.into(),
@@ -449,6 +460,8 @@ async fn main() -> anyhow::Result<()> {
                     repair_actions,
                     correction_results,
                 },
+                expected_repair,
+                append,
             })
             .await
         }

@@ -16,6 +16,8 @@ pub struct DatasetExportConfig {
     pub trace_path: PathBuf,
     pub output_path: PathBuf,
     pub filter: DatasetExportFilter,
+    pub expected_repair: Option<Value>,
+    pub append: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -134,10 +136,14 @@ pub async fn export_dataset_file(config: DatasetExportConfig) -> Result<DatasetE
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
 
-    let mut file = OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
+    let mut options = OpenOptions::new();
+    options.create(true).write(true);
+    if config.append {
+        options.append(true);
+    } else {
+        options.truncate(true);
+    }
+    let mut file = options
         .open(&config.output_path)
         .await
         .with_context(|| format!("failed to open {}", config.output_path.display()))?;
@@ -205,14 +211,16 @@ pub async fn export_dataset_file(config: DatasetExportConfig) -> Result<DatasetE
                 .map(Value::String)
                 .unwrap_or(Value::Null),
             correction_attempts: serde_json::to_value(&record.correction_attempts)?,
-            expected_repair: json!({
-                "final_message": final_response.choices.first().map(|choice| &choice.message),
-                "tool_calls": final_response
-                    .choices
-                    .first()
-                    .and_then(|choice| choice.message.tool_calls.as_ref())
-                    .cloned()
-                    .unwrap_or_default()
+            expected_repair: config.expected_repair.clone().unwrap_or_else(|| {
+                json!({
+                    "final_message": final_response.choices.first().map(|choice| &choice.message),
+                    "tool_calls": final_response
+                        .choices
+                        .first()
+                        .and_then(|choice| choice.message.tool_calls.as_ref())
+                        .cloned()
+                        .unwrap_or_default()
+                })
             }),
             repair_actions: serde_json::to_value(&record.repair_actions)?,
         };
@@ -745,6 +753,8 @@ mod tests {
             trace_path,
             output_path: output_path.clone(),
             filter: DatasetExportFilter::default(),
+            expected_repair: None,
+            append: false,
         })
         .await
         .unwrap();
@@ -818,6 +828,8 @@ mod tests {
                 repair_actions: vec!["content_tool_call_extracted".to_string()],
                 ..DatasetExportFilter::default()
             },
+            expected_repair: None,
+            append: false,
         })
         .await
         .unwrap();

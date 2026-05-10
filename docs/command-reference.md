@@ -193,6 +193,20 @@ nix develop --command cargo run -- \
   --failure-kind dsrs_contract_violation
 ```
 
+Append a reviewed correction-agent case to the shared dataset with an explicit
+label. Use this when the trace ended in a fallback or otherwise did not contain
+the repair you actually want the correction agent to learn:
+
+```sh
+nix develop --command cargo run -- \
+  export-dataset \
+  --trace-path traces/attune.jsonl \
+  --output-path datasets/corrections.jsonl \
+  --trace-id trace_50a29f9c070a4d3ba711407c915cb9a5 \
+  --expected-repair-json '{"content":"","tool_calls":[{"name":"write_file","arguments":{"path":"daily_summary/formatter.py","content":"..."}}]}' \
+  --append
+```
+
 Trace-faithful request-adapter row with an explicit label:
 
 ```sh
