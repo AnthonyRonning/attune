@@ -1,5 +1,11 @@
 # Attune
 
+> **MVP under active construction.** Attune is usable for local experiments,
+> trace-driven development, and early model-profile work, but the public API,
+> configuration surface, datasets, evals, and built-in defaults are still
+> moving. Current comparison numbers are directional engineering evidence, not
+> final benchmark claims.
+
 Attune is an **Agent Contract Runtime** for reliable tool use across
 OpenAI-compatible models.
 
@@ -141,8 +147,8 @@ buffering and repair; it does not yet proxy upstream tokens incrementally.
 
 ## Early Evidence
 
-The strongest fresh comparison result so far is a 500-scenario Pi/Hermes
-trace-harness run against `google/gemma-4-26b-a4b-it` on OpenRouter:
+The strongest fresh comparison result so far is the reviewed 500-scenario
+Pi/Hermes trace-harness run against `google/gemma-4-26b-a4b-it` on OpenRouter:
 
 | Path | Structural passes |
 | --- | ---: |
@@ -152,11 +158,24 @@ trace-harness run against `google/gemma-4-26b-a4b-it` on OpenRouter:
 Attune fixed all 25 direct baseline structural failures. The 3 proxy
 regressions from that run were reviewed and added to the curated GEPA datasets.
 
-Treat this as early structural reliability evidence, not a broad model-quality
-benchmark. Earlier Qwen 3.5 9B runs showed larger reliability gains, but the
-latest 500-scenario comparison was paused after exposing a timeout/provider
-routing issue in the live harness setup. That run should be repeated before
-publishing final Qwen comparison numbers.
+Qwen is currently flagged as the highest-priority in-progress profile. Earlier
+Qwen 3.5 9B runs showed strong practical improvement in live Pi testing, but
+the latest 500-scenario curation run exposed request-adapter and correction
+agent gaps that should not be marketed as solved yet:
+
+| Qwen 3.5 9B curation run | Count |
+| --- | ---: |
+| Direct baseline structural passes | 487/500 |
+| Attune proxy structural passes | 457/500 |
+| Baseline failures fixed by Attune | 13 |
+| Proxy regressions to learn from | 43 |
+
+Those Qwen regressions were reviewed by category: premature action without a
+tool call, tool-like text without OpenAI `tool_calls`, unrecovered fallback
+responses, and correction-agent failures. Representative cases were promoted
+into the Qwen request-adapter dataset and the correction-agent dataset so the
+next GEPA pass can train directly against them. Treat Qwen as actively under
+optimization until that rerun lands.
 
 ## Try It
 
