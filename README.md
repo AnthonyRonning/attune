@@ -296,13 +296,17 @@ If the README hook is enough and you want the machinery, start here:
 - Provider-specific adapters beyond generic OpenAI-compatible HTTP are not
   implemented yet.
 
+## License
+
+Attune is published under the MIT License. See [`LICENSE`](LICENSE).
+
 ## Roadmap
 
 Near-term directions:
 
 - rerun the Qwen 500-scenario baseline comparison with aligned proxy/harness
   timeouts
-- add `LICENSE` and `.env.example` before public MVP release
+- add `.env.example` before public MVP release
 - harden config-file validation and parser/repair policy configuration
 - add profile validation and migration tooling
 - expand trace-harness and GEPA datasets across more model families
