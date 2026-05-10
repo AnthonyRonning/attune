@@ -204,11 +204,11 @@ fn default_trace_enabled() -> bool {
 }
 
 fn default_trace_path() -> PathBuf {
-    PathBuf::from("traces/model-correction-proxy.jsonl")
+    PathBuf::from("traces/attune.jsonl")
 }
 
 fn default_correction_trace_path() -> PathBuf {
-    PathBuf::from("traces/model-correction-proxy-corrections.jsonl")
+    PathBuf::from("traces/attune-corrections.jsonl")
 }
 
 #[cfg(test)]

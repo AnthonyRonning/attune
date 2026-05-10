@@ -440,7 +440,7 @@ fn openai_error(status: StatusCode, message: &str, trace_id: Option<String>) -> 
         OpenAiErrorResponse {
             error: OpenAiError {
                 message: message.to_string(),
-                error_type: "model_correction_proxy_error".to_string(),
+                error_type: "attune_error".to_string(),
                 param: None,
                 code: None,
             },
@@ -457,9 +457,7 @@ fn json_response<T: serde::Serialize>(
     let mut response = (status, Json(body)).into_response();
     if let Some(trace_id) = trace_id {
         if let Ok(value) = HeaderValue::from_str(&trace_id) {
-            response
-                .headers_mut()
-                .insert("x-model-correction-trace-id", value);
+            response.headers_mut().insert("x-attune-trace-id", value);
         }
     }
     response
@@ -628,9 +626,7 @@ fn sse_response(
 
     if let Some(trace_id) = trace_id {
         if let Ok(value) = HeaderValue::from_str(&trace_id) {
-            response
-                .headers_mut()
-                .insert("x-model-correction-trace-id", value);
+            response.headers_mut().insert("x-attune-trace-id", value);
         }
     }
     response

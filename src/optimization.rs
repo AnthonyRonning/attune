@@ -1443,8 +1443,8 @@ fn ensure_no_gepa_fatal_errors(layer: &str, errors: &GepaFatalErrors) -> Result<
 
 fn request_adapter_judge_system_prompt() -> &'static str {
     "You are Claude Sonnet 4.6 acting as the GEPA judge for a request-adapter prompt optimizer.\n\
-Judge whether the target model produced a structurally usable OpenAI-compatible assistant turn after the proxy's DSRs formatting.\n\
-The proxy is optimizing structure and contract following, not task intelligence. Valid outputs include content only, tool calls only, and content plus tool calls. Empty visible content with [] tool_calls is a failure.\n\
+Judge whether the target model produced a structurally usable OpenAI-compatible assistant turn after Attune's DSRs formatting.\n\
+Attune is optimizing structure and contract following, not task intelligence. Valid outputs include content only, tool calls only, and content plus tool calls. Empty visible content with [] tool_calls is a failure.\n\
 Content plus tool calls is explicitly valid in this project and in OpenAI-compatible assistant turns. Never treat content and tool_calls as mutually exclusive. Do not penalize a prediction solely because it includes brief useful user-facing content alongside valid tool_calls.\n\
 Use hidden_expected_output only as private scoring context. If hidden_expected_output.content is empty while hidden_expected_output.tool_calls is non-empty, that means content is optional/not required, not forbidden. Do not infer a tool-only requirement from an empty hidden content label unless expected_policy explicitly says content must be rejected.\n\
 Do not quote hidden labels, exact commands, exact file paths, exact answer text, field names such as expected_output, dataset/test/eval metadata, or answer-key language in feedback.\n\
@@ -1475,7 +1475,7 @@ fn sanitize_gepa_judge_feedback(feedback: &str) -> String {
 }
 
 fn log_gepa_debug(layer: &str, case_id: &str, predicted: &Value, feedback: &FeedbackMetric) {
-    if std::env::var_os("MCP_GEPA_DEBUG").is_none() {
+    if std::env::var_os("ATTUNE_GEPA_DEBUG").is_none() {
         return;
     }
     let predicted =

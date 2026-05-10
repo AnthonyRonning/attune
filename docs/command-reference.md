@@ -1,7 +1,7 @@
 # Command And Workflow Reference
 
 This is the reproducible command playbook for the workflows we have been
-running locally: serving the proxy, inspecting traces, exporting datasets,
+running locally: serving Attune, inspecting traces, exporting datasets,
 running GEPA, promoting artifacts, and sampling third-party harness traces.
 
 Most commands can be run either directly with `cargo run -- ...` or through the
@@ -27,11 +27,11 @@ when the model is `anthropic:claude-sonnet-4-6`.
 Useful logging:
 
 ```sh
-RUST_LOG=model_correction_proxy=debug,tower_http=debug \
+RUST_LOG=attune=debug,tower_http=debug \
 nix develop --command cargo run -- serve
 ```
 
-Use `model_correction_proxy=trace` only when you need request-shape detail; it
+Use `attune=trace` only when you need request-shape detail; it
 can be noisy and traces already contain the full postmortem data.
 
 ## Serve The Proxy
@@ -44,7 +44,7 @@ export OPENROUTER_API_KEY="..."
 nix develop --command cargo run -- \
   --bind 127.0.0.1:8080 \
   --upstream-base-url https://openrouter.ai/api/v1 \
-  --trace-path traces/model-correction-proxy.jsonl \
+  --trace-path traces/attune.jsonl \
   serve
 ```
 
@@ -57,11 +57,11 @@ nix develop --command cargo run -- \
   --config configs/gemma-dsrs-conservative.toml \
   --bind 127.0.0.1:8080 \
   --upstream-base-url https://openrouter.ai/api/v1 \
-  --trace-path traces/model-correction-proxy.jsonl \
+  --trace-path traces/attune.jsonl \
   serve
 ```
 
-`serve` is the default command, so `cargo run --` also starts the proxy.
+`serve` is the default command, so `cargo run --` also starts Attune.
 
 ## Inspect And Manage Traces
 
@@ -70,7 +70,7 @@ Show compact summaries:
 ```sh
 nix develop --command cargo run -- \
   inspect-traces \
-  --trace-path traces/model-correction-proxy.jsonl \
+  --trace-path traces/attune.jsonl \
   --limit 20
 ```
 
@@ -79,7 +79,7 @@ Write pretty JSON summaries for review:
 ```sh
 nix develop --command cargo run -- \
   inspect-traces \
-  --trace-path traces/model-correction-proxy.jsonl \
+  --trace-path traces/attune.jsonl \
   --limit 50 \
   --json
 ```
@@ -89,17 +89,17 @@ Replay recorded upstream responses through the current interpreter/repair path:
 ```sh
 nix develop --command cargo run -- \
   replay \
-  --trace-path traces/model-correction-proxy.jsonl
+  --trace-path traces/attune.jsonl
 ```
 
 When traces are stale, archive or clear them only after exporting any examples
 you want to preserve:
 
 ```sh
-mkdir -p /tmp/model-correction-proxy-traces
-cp traces/model-correction-proxy*.jsonl /tmp/model-correction-proxy-traces/
-: > traces/model-correction-proxy.jsonl
-: > traces/model-correction-proxy-corrections.jsonl
+mkdir -p /tmp/attune-traces
+cp traces/attune*.jsonl /tmp/attune-traces/
+: > traces/attune.jsonl
+: > traces/attune-corrections.jsonl
 ```
 
 ## Export Datasets From Traces
@@ -109,7 +109,7 @@ Correction-agent dataset rows:
 ```sh
 nix develop --command cargo run -- \
   export-dataset \
-  --trace-path traces/model-correction-proxy.jsonl \
+  --trace-path traces/attune.jsonl \
   --output-path datasets/corrections.jsonl
 ```
 
@@ -118,7 +118,7 @@ Filtered correction rows:
 ```sh
 nix develop --command cargo run -- \
   export-dataset \
-  --trace-path traces/model-correction-proxy.jsonl \
+  --trace-path traces/attune.jsonl \
   --output-path datasets/corrections-qwen.jsonl \
   --model qwen \
   --profile qwen-dsrs \
@@ -130,7 +130,7 @@ Trace-faithful request-adapter row with an explicit label:
 ```sh
 nix develop --command cargo run -- \
   export-request-adapter-dataset \
-  --trace-path traces/model-correction-proxy.jsonl \
+  --trace-path traces/attune.jsonl \
   --output-path datasets/request-adapter/gemma-dsrs-conservative-trace-faithful.jsonl \
   --trace-id trace_bb26a5f316ca486796231bfd184ac723 \
   --expected-output-json '{"content":"","tool_calls":[{"name":"read","arguments":{"path":"/Users/tony/Dev/ThirdParties/pi-mono/packages/coding-agent/docs/packages.md"}}]}' \
@@ -145,7 +145,7 @@ Use the final proxy response as the label for a known-good successful trace:
 ```sh
 nix develop --command cargo run -- \
   export-request-adapter-dataset \
-  --trace-path traces/model-correction-proxy.jsonl \
+  --trace-path traces/attune.jsonl \
   --output-path datasets/request-adapter/gemma-dsrs-conservative-trace-faithful.jsonl \
   --trace-id trace_45804185fe3a4a7fa2e9c1af5e55c494 \
   --use-final-response \
@@ -261,7 +261,7 @@ nix develop --command cargo run -- \
   --lm-max-tokens 128000
 ```
 
-Add `MCP_GEPA_DEBUG=1` when diagnosing optimizer behavior. It prints one line
+Add `ATTUNE_GEPA_DEBUG=1` when diagnosing optimizer behavior. It prints one line
 per scored rollout with the layer, case ID, score, generalized judge feedback,
 and parsed prediction. GEPA infrastructure failures are intentionally fatal:
 target-model HTTP failures, judge HTTP failures, non-JSON judge responses, and
@@ -489,14 +489,14 @@ source .env
 set +a
 
 OPENROUTER_LIVE_MODELS=qwen/qwen3.5-9b,google/gemma-4-26b-a4b-it \
-nix develop --command cargo test --test proxy_e2e live_openrouter_pi_prompt_matrix -- --ignored --nocapture
+nix develop --command cargo test --test attune_e2e live_openrouter_pi_prompt_matrix -- --ignored --nocapture
 ```
 
 Run one model at a time when debugging provider or profile behavior:
 
 ```sh
 OPENROUTER_LIVE_MODELS=qwen/qwen3.5-9b \
-nix develop --command cargo test --test proxy_e2e live_openrouter_pi_prompt_matrix -- --ignored --nocapture
+nix develop --command cargo test --test attune_e2e live_openrouter_pi_prompt_matrix -- --ignored --nocapture
 ```
 
 ## Local Mock Upstream
@@ -515,7 +515,7 @@ MOCK_UPSTREAM_CONTENT='<tool_call name="read_file">{pth:"Cargo.toml"}</tool_call
 nix develop --command cargo run --example mock_upstream
 ```
 
-Run the proxy against it:
+Run Attune against it:
 
 ```sh
 nix develop --command cargo run -- \

@@ -431,14 +431,14 @@ fn should_try_correction_agent(
     interpreted: &InterpretedResponse,
     intents: &[ToolIntent],
 ) -> bool {
-    interpreter_failures_require_model_correction(interpreted)
+    interpreter_failures_require_correction_agent(interpreted)
         || (intents.is_empty() && interpreted.suspicious_stop)
         || intents
             .iter()
-            .any(|intent| intent_requires_model_correction(normalized, intent))
+            .any(|intent| intent_requires_correction_agent(normalized, intent))
 }
 
-fn interpreter_failures_require_model_correction(interpreted: &InterpretedResponse) -> bool {
+fn interpreter_failures_require_correction_agent(interpreted: &InterpretedResponse) -> bool {
     interpreted.has_any_failure(&[
         ResponseFailureKind::NativeMalformedJsonArguments,
         ResponseFailureKind::DsrsContractViolation,
@@ -466,18 +466,18 @@ fn correction_policy_reason(
     correction_available: bool,
 ) -> String {
     if !correction_available
-        && (interpreter_failures_require_model_correction(interpreted)
+        && (interpreter_failures_require_correction_agent(interpreted)
             || (intents.is_empty() && interpreted.suspicious_stop)
             || intents
                 .iter()
-                .any(|intent| intent_requires_model_correction(normalized, intent)))
+                .any(|intent| intent_requires_correction_agent(normalized, intent)))
     {
         return format!(
             "correction would be useful but is unavailable: enabled={} policy_enabled={} max_passes={}",
             config.correction.enabled, config.policy.correction_agent, profile.max_correction_passes
         );
     }
-    if interpreter_failures_require_model_correction(interpreted) {
+    if interpreter_failures_require_correction_agent(interpreted) {
         return "typed response failures require model-based correction".to_string();
     }
     if intents.is_empty() && interpreted.suspicious_stop {
@@ -485,7 +485,7 @@ fn correction_policy_reason(
     }
     if intents
         .iter()
-        .any(|intent| intent_requires_model_correction(normalized, intent))
+        .any(|intent| intent_requires_correction_agent(normalized, intent))
     {
         return "one or more tool intents have malformed or schema-incomplete arguments"
             .to_string();
@@ -565,7 +565,7 @@ fn correction_error_raw_output(error: &anyhow::Error) -> Option<String> {
         .and_then(|error| error.raw_output().map(str::to_string))
 }
 
-fn intent_requires_model_correction(normalized: &NormalizedRequest, intent: &ToolIntent) -> bool {
+fn intent_requires_correction_agent(normalized: &NormalizedRequest, intent: &ToolIntent) -> bool {
     let Some(arguments) = intent.arguments.as_ref() else {
         return true;
     };

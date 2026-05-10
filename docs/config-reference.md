@@ -9,7 +9,7 @@ when present and otherwise tries TOML, JSON, then JSON5.
 
 ## Loading And Precedence
 
-Use `--config <path>` or `MCP_CONFIG_PATH=<path>` to load a config file.
+Use `--config <path>` or `ATTUNE_CONFIG_PATH=<path>` to load a config file.
 Configured `[[model_profiles]]` are matched before built-in profiles, so local
 config can override shipped defaults without recompiling.
 
@@ -17,11 +17,11 @@ For `serve`, runtime values resolve in this order:
 
 | Setting | Precedence |
 | --- | --- |
-| Config path | `--config`, then `MCP_CONFIG_PATH`, then unset |
-| Bind address | `--bind`, then `MCP_BIND_ADDR`, then `127.0.0.1:8080` |
-| Upstream base URL | `--upstream-base-url`, then `MCP_UPSTREAM_BASE_URL`, then config/default |
-| Upstream API key | `--upstream-api-key`, then `MCP_UPSTREAM_API_KEY`, then `OPENROUTER_API_KEY`, then config |
-| Main trace path | `--trace-path`, then `MCP_TRACE_PATH`, then config/default |
+| Config path | `--config`, then `ATTUNE_CONFIG_PATH`, then unset |
+| Bind address | `--bind`, then `ATTUNE_BIND_ADDR`, then `127.0.0.1:8080` |
+| Upstream base URL | `--upstream-base-url`, then `ATTUNE_UPSTREAM_BASE_URL`, then config/default |
+| Upstream API key | `--upstream-api-key`, then `ATTUNE_UPSTREAM_API_KEY`, then `OPENROUTER_API_KEY`, then config |
+| Main trace path | `--trace-path`, then `ATTUNE_TRACE_PATH`, then config/default |
 
 If no upstream API key is configured, the proxy forwards the inbound client
 `Authorization` or `x-api-key`/`api-key` credential to the upstream provider.
@@ -39,8 +39,8 @@ timeout_seconds = 120
 
 [trace]
 enabled = true
-path = "traces/model-correction-proxy.jsonl"
-correction_path = "traces/model-correction-proxy-corrections.jsonl"
+path = "traces/attune.jsonl"
+correction_path = "traces/attune-corrections.jsonl"
 ```
 
 ## Full Shape
@@ -59,8 +59,8 @@ min_confidence = 0.65
 
 [trace]
 enabled = true
-path = "traces/model-correction-proxy.jsonl"
-correction_path = "traces/model-correction-proxy-corrections.jsonl"
+path = "traces/attune.jsonl"
+correction_path = "traces/attune-corrections.jsonl"
 
 [policy]
 mode = "balanced"
@@ -126,8 +126,8 @@ provider-specific correction routing is added.
 | Field | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `enabled` | bool | `true` | Enables main request JSONL traces. |
-| `path` | path | `traces/model-correction-proxy.jsonl` | Main request/response trace file. |
-| `correction_path` | path | `traces/model-correction-proxy-corrections.jsonl` | Correction-agent attempt sidecar trace file. |
+| `path` | path | `traces/attune.jsonl` | Main request/response trace file. |
+| `correction_path` | path | `traces/attune-corrections.jsonl` | Correction-agent attempt sidecar trace file. |
 
 Trace files contain full request/response data. Treat them as sensitive
 debugging artifacts, especially when user prompts, tool outputs, or API

@@ -1,12 +1,10 @@
 use std::net::SocketAddr;
 
+use attune::openai::{ChatChoice, ChatCompletionRequest, ChatCompletionResponse, ChatMessage};
 use axum::{
     extract::State,
     routing::{get, post},
     Json, Router,
-};
-use model_correction_proxy::openai::{
-    ChatChoice, ChatCompletionRequest, ChatCompletionResponse, ChatMessage,
 };
 use serde_json::{json, Map, Value};
 
@@ -46,7 +44,7 @@ async fn models() -> Json<Value> {
                 "id": "mock-model",
                 "object": "model",
                 "created": 0,
-                "owned_by": "model-correction-proxy"
+                "owned_by": "attune"
             }
         ]
     }))

@@ -131,7 +131,7 @@ impl UpstreamClient {
             .http
             .post(url)
             .header(CONTENT_TYPE, "application/json")
-            .header("X-Title", "model-correction-proxy")
+            .header("X-Title", "attune")
             .json(request);
 
         builder = self.apply_auth(builder, inbound_auth);
@@ -221,10 +221,7 @@ impl UpstreamClient {
             "upstream request details"
         );
 
-        let builder = self
-            .http
-            .get(url)
-            .header("X-Title", "model-correction-proxy");
+        let builder = self.http.get(url).header("X-Title", "attune");
         let builder = self.apply_auth(builder, inbound_auth);
 
         let response = match builder.send().await {

@@ -1,6 +1,6 @@
 # Trace Harness Integration Evals
 
-This directory is for dataset-backed live proxy checks. The goal is not to judge whether a model made the best engineering decision. The goal is to verify that the proxy keeps model outputs structurally usable for an OpenAI-compatible agent harness.
+This directory is for dataset-backed live Attune checks. The goal is not to judge whether a model made the best engineering decision. The goal is to verify that Attune keeps model outputs structurally usable for an OpenAI-compatible agent harness.
 
 The flow is:
 
@@ -76,7 +76,7 @@ cargo run -- trace-harness inspect \
 
 ## Run
 
-This starts the proxy in-process unless `--proxy-url` is provided. It reads `OPENROUTER_API_KEY` or `MCP_UPSTREAM_API_KEY` from the environment or `.env`. Pass `--config` before the `trace-harness` subcommand when you want a promoted profile config loaded for the in-process proxy.
+This starts the proxy in-process unless `--proxy-url` is provided. It reads `OPENROUTER_API_KEY` or `ATTUNE_UPSTREAM_API_KEY` from the environment or `.env`. Pass `--config` before the `trace-harness` subcommand when you want a promoted profile config loaded for the in-process proxy.
 
 ```bash
 cargo run -- \

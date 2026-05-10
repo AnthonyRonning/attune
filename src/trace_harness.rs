@@ -340,7 +340,7 @@ pub async fn run_trace_harness_compare(
 ) -> Result<TraceHarnessCompareReport> {
     let scenarios = read_scenarios(&config.scenarios_path).await?;
     let api_key = live_api_key(&config.proxy_config).ok_or_else(|| {
-        anyhow!("OPENROUTER_API_KEY or MCP_UPSTREAM_API_KEY is required for live compare runs")
+        anyhow!("OPENROUTER_API_KEY or ATTUNE_UPSTREAM_API_KEY is required for live compare runs")
     })?;
     let baseline_base_url = config
         .baseline_base_url
@@ -579,7 +579,7 @@ async fn call_chat_endpoint(
         let mut builder = client
             .post(endpoint_url)
             .header("content-type", "application/json")
-            .header("X-Title", "model-correction-proxy-trace-harness")
+            .header("X-Title", "attune-trace-harness")
             .json(request);
         if let Some(api_key) = api_key {
             builder = builder.bearer_auth(api_key);
@@ -1130,7 +1130,7 @@ async fn start_proxy(
     config.upstream.api_key = live_api_key(&config);
     if config.upstream.api_key.is_none() {
         return Err(anyhow!(
-            "OPENROUTER_API_KEY or MCP_UPSTREAM_API_KEY is required for in-process live proxy runs"
+            "OPENROUTER_API_KEY or ATTUNE_UPSTREAM_API_KEY is required for in-process live proxy runs"
         ));
     }
     if config.upstream.base_url.trim().is_empty() {
@@ -1181,8 +1181,8 @@ fn live_api_key(config: &ProxyConfig) -> Option<String> {
         .clone()
         .or_else(|| env_key("OPENROUTER_API_KEY"))
         .or_else(|| read_env_key("OPENROUTER_API_KEY"))
-        .or_else(|| env_key("MCP_UPSTREAM_API_KEY"))
-        .or_else(|| read_env_key("MCP_UPSTREAM_API_KEY"))
+        .or_else(|| env_key("ATTUNE_UPSTREAM_API_KEY"))
+        .or_else(|| read_env_key("ATTUNE_UPSTREAM_API_KEY"))
 }
 
 fn pi_scenarios_from_jsonl(
@@ -1381,7 +1381,7 @@ fn build_scenario(
         Value::String(preview(&observed_content)),
     );
     Ok(Some(TraceHarnessScenario {
-        schema: "model-correction-proxy.trace_harness.scenario/v1".to_string(),
+        schema: "attune.trace_harness.scenario/v1".to_string(),
         id: format!("{}:{}:{}", dataset.replace('/', "_"), source_id, turn_index),
         dataset: dataset.to_string(),
         source_id: source_id.to_string(),

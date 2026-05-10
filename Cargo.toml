@@ -1,16 +1,16 @@
 [package]
-name = "model-correction-proxy"
+name = "attune"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
 
 [lib]
-name = "model_correction_proxy"
+name = "attune"
 path = "src/lib.rs"
 
 [[bin]]
-name = "model-correction-proxy"
-path = "src/bin/proxy.rs"
+name = "attune"
+path = "src/bin/attune.rs"
 
 [dependencies]
 anyhow = "1"

@@ -1,6 +1,8 @@
-# Model Correction Proxy
+# Attune
 
-Model Correction Proxy is an OpenAI-compatible behavior compatibility layer for agent applications.
+Attune is an Agent Contract Runtime for reliable tool use across OpenAI-compatible models.
+
+The name reflects the runtime loop: **A**daptive **T**ool-use **T**ranslation, **U**nderstanding, **N**ormalization, and **E**valuation.
 
 It sits between an existing OpenAI-compatible client and an upstream model provider, watches the request/response contract, and repairs model behavior before the application loop breaks. The first target is tool-calling reliability for open-source and OpenAI-compatible models, especially when inference-engine tool parsers, chat templates, or provider quirks turn an intended tool call into a plain assistant message.
 
@@ -16,7 +18,7 @@ Typical symptoms:
 - reasoning/thinking fields contain text the client expects in `content`
 - a provider reports `finish_reason = stop` even though the response looks like an incomplete or misplaced tool call
 
-This proxy treats tool use as an application-level contract rather than an inference-engine feature to blindly trust. It can render tools into model-friendly text, parse plain-text tool intent, repair JSON/schema issues, record traces, export datasets, replay failures, and optimize correction prompts with DSRs/GEPA.
+Attune treats tool use as an application-level contract rather than an inference-engine feature to blindly trust. It can render tools into model-friendly text, parse plain-text tool intent, repair JSON/schema issues, record traces, export datasets, replay failures, and optimize correction prompts with DSRs/GEPA.
 
 ## Current status
 
@@ -26,7 +28,7 @@ Implemented scope currently covers the first three phases, with the runtime cent
 - **Phase 2:** proxy-owned DSRs tool rendering, model profiles, multi-tool parsing, parallel-tool enforcement, schema-guided repair, inbound auth passthrough, `/v1/models` proxying, buffered client SSE responses
 - **Phase 3:** trace-to-dataset export, replay harness, regression evaluation, typed DSRs correction-agent traces, profile-aware config loading, DSRs/GEPA prompt artifacts, explicit artifact promotion into model-profile config
 
-The proxy intentionally buffers upstream chat completions so it can interpret and repair the complete output before returning a client-compatible response. If the client requests `stream: true`, the proxy returns a corrected SSE response after buffering and repair; it does not yet proxy upstream tokens incrementally.
+Attune intentionally buffers upstream chat completions so it can interpret and repair the complete output before returning a client-compatible response. If the client requests `stream: true`, it returns a corrected SSE response after buffering and repair; it does not yet proxy upstream tokens incrementally.
 
 ## Architecture
 
@@ -93,7 +95,7 @@ Built-in profiles are selected by model-name substring:
 | `gemma-dsrs-conservative` | `gemma` | DSRs, conservative parallel-tool defaults | Append-only |
 | `balanced-default` | fallback | DSRs | Append-only |
 
-Profiles can be provided in TOML, JSON, or JSON5 through `--config` or `MCP_CONFIG_PATH`. Configured profiles are matched before built-ins, so users can tune or replace a built-in profile without recompiling. Unknown models still fall back to `balanced-default`.
+Profiles can be provided in TOML, JSON, or JSON5 through `--config` or `ATTUNE_CONFIG_PATH`. Configured profiles are matched before built-ins, so users can tune or replace a built-in profile without recompiling. Unknown models still fall back to `balanced-default`.
 
 Profiles support revision/source metadata plus request-adapter and correction-agent artifact IDs. When `request_adapter_artifact` or `correction_agent_artifact` points at a JSON GEPA report, text prompt file, or `builtin:<artifact-id>` reference, the proxy loads the instruction and records the artifact IDs in traces. See [`docs/config-reference.md`](docs/config-reference.md) for the implemented config schema and [`docs/model-configurability.md`](docs/model-configurability.md) for the longer-term architecture.
 
@@ -193,9 +195,9 @@ Every completed request can produce a JSONL trace containing:
 - errors, if any
 - a compact `summary` block with the latest user prompt, upstream/final previews, parser events, suspicious-stop state, tool intents, and repair actions
 
-Responses include an `x-model-correction-trace-id` header when a trace is written.
+Responses include an `x-attune-trace-id` header when a trace is written.
 
-Correction-agent attempts are also written to a sidecar JSONL file, defaulting to `traces/model-correction-proxy-corrections.jsonl`. These records include the parent trace ID, correction input, raw DSRs correction output, accepted/rejected result, confidence, explanation, and recovered content or tool calls.
+Correction-agent attempts are also written to a sidecar JSONL file, defaulting to `traces/attune-corrections.jsonl`. These records include the parent trace ID, correction input, raw DSRs correction output, accepted/rejected result, confidence, explanation, and recovered content or tool calls.
 
 Trace files can contain prompts, model outputs, and tool arguments. Authorization, cookie, and key-like headers are redacted, but trace storage should still be treated as sensitive application data.
 
@@ -240,7 +242,7 @@ The most common local workflows are:
 
 | Task | Command |
 | --- | --- |
-| Start the proxy | `nix develop --command cargo run -- serve` |
+| Start Attune | `nix develop --command cargo run -- serve` |
 | Inspect recent traces | `nix develop --command cargo run -- inspect-traces --limit 20` |
 | Replay traces through current repair code | `nix develop --command cargo run -- replay` |
 | Run unit/e2e tests | `nix develop --command cargo test --all-targets --all-features -- --test-threads=1` |
@@ -254,7 +256,7 @@ harness runs, and live OpenRouter smoke tests, see
 runtime config schema and precedence rules, see
 [`docs/config-reference.md`](docs/config-reference.md).
 
-## Running the proxy
+## Running Attune
 
 Serve is the default command:
 
@@ -277,7 +279,7 @@ nix develop --command cargo run -- \
   --config configs/gemma-dsrs-conservative.toml \
   --bind 127.0.0.1:8080 \
   --upstream-base-url https://openrouter.ai/api/v1 \
-  --trace-path traces/model-correction-proxy.jsonl \
+  --trace-path traces/attune.jsonl \
   serve
 ```
 
@@ -297,11 +299,11 @@ Other generation controls, including `max_tokens` and `max_completion_tokens`, a
 
 | Option | Env var | Default |
 | --- | --- | --- |
-| `--bind` | `MCP_BIND_ADDR` | `127.0.0.1:8080` |
-| `--config` | `MCP_CONFIG_PATH` | unset |
-| `--upstream-base-url` | `MCP_UPSTREAM_BASE_URL` | `https://openrouter.ai/api/v1` |
-| `--upstream-api-key` | `MCP_UPSTREAM_API_KEY` | unset |
-| `--trace-path` | `MCP_TRACE_PATH` | `traces/model-correction-proxy.jsonl` |
+| `--bind` | `ATTUNE_BIND_ADDR` | `127.0.0.1:8080` |
+| `--config` | `ATTUNE_CONFIG_PATH` | unset |
+| `--upstream-base-url` | `ATTUNE_UPSTREAM_BASE_URL` | `https://openrouter.ai/api/v1` |
+| `--upstream-api-key` | `ATTUNE_UPSTREAM_API_KEY` | unset |
+| `--trace-path` | `ATTUNE_TRACE_PATH` | `traces/attune.jsonl` |
 
 For `serve`, the upstream API key also falls back to `OPENROUTER_API_KEY`.
 
@@ -470,7 +472,7 @@ the proxy can return:
 ```sh
 nix develop --command cargo run -- \
   export-dataset \
-  --trace-path traces/model-correction-proxy.jsonl \
+  --trace-path traces/attune.jsonl \
   --output-path datasets/corrections.jsonl
 ```
 
@@ -485,7 +487,7 @@ Request-adapter prompt datasets are kept separate from correction-agent datasets
 ```sh
 nix develop --command cargo run -- \
   replay \
-  --trace-path traces/model-correction-proxy.jsonl
+  --trace-path traces/attune.jsonl
 ```
 
 Replay re-runs recorded upstream responses through the current interpreter/repair pipeline and reports mismatches. Generated IDs are ignored during semantic comparison.
@@ -577,13 +579,13 @@ nix develop --command cargo run -- \
   --max-examples 12
 ```
 
-This loads dataset rows as typed DSRs examples, runs GEPA against the correction-prompt program, and writes a report with the best discovered instruction, artifact metadata, and optimization statistics. `--target-model` is required and names the model under test. `--base-url` is the target-model OpenAI-compatible endpoint, normally OpenRouter for non-Anthropic target models. `--model` is the GEPA reflection/proposal model and defaults to native Anthropic `anthropic:claude-sonnet-4-6` through `MCP_GEPA_REFLECTION_MODEL`; `--judge-model` is the GEPA scoring model and defaults to native Anthropic `anthropic:claude-sonnet-4-6` through `MCP_GEPA_JUDGE_MODEL`. The runner rejects configurations where the reflection or judge model is the same as the target model. The command also accepts `--reflection-base-url`, `--reflection-api-key`, `--judge-base-url`, `--judge-api-key`, `--profile`, `--artifact-id`, and `--seed-artifact` so provider routing and artifacts can be controlled explicitly.
+This loads dataset rows as typed DSRs examples, runs GEPA against the correction-prompt program, and writes a report with the best discovered instruction, artifact metadata, and optimization statistics. `--target-model` is required and names the model under test. `--base-url` is the target-model OpenAI-compatible endpoint, normally OpenRouter for non-Anthropic target models. `--model` is the GEPA reflection/proposal model and defaults to native Anthropic `anthropic:claude-sonnet-4-6` through `ATTUNE_GEPA_REFLECTION_MODEL`; `--judge-model` is the GEPA scoring model and defaults to native Anthropic `anthropic:claude-sonnet-4-6` through `ATTUNE_GEPA_JUDGE_MODEL`. The runner rejects configurations where the reflection or judge model is the same as the target model. The command also accepts `--reflection-base-url`, `--reflection-api-key`, `--judge-base-url`, `--judge-api-key`, `--profile`, `--artifact-id`, and `--seed-artifact` so provider routing and artifacts can be controlled explicitly.
 
 Both GEPA commands expose `--lm-max-tokens`, defaulting to `128000`, the current maximum accepted output-token cap for the default Anthropic Sonnet optimizer/judge model. This is separate from the live proxy request path: client `max_tokens` values are still passed through only when provided. The GEPA runner sets a high optimizer token budget because `dspy-rs` sends an explicit `max_tokens` value for its own optimizer, reflection, judge, and target-model calls, and truncated optimizer instructions are not useful artifacts. Do not raise the default above the provider's accepted cap; Anthropic rejects `200000` for `claude-sonnet-4-6`, and the runner now rejects that known-invalid cap before starting live calls.
 
 Request-adapter GEPA uses a local JSON adapter for GEPA's own reflection/proposal calls instead of the default DSRs chat adapter. The runtime candidate still renders through the selected proxy `dsrs_history_format`; the JSON adapter only prevents GEPA's outer meta-parser from truncating optimized instructions that legitimately contain literal `[[ ## content ## ]]`, `[[ ## tool_calls ## ]]`, or `[[ ## completed ## ]]` text.
 
-GEPA treats infrastructure failures as fatal. Target-model HTTP errors, judge HTTP errors, invalid judge JSON, and non-JSON judge responses abort the run instead of becoming `0.0` score examples. The optimizer also refuses to write an artifact when the selected instruction is empty. Set `MCP_GEPA_DEBUG=1` to print per-case rollout scores, judge feedback, and parsed predictions while debugging a run.
+GEPA treats infrastructure failures as fatal. Target-model HTTP errors, judge HTTP errors, invalid judge JSON, and non-JSON judge responses abort the run instead of becoming `0.0` score examples. The optimizer also refuses to write an artifact when the selected instruction is empty. Set `ATTUNE_GEPA_DEBUG=1` to print per-case rollout scores, judge feedback, and parsed predictions while debugging a run.
 
 GEPA labels are kept out of the reflected `Example` payload. The optimizer sees the real request, prediction, parser events, LLM-judge score, and generalized judge feedback; hidden labels such as `expected_output` and `expected_repair` stay in a side table available to the Sonnet judge only. Deterministic parser/scoring signals may be passed to the judge as context, but they are not the final GEPA judge.
 
@@ -594,7 +596,7 @@ For request-adapter profile guidance, use a separate dataset and optimizer:
 ```sh
 nix develop --command cargo run -- \
   export-request-adapter-dataset \
-  --trace-path traces/model-correction-proxy.jsonl \
+  --trace-path traces/attune.jsonl \
   --output-path datasets/request-adapter/gemma-dsrs-conservative.jsonl \
   --trace-id trace_bb26a5f316ca486796231bfd184ac723 \
   --expected-output-json '{"content":"","tool_calls":[{"name":"read","arguments":{"path":"/Users/tony/Dev/ThirdParties/pi-mono/packages/coding-agent/docs/packages.md"}}]}' \
@@ -703,7 +705,7 @@ Then run the proxy against it:
 nix develop --command cargo run -- \
   --bind 127.0.0.1:18080 \
   --upstream-base-url http://127.0.0.1:18081/v1 \
-  --trace-path /tmp/model-correction-proxy-trace.jsonl \
+  --trace-path /tmp/attune-trace.jsonl \
   serve
 ```
 
@@ -755,7 +757,7 @@ nix flake check
 │   └── mock_upstream.rs
 └── src/
     ├── agents.rs
-    ├── bin/proxy.rs
+    ├── bin/attune.rs
     ├── config.rs
     ├── dataset.rs
     ├── eval.rs
@@ -785,7 +787,7 @@ nix flake check
 
 ### Adding a model profile
 
-Prefer adding or overriding profiles through `--config` / `MCP_CONFIG_PATH`. Built-in Rust profiles are still useful for defaults and common families.
+Prefer adding or overriding profiles through `--config` / `ATTUNE_CONFIG_PATH`. Built-in Rust profiles are still useful for defaults and common families.
 
 For a config profile, decide:
 

@@ -2,7 +2,7 @@
 
 This is an implementation idea document, not a committed integration contract.
 It records what HALO appears to do from its docs and source, then maps it to the
-model-correction-proxy architecture.
+attune architecture.
 
 HALO checkout reviewed:
 
@@ -382,7 +382,7 @@ HALO should sit outside that live request path:
 
 ```text
 Live path:
-client -> model-correction-proxy -> upstream model -> repaired response -> client
+client -> attune -> upstream model -> repaired response -> client
 
 Outer loop:
 proxy traces -> HALO-compatible trace export -> HALO analysis -> report
@@ -478,8 +478,8 @@ The least disruptive integration is a converter:
 
 ```sh
 cargo run -- export-halo-traces \
-  --trace-path traces/model-correction-proxy.jsonl \
-  --output-path traces/model-correction-proxy.halo.jsonl
+  --trace-path traces/attune.jsonl \
+  --output-path traces/attune.halo.jsonl
 ```
 
 The converter can preserve our native trace format while producing HALO-shaped
@@ -503,7 +503,7 @@ Candidate span tree:
 ```text
 trace_id = proxy trace_id
 
-model_correction_proxy.request                 (AGENT or CHAIN)
+attune.request                 (AGENT or CHAIN)
 |-- gateway.normalize_request                  (SPAN)
 |-- profile.resolve                            (SPAN)
 |-- prompt_adapter.adapt_request               (SPAN)
@@ -526,33 +526,33 @@ Every span should include common attributes:
 
 ```text
 inference.export.schema_version = 1
-inference.project_id = "model-correction-proxy"
-service.name = "model-correction-proxy"
-mcp.trace_id = <trace id>
-mcp.stage = <stage name>
-mcp.model = <requested model>
-mcp.profile = <profile name>
+inference.project_id = "attune"
+service.name = "attune"
+attune.trace_id = <trace id>
+attune.stage = <stage name>
+attune.model = <requested model>
+attune.profile = <profile name>
 ```
 
 Request/root span attributes:
 
 ```text
-mcp.request.message_count
-mcp.request.tool_count
-mcp.request.stream_requested
-mcp.request.parallel_tool_calls
-mcp.request.tool_choice
-mcp.request.latest_user_preview
+attune.request.message_count
+attune.request.tool_count
+attune.request.stream_requested
+attune.request.parallel_tool_calls
+attune.request.tool_choice
+attune.request.latest_user_preview
 ```
 
 Prompt adapter span attributes:
 
 ```text
-mcp.adapter.mode
-mcp.adapter.tool_format
-mcp.adapter.instruction_len
-mcp.adapter.upstream_tool_count
-mcp.adapter.upstream_stream
+attune.adapter.mode
+attune.adapter.tool_format
+attune.adapter.instruction_len
+attune.adapter.upstream_tool_count
+attune.adapter.upstream_stream
 ```
 
 Upstream LLM span attributes:
@@ -566,20 +566,20 @@ inference.llm.input_tokens
 inference.llm.output_tokens
 llm.input_messages
 llm.output_messages
-mcp.upstream.finish_reason
-mcp.upstream.content_len
-mcp.upstream.reasoning_len
+attune.upstream.finish_reason
+attune.upstream.content_len
+attune.upstream.reasoning_len
 ```
 
 Interpreter span attributes:
 
 ```text
-mcp.interpreted.content_len
-mcp.interpreted.reasoning_present
-mcp.interpreted.tool_intents
-mcp.interpreted.suspicious_stop
-mcp.interpreted.parse_events
-mcp.interpreted.failure_kinds
+attune.interpreted.content_len
+attune.interpreted.reasoning_present
+attune.interpreted.tool_intents
+attune.interpreted.suspicious_stop
+attune.interpreted.parse_events
+attune.interpreted.failure_kinds
 ```
 
 Correction span attributes:
@@ -587,28 +587,28 @@ Correction span attributes:
 ```text
 openinference.span.kind = "LLM"
 inference.observation_kind = "LLM"
-mcp.correction.enabled
-mcp.correction.model
-mcp.correction.input_parser_events
-mcp.correction.input_failure_kinds
-mcp.correction.malformed_response_preview
-mcp.correction.possible
-mcp.correction.confidence
-mcp.correction.explanation
-mcp.correction.tool_calls
-mcp.correction.content_len
-mcp.correction.error
+attune.correction.enabled
+attune.correction.model
+attune.correction.input_parser_events
+attune.correction.input_failure_kinds
+attune.correction.malformed_response_preview
+attune.correction.possible
+attune.correction.confidence
+attune.correction.explanation
+attune.correction.tool_calls
+attune.correction.content_len
+attune.correction.error
 ```
 
 Repair span attributes:
 
 ```text
-mcp.repair.actions
-mcp.repair.final_finish_reason
-mcp.repair.final_tool_call_count
-mcp.repair.final_content_len
-mcp.repair.suppressed
-mcp.repair.replaced_unusable_content
+attune.repair.actions
+attune.repair.final_finish_reason
+attune.repair.final_tool_call_count
+attune.repair.final_content_len
+attune.repair.suppressed
+attune.repair.replaced_unusable_content
 ```
 
 Potentially sensitive raw content should be configurable:
@@ -721,26 +721,26 @@ Sketch only:
   },
   "resource": {
     "attributes": {
-      "service.name": "model-correction-proxy"
+      "service.name": "attune"
     }
   },
   "scope": {
-    "name": "model-correction-proxy",
+    "name": "attune",
     "version": "dev"
   },
   "attributes": {
     "openinference.span.kind": "CHAIN",
     "inference.export.schema_version": 1,
-    "inference.project_id": "model-correction-proxy",
+    "inference.project_id": "attune",
     "inference.observation_kind": "SPAN",
     "inference.llm.model_name": "qwen/qwen3.5-9b",
     "inference.agent_name": "response_interpreter",
-    "mcp.profile": "qwen-dsrs",
-    "mcp.stage": "response_interpreter",
-    "mcp.interpreted.failure_kinds": "[\"DsrsContentOutsideTaggedFields\",\"DsrsInvalidToolCallsJson\",\"TemplateLeak\"]",
-    "mcp.interpreted.parse_events": "[\"parsed response through DSRs tool-use contract\",\"DSRs tool_calls field was not valid JSON\"]",
-    "mcp.interpreted.tool_intents": "[]",
-    "mcp.interpreted.content_preview": "---"
+    "attune.profile": "qwen-dsrs",
+    "attune.stage": "response_interpreter",
+    "attune.interpreted.failure_kinds": "[\"DsrsContentOutsideTaggedFields\",\"DsrsInvalidToolCallsJson\",\"TemplateLeak\"]",
+    "attune.interpreted.parse_events": "[\"parsed response through DSRs tool-use contract\",\"DSRs tool_calls field was not valid JSON\"]",
+    "attune.interpreted.tool_intents": "[]",
+    "attune.interpreted.content_preview": "---"
   }
 }
 ```
@@ -816,8 +816,8 @@ Add a CLI command:
 
 ```sh
 cargo run -- export-halo-traces \
-  --trace-path traces/model-correction-proxy.jsonl \
-  --output-path traces/model-correction-proxy.halo.jsonl
+  --trace-path traces/attune.jsonl \
+  --output-path traces/attune.halo.jsonl
 ```
 
 The command should:
@@ -835,8 +835,8 @@ The command should:
 Run:
 
 ```sh
-halo traces/model-correction-proxy.halo.jsonl \
-  -p "Find recurring model-correction-proxy failure modes and suggest concrete proxy changes"
+halo traces/attune.halo.jsonl \
+  -p "Find recurring attune failure modes and suggest concrete proxy changes"
 ```
 
 Manually validate whether HALO's claims are grounded in trace ids and actual

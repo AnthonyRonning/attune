@@ -5,8 +5,8 @@ shipped binary as default model-profile behavior.
 
 Runtime config files are still the normal customization path. The built-in
 defaults layer is the final promotion step for artifacts that should work even
-when someone installs or ships `model-correction-proxy` as a standalone binary
-with no local `datasets/` directory.
+when someone installs or ships `attune` as a standalone binary with no local
+`datasets/` directory.
 
 For the runtime config schema that can override these built-ins, see
 [`../docs/config-reference.md`](../docs/config-reference.md).

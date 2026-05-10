@@ -51,7 +51,7 @@ The current implementation already has the core pipeline needed for this design:
 | Optimization | `src/optimization.rs` runs GEPA against correction-agent and request-adapter prompt programs and writes profile-aware artifacts |
 | Artifact promotion | `src/promotion.rs` validates a GEPA artifact and promotes it into the matching profile config field |
 
-The first configuration slice is implemented. `ProxyConfig` can now load TOML, JSON, or JSON5 files from `--config` / `MCP_CONFIG_PATH`; configured profiles override built-ins; profile revision/source/history-format/artifact/provider metadata is written to traces; request-adapter and correction-agent instruction artifacts are loaded from filesystem paths or `builtin:<artifact-id>` references; and GEPA reports include profile, revision, artifact, and request-adapter history-format metadata.
+The first configuration slice is implemented. `ProxyConfig` can now load TOML, JSON, or JSON5 files from `--config` / `ATTUNE_CONFIG_PATH`; configured profiles override built-ins; profile revision/source/history-format/artifact/provider metadata is written to traces; request-adapter and correction-agent instruction artifacts are loaded from filesystem paths or `builtin:<artifact-id>` references; and GEPA reports include profile, revision, artifact, and request-adapter history-format metadata.
 
 The remaining limitation is that not every planned per-model knob is exposed yet. Tool mode, tool format, model matching, profile guidance, correction model, correction passes, provider routing, and prompt artifacts are configurable. Parser strictness, correction trigger policy, provider health scoring, and retry strategy still live mostly in shared code and coarse global config.
 
@@ -104,8 +104,8 @@ defaults:
     stream_mode: buffer_then_sse
     pass_through_token_limits: true
   trace:
-    main_path: traces/model-correction-proxy.jsonl
-    correction_path: traces/model-correction-proxy-corrections.jsonl
+    main_path: traces/attune.jsonl
+    correction_path: traces/attune-corrections.jsonl
 
 profiles:
   balanced-default:
@@ -335,7 +335,7 @@ Request-adapter GEPA uses a local JSON adapter for the optimizer's own reflectio
 
 Both GEPA commands support `--seed-artifact`. When supplied, the optimizer extracts `best_instruction` from that artifact and uses it as the starting instruction before GEPA proposes revisions. This is the preferred path for continuing a model/profile/history-format line from the current best artifact instead of restarting from the built-in profile text. Reports record `seed_artifact_path` so seeded runs are reproducible.
 
-GEPA rollout infrastructure errors are not optimization examples. Target-model transport failures, judge transport failures, non-JSON judge output, and invalid judge JSON abort the run instead of being normalized into a `0.0` score. That keeps network/provider/sandbox failures from producing empty or misleading "best" instructions. Empty or malformed target-model outputs still remain valid scoreable model-behavior failures and should be curated into model/profile-specific datasets when they represent real behavior. `MCP_GEPA_DEBUG=1` enables per-case rollout diagnostics for debugging this boundary.
+GEPA rollout infrastructure errors are not optimization examples. Target-model transport failures, judge transport failures, non-JSON judge output, and invalid judge JSON abort the run instead of being normalized into a `0.0` score. That keeps network/provider/sandbox failures from producing empty or misleading "best" instructions. Empty or malformed target-model outputs still remain valid scoreable model-behavior failures and should be curated into model/profile-specific datasets when they represent real behavior. `ATTUNE_GEPA_DEBUG=1` enables per-case rollout diagnostics for debugging this boundary.
 
 GEPA labels are not included in the reflected `Example` payload. Dataset labels such as `expected_output` and `expected_repair` are loaded into a side table keyed by case ID. The target model rollout produces a prediction, parser diagnostics, and deterministic structural signals; Sonnet judges the rollout against the hidden label and returns the final score plus generalized feedback for reflection. Judge feedback must not quote hidden labels, exact commands, exact file paths, or benchmark metadata back into the optimizer prompt.
 
@@ -411,7 +411,7 @@ Status: implemented for the existing `ModelProfile` shape.
 Add a CLI option and environment variable:
 
 - `--config`
-- `MCP_CONFIG_PATH`
+- `ATTUNE_CONFIG_PATH`
 
 The loader should merge:
 

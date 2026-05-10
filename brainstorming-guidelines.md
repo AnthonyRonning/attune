@@ -96,7 +96,7 @@ What exists now:
 - A typed DSRs correction agent with `possible`, `confidence`, `explanation`, `content`, and `tool_calls` outputs.
 - Main JSONL request traces plus correction-agent sidecar traces.
 - Trace summaries, correction-agent dataset export, request-adapter dataset export, replay, regression evaluation, and metadata-rich GEPA artifacts.
-- TOML/JSON/JSON5 config loading through `--config` / `MCP_CONFIG_PATH`.
+- TOML/JSON/JSON5 config loading through `--config` / `ATTUNE_CONFIG_PATH`.
 - Runtime loading of request-adapter and correction-agent instruction artifacts from profiles.
 - Profile revision/source/artifact metadata recorded in main and correction-agent traces.
 - Dataset export filters by model, profile, failure kind, repair action, and correction result.
@@ -1002,7 +1002,7 @@ That makes the proxy harder, but also much more generally useful.
 - define initial failure cases
 - use proxy-owned tool rendering as the primary reliability path while keeping pass-through repair available
 
-### Phase 1: non-streaming correction proxy
+### Phase 1: non-streaming Attune runtime
 
 - OpenAI-compatible chat completions
 - non-streaming only

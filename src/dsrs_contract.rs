@@ -19,7 +19,7 @@ use crate::{
 
 #[Signature]
 struct OpenAiToolUseContract {
-    /// You are an OpenAI-compatible assistant behind a correction proxy. Honor the
+    /// You are an OpenAI-compatible assistant behind Attune. Honor the
     /// serialized conversation, choose tools only from available_tools, and produce
     /// exactly the DSRs output fields. Put user-facing text in content. Put tool
     /// calls in tool_calls as a JSON array of {"name": string, "arguments": object}.

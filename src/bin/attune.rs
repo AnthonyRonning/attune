@@ -1,8 +1,10 @@
-use std::{net::SocketAddr, path::PathBuf};
+use std::{
+    net::SocketAddr,
+    path::{Path, PathBuf},
+};
 
 use anyhow::Context;
-use clap::{Parser, Subcommand};
-use model_correction_proxy::{
+use attune::{
     config::ProxyConfig,
     dataset::{
         export_dataset, export_request_adapter_dataset, DatasetExportConfig, DatasetExportFilter,
@@ -27,35 +29,70 @@ use model_correction_proxy::{
         TraceHarnessImportConfig, TraceHarnessRunConfig,
     },
 };
+use clap::{Parser, Subcommand};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 #[derive(Debug, Parser)]
-#[command(version, about = "OpenAI-compatible model correction proxy")]
+#[command(
+    version,
+    about = "Attune agent contract runtime for OpenAI-compatible models"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
 
-    #[arg(long, env = "MCP_BIND_ADDR", default_value = "127.0.0.1:8080")]
+    #[arg(long, env = "ATTUNE_BIND_ADDR", default_value = "127.0.0.1:8080")]
     bind: SocketAddr,
 
-    #[arg(long, env = "MCP_CONFIG_PATH")]
+    #[arg(long, env = "ATTUNE_CONFIG_PATH")]
     config: Option<String>,
 
-    #[arg(long, env = "MCP_UPSTREAM_BASE_URL")]
+    #[arg(long, env = "ATTUNE_UPSTREAM_BASE_URL")]
     upstream_base_url: Option<String>,
 
-    #[arg(long, env = "MCP_UPSTREAM_API_KEY")]
+    #[arg(long, env = "ATTUNE_UPSTREAM_API_KEY")]
     upstream_api_key: Option<String>,
 
-    #[arg(long, env = "MCP_TRACE_PATH")]
+    #[arg(long, env = "ATTUNE_TRACE_PATH")]
     trace_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct RuntimeOverrides {
+    upstream_base_url: Option<String>,
+    upstream_api_key: Option<String>,
+    trace_path: Option<String>,
+}
+
+impl RuntimeOverrides {
+    fn from_cli(cli: &Cli) -> Self {
+        Self {
+            upstream_base_url: cli.upstream_base_url.clone(),
+            upstream_api_key: cli.upstream_api_key.clone(),
+            trace_path: cli.trace_path.clone(),
+        }
+    }
+
+    fn apply_to_proxy_config(&self, config: &mut ProxyConfig) {
+        if let Some(base_url) = &self.upstream_base_url {
+            config.upstream.base_url = base_url.clone();
+        }
+        config.upstream.api_key = first_non_empty([
+            self.upstream_api_key.clone(),
+            std::env::var("OPENROUTER_API_KEY").ok(),
+            config.upstream.api_key.clone(),
+        ]);
+        if let Some(trace_path) = &self.trace_path {
+            config.trace.path = trace_path.clone().into();
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
 enum Command {
     Serve,
     ExportDataset {
-        #[arg(long, default_value = "traces/model-correction-proxy.jsonl")]
+        #[arg(long, default_value = "traces/attune.jsonl")]
         trace_path: String,
         #[arg(long, default_value = "datasets/corrections.jsonl")]
         output_path: String,
@@ -73,7 +110,7 @@ enum Command {
         correction_results: Vec<String>,
     },
     ExportRequestAdapterDataset {
-        #[arg(long, default_value = "traces/model-correction-proxy.jsonl")]
+        #[arg(long, default_value = "traces/attune.jsonl")]
         trace_path: String,
         #[arg(long, default_value = "datasets/request-adapter/request-adapter.jsonl")]
         output_path: String,
@@ -107,11 +144,11 @@ enum Command {
         prompt_goal: Option<String>,
     },
     Replay {
-        #[arg(long, default_value = "traces/model-correction-proxy.jsonl")]
+        #[arg(long, default_value = "traces/attune.jsonl")]
         trace_path: String,
     },
     InspectTraces {
-        #[arg(long, default_value = "traces/model-correction-proxy.jsonl")]
+        #[arg(long, default_value = "traces/attune.jsonl")]
         trace_path: String,
         #[arg(long, default_value_t = 20)]
         limit: usize,
@@ -133,25 +170,25 @@ enum Command {
         output_path: String,
         #[arg(
             long,
-            env = "MCP_UPSTREAM_BASE_URL",
+            env = "ATTUNE_UPSTREAM_BASE_URL",
             default_value = "https://openrouter.ai/api/v1"
         )]
         base_url: String,
         #[arg(
             long,
-            env = "MCP_GEPA_REFLECTION_MODEL",
+            env = "ATTUNE_GEPA_REFLECTION_MODEL",
             default_value = DEFAULT_GEPA_REFLECTION_MODEL
         )]
         model: String,
-        #[arg(long, env = "MCP_GEPA_REFLECTION_BASE_URL")]
+        #[arg(long, env = "ATTUNE_GEPA_REFLECTION_BASE_URL")]
         reflection_base_url: Option<String>,
-        #[arg(long, env = "MCP_GEPA_REFLECTION_API_KEY")]
+        #[arg(long, env = "ATTUNE_GEPA_REFLECTION_API_KEY")]
         reflection_api_key: Option<String>,
-        #[arg(long, env = "MCP_GEPA_JUDGE_MODEL", default_value = DEFAULT_GEPA_JUDGE_MODEL)]
+        #[arg(long, env = "ATTUNE_GEPA_JUDGE_MODEL", default_value = DEFAULT_GEPA_JUDGE_MODEL)]
         judge_model: String,
-        #[arg(long, env = "MCP_GEPA_JUDGE_BASE_URL")]
+        #[arg(long, env = "ATTUNE_GEPA_JUDGE_BASE_URL")]
         judge_base_url: Option<String>,
-        #[arg(long, env = "MCP_GEPA_JUDGE_API_KEY")]
+        #[arg(long, env = "ATTUNE_GEPA_JUDGE_API_KEY")]
         judge_api_key: Option<String>,
         #[arg(long)]
         target_model: Option<String>,
@@ -183,25 +220,25 @@ enum Command {
         output_path: String,
         #[arg(
             long,
-            env = "MCP_UPSTREAM_BASE_URL",
+            env = "ATTUNE_UPSTREAM_BASE_URL",
             default_value = "https://openrouter.ai/api/v1"
         )]
         base_url: String,
         #[arg(
             long,
-            env = "MCP_GEPA_REFLECTION_MODEL",
+            env = "ATTUNE_GEPA_REFLECTION_MODEL",
             default_value = DEFAULT_GEPA_REFLECTION_MODEL
         )]
         model: String,
-        #[arg(long, env = "MCP_GEPA_REFLECTION_BASE_URL")]
+        #[arg(long, env = "ATTUNE_GEPA_REFLECTION_BASE_URL")]
         reflection_base_url: Option<String>,
-        #[arg(long, env = "MCP_GEPA_REFLECTION_API_KEY")]
+        #[arg(long, env = "ATTUNE_GEPA_REFLECTION_API_KEY")]
         reflection_api_key: Option<String>,
-        #[arg(long, env = "MCP_GEPA_JUDGE_MODEL", default_value = DEFAULT_GEPA_JUDGE_MODEL)]
+        #[arg(long, env = "ATTUNE_GEPA_JUDGE_MODEL", default_value = DEFAULT_GEPA_JUDGE_MODEL)]
         judge_model: String,
-        #[arg(long, env = "MCP_GEPA_JUDGE_BASE_URL")]
+        #[arg(long, env = "ATTUNE_GEPA_JUDGE_BASE_URL")]
         judge_base_url: Option<String>,
-        #[arg(long, env = "MCP_GEPA_JUDGE_API_KEY")]
+        #[arg(long, env = "ATTUNE_GEPA_JUDGE_API_KEY")]
         judge_api_key: Option<String>,
         #[arg(long)]
         target_model: Option<String>,
@@ -377,28 +414,19 @@ async fn main() -> anyhow::Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
     tracing::debug!(
-        "logging initialized; set RUST_LOG=model_correction_proxy=debug,tower_http=debug for more detail or model_correction_proxy=trace for request-shape traces"
+        "logging initialized; set RUST_LOG=attune=debug,tower_http=debug for more detail or attune=trace for request-shape traces"
     );
 
     let cli = Cli::parse();
     let runtime_config_path = cli.config.as_deref().map(PathBuf::from);
+    let runtime_overrides = RuntimeOverrides::from_cli(&cli);
+    let bind = cli.bind;
     match cli.command.unwrap_or(Command::Serve) {
         Command::Serve => {
-            let mut config =
-                ProxyConfig::from_optional_path(runtime_config_path.as_deref()).await?;
-            if let Some(base_url) = cli.upstream_base_url {
-                config.upstream.base_url = base_url;
-            }
-            config.upstream.api_key = first_non_empty([
-                cli.upstream_api_key,
-                std::env::var("OPENROUTER_API_KEY").ok(),
-                config.upstream.api_key.clone(),
-            ]);
-            if let Some(trace_path) = cli.trace_path {
-                config.trace.path = trace_path.into();
-            }
+            let config =
+                load_runtime_config(runtime_config_path.as_deref(), &runtime_overrides).await?;
             let gateway = Gateway::new(config)?;
-            gateway.serve(cli.bind).await.context("proxy server failed")
+            gateway.serve(bind).await.context("proxy server failed")
         }
         Command::ExportDataset {
             trace_path,
@@ -491,7 +519,7 @@ async fn main() -> anyhow::Result<()> {
             profile,
         } => {
             let proxy_config =
-                ProxyConfig::from_optional_path(runtime_config_path.as_deref()).await?;
+                load_runtime_config(runtime_config_path.as_deref(), &runtime_overrides).await?;
             let report = run_regression_suite(RegressionConfig {
                 suite_path: suite_path.into(),
                 proxy_config,
@@ -741,7 +769,7 @@ async fn main() -> anyhow::Result<()> {
                 require_provider_parameters,
             } => {
                 let proxy_config =
-                    ProxyConfig::from_optional_path(runtime_config_path.as_deref()).await?;
+                    load_runtime_config(runtime_config_path.as_deref(), &runtime_overrides).await?;
                 let report = run_trace_harness(TraceHarnessRunConfig {
                     scenarios_path: scenarios_path.into(),
                     output_path: output_path.into(),
@@ -783,7 +811,7 @@ async fn main() -> anyhow::Result<()> {
                 require_provider_parameters,
             } => {
                 let proxy_config =
-                    ProxyConfig::from_optional_path(runtime_config_path.as_deref()).await?;
+                    load_runtime_config(runtime_config_path.as_deref(), &runtime_overrides).await?;
                 let report = run_trace_harness_compare(TraceHarnessCompareConfig {
                     scenarios_path: scenarios_path.into(),
                     output_path: output_path.into(),
@@ -810,6 +838,15 @@ async fn main() -> anyhow::Result<()> {
             }
         },
     }
+}
+
+async fn load_runtime_config(
+    path: Option<&Path>,
+    overrides: &RuntimeOverrides,
+) -> anyhow::Result<ProxyConfig> {
+    let mut config = ProxyConfig::from_optional_path(path).await?;
+    overrides.apply_to_proxy_config(&mut config);
+    Ok(config)
 }
 
 fn provider_routing_from_flags(

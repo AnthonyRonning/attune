@@ -1,7 +1,7 @@
 use std::{net::SocketAddr, path::PathBuf};
 
+use attune::{config::ProxyConfig, model_profile::ModelProfile, Gateway};
 use httpmock::{Method::POST, MockServer};
-use model_correction_proxy::{config::ProxyConfig, model_profile::ModelProfile, Gateway};
 use serde_json::{json, Value};
 use tempfile::NamedTempFile;
 use tokio::task::JoinHandle;
@@ -157,7 +157,7 @@ async fn run_request(request: Value, upstream_response: Value) -> (String, Strin
 }
 
 #[tokio::test]
-async fn proxy_e2e_matrix_for_pi_like_prompts() {
+async fn attune_e2e_matrix_for_pi_like_prompts() {
     let (body, trace) = run_case(
         "qwen/qwen3.5-9b",
         "hey",
@@ -242,7 +242,7 @@ async fn proxy_e2e_matrix_for_pi_like_prompts() {
 }
 
 #[tokio::test]
-async fn proxy_e2e_translates_multiturn_tool_history_into_dsrs_context() {
+async fn attune_e2e_translates_multiturn_tool_history_into_dsrs_context() {
     let request = json!({
         "model": "google/gemma-4-26b-a4b-it",
         "messages": [
@@ -302,7 +302,7 @@ async fn proxy_e2e_translates_multiturn_tool_history_into_dsrs_context() {
 }
 
 #[tokio::test]
-async fn proxy_e2e_routes_adjacent_json_violation_through_correction_agent() {
+async fn attune_e2e_routes_adjacent_json_violation_through_correction_agent() {
     let upstream = MockServer::start_async().await;
     let _correction_mock = upstream
         .mock_async(|when, then| {
@@ -389,7 +389,7 @@ async fn proxy_e2e_routes_adjacent_json_violation_through_correction_agent() {
 }
 
 #[tokio::test]
-async fn proxy_e2e_configured_profile_controls_unknown_model_and_trace_metadata() {
+async fn attune_e2e_configured_profile_controls_unknown_model_and_trace_metadata() {
     let upstream = MockServer::start_async().await;
     let _upstream_mock = upstream
         .mock_async(|when, then| {
@@ -452,7 +452,7 @@ async fn proxy_e2e_configured_profile_controls_unknown_model_and_trace_metadata(
 }
 
 #[tokio::test]
-async fn proxy_e2e_correction_agent_uses_configured_instruction_artifact() {
+async fn attune_e2e_correction_agent_uses_configured_instruction_artifact() {
     let upstream = MockServer::start_async().await;
     let _correction_mock = upstream
         .mock_async(|when, then| {
@@ -544,7 +544,7 @@ async fn proxy_e2e_correction_agent_uses_configured_instruction_artifact() {
 }
 
 #[tokio::test]
-async fn proxy_e2e_routes_dsrs_contract_violation_through_correction_agent() {
+async fn attune_e2e_routes_dsrs_contract_violation_through_correction_agent() {
     let upstream = MockServer::start_async().await;
     let _correction_mock = upstream
         .mock_async(|when, then| {
@@ -626,7 +626,7 @@ async fn proxy_e2e_routes_dsrs_contract_violation_through_correction_agent() {
 }
 
 #[tokio::test]
-async fn proxy_e2e_routes_empty_dsrs_output_through_correction_agent() {
+async fn attune_e2e_routes_empty_dsrs_output_through_correction_agent() {
     let upstream = MockServer::start_async().await;
     let _correction_mock = upstream
         .mock_async(|when, then| {
@@ -712,7 +712,7 @@ async fn proxy_e2e_routes_empty_dsrs_output_through_correction_agent() {
 }
 
 #[tokio::test]
-async fn proxy_e2e_parses_tagged_dsrs_with_inner_field_labels() {
+async fn attune_e2e_parses_tagged_dsrs_with_inner_field_labels() {
     let (body, _trace) = run_case(
         "qwen/qwen3.5-9b",
         "oh cool. can you dive into all of the subpackages and tell me about them too?",
@@ -746,7 +746,7 @@ async fn proxy_e2e_parses_tagged_dsrs_with_inner_field_labels() {
 }
 
 #[tokio::test]
-async fn proxy_e2e_parses_tagged_dsrs_with_adjacent_tool_call_arrays() {
+async fn attune_e2e_parses_tagged_dsrs_with_adjacent_tool_call_arrays() {
     let (body, _trace) = run_case(
         "qwen/qwen3.5-9b",
         "oh cool. there's a lot of sub packages here. can you dive into them to get more information about them all?",
@@ -869,9 +869,9 @@ async fn live_openrouter_pi_prompt_matrix() {
 
 fn live_openrouter_key() -> Option<String> {
     read_env_key("OPENROUTER_API_KEY")
-        .or_else(|| read_env_key("MCP_UPSTREAM_API_KEY"))
+        .or_else(|| read_env_key("ATTUNE_UPSTREAM_API_KEY"))
         .or_else(|| env_key("OPENROUTER_API_KEY"))
-        .or_else(|| env_key("MCP_UPSTREAM_API_KEY"))
+        .or_else(|| env_key("ATTUNE_UPSTREAM_API_KEY"))
 }
 
 fn env_key(name: &str) -> Option<String> {

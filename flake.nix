@@ -1,5 +1,5 @@
 {
-  description = "Development shell for the model correction proxy";
+  description = "Development shell for Attune";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
