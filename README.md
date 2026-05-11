@@ -55,38 +55,6 @@ Most agent harnesses only see one thing: an OpenAI-compatible assistant
 message. If that message has neither usable `content` nor valid `tool_calls`,
 the loop stops, repeats itself, or loses the model's intended action.
 
-## The Approach
-
-Attune owns the reliability boundary around a model call:
-
-```text
-OpenAI client request
-  -> normalize request and select model profile
-  -> translate tools/history into a model-specific contract
-  -> call the upstream model
-  -> interpret native, DSRs, XML, JSON, and text tool intent
-  -> repair syntax/schema/contract failures
-  -> optionally invoke a typed correction agent
-  -> write trace data for audit, replay, datasets, and GEPA
-  -> return an OpenAI-compatible assistant message
-```
-
-This is intentionally a full runtime loop. The hard part is not recognizing one
-malformed tool call. The hard part is making the whole system sustainable:
-
-- the full conversation history has to be rendered consistently, not just the
-  latest prompt
-- different model families may need different history formats, profile
-  guidance, and provider routing
-- deterministic repair should fix clear syntax/schema issues without inventing
-  intent
-- ambiguous or semantic recovery should go through a correction agent with
-  typed outputs
-- every failure should be traceable enough to become a regression case or GEPA
-  training row
-- optimized prompts should be promoted deliberately into config and then into
-  built-in defaults
-
 ## What Makes Attune Different
 
 Attune is deliberately more than a proxy with a few parser fallbacks:
@@ -97,14 +65,18 @@ Attune is deliberately more than a proxy with a few parser fallbacks:
   models can use different history renderers, tool guidance, correction
   settings, provider routing, and optimized prompt artifacts.
 - **Conversation-aware formatting:** Prior assistant tool calls and tool
-  results are reformatted into the selected contract so the model learns the
-  same output shape across turns.
+  results are reformatted into the selected contract. Attune does not only
+  rewrite the latest prompt; it keeps the full conversation history aligned
+  with the format the model is expected to use now.
 - **Layered recovery:** The runtime separates deterministic interpretation,
   schema repair, policy decisions, and a typed DSRs correction-agent fallback
-  instead of mixing one-off fixes into one parser.
+  instead of mixing one-off fixes into one parser. Deterministic repair handles
+  clear syntax/schema problems; ambiguous or semantic recovery goes through a
+  typed correction agent.
 - **Trace-to-dataset loop:** Traces are rich enough to inspect failures after
   the fact, export exact request-adapter or correction-agent dataset rows,
-  replay regressions, and run GEPA prompt optimization.
+  replay regressions, and run GEPA prompt optimization. Every meaningful
+  failure should be able to become a regression case or training row.
 - **Explicit promotion:** Optimized artifacts are reviewed, promoted into
   profile config, and then promoted into embedded built-in defaults only when
   they should ship with the binary.
