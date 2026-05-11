@@ -231,6 +231,152 @@ Main source areas:
 | Traces/datasets/eval | `src/trace.rs`, `src/dataset.rs`, `src/replay.rs`, `src/eval.rs`, `src/trace_harness.rs` | Trace, replay, dataset, and evaluation workflows |
 | Optimization/promotion | `src/optimization.rs`, `src/promotion.rs`, `build.rs` | GEPA artifacts and built-in default promotion |
 
+## DSRs Request Transform
+
+In proxy-owned DSRs mode, the client can send a normal OpenAI-compatible
+request:
+
+```jsonc
+{
+  "model": "qwen/qwen3.5-9b",
+  "messages": [
+    {"role": "system", "content": "You are a coding agent."},
+    {"role": "user", "content": "Read Cargo.toml"},
+    {
+      "role": "assistant",
+      "content": "",
+      "tool_calls": [
+        {
+          "id": "call_1",
+          "type": "function",
+          "function": {
+            "name": "read",
+            "arguments": "{\"path\":\"Cargo.toml\"}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_1",
+      "content": "[package]\nname = \"attune\""
+    },
+    {"role": "user", "content": "What is this project?"}
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "read",
+        "description": "Read file contents",
+        "parameters": {
+          "type": "object",
+          "required": ["path"],
+          "properties": {"path": {"type": "string"}}
+        }
+      }
+    }
+  ],
+  "tool_choice": "auto",
+  "parallel_tool_calls": false
+}
+```
+
+Attune selects a model profile, removes native upstream tool definitions for
+proxy-owned profiles, and renders the request into a DSRs contract. In the
+default `append_only` history format, the upstream model sees a runtime context
+first, followed by append-only conversation messages:
+
+```text
+system:
+  You are an OpenAI-compatible assistant behind Attune.
+  Produce exactly these DSRs output fields:
+  - content: plain user-facing text
+  - tool_calls: JSON array of {"name": string, "arguments": object}
+  Use [] when no tool call is needed.
+  If parallel_tool_calls is false, emit at most one tool call.
+
+user:
+  [[ ## profile_guidance ## ]]
+  <model/profile-specific guidance or promoted GEPA artifact>
+
+  [[ ## system_context ## ]]
+  role: system
+  content:
+  You are a coding agent.
+
+  [[ ## conversation ## ]]
+  Append-only conversation follows as chat messages.
+
+  [[ ## available_tools ## ]]
+  [
+    {
+      "type": "function",
+      "function": {
+        "name": "read",
+        "description": "Read file contents",
+        "parameters": {"type": "object", "...": "..."}
+      }
+    }
+  ]
+
+  [[ ## tool_choice ## ]]
+  "auto"
+
+  [[ ## parallel_tool_calls ## ]]
+  false
+
+  The remaining chat messages are append-only conversation history. Prior
+  assistant messages use the same DSRs content/tool_calls output format you
+  must use now. Tool-result messages may use a tool_result field marker and
+  are observations, not an output field you should emit.
+
+user:
+  Read Cargo.toml
+
+assistant:
+  [[ ## content ## ]]
+
+  [[ ## tool_calls ## ]]
+  [
+    {"name": "read", "arguments": {"path": "Cargo.toml"}}
+  ]
+  [[ ## completed ## ]]
+
+user:
+  [[ ## tool_result ## ]]
+  tool_call_id: call_1
+  content:
+  [package]
+  name = "attune"
+  [[ ## completed ## ]]
+
+user:
+  What is this project?
+```
+
+The model must answer with the same output shape:
+
+```text
+[[ ## content ## ]]
+This is a Rust proxy/runtime for adapting OpenAI-compatible tool use across
+models.
+
+[[ ## tool_calls ## ]]
+[]
+
+[[ ## completed ## ]]
+```
+
+Content-only, tool-calls-only, and content plus tool calls are all valid. Empty
+content with empty `tool_calls` is not useful to an agent loop, so Attune treats
+that as a structural failure and routes it through recovery.
+
+`append_only` is the default because it preserves normal multi-turn chat shape
+while making prior assistant/tool turns teach the current DSRs contract. Attune
+also keeps a `regenerated_context` format for profiles that behave better when
+the whole non-system conversation is serialized into one compact transcript.
+
 ## Core Concepts
 
 **Proxy-owned DSRs contracts:** Attune can consume OpenAI-style `tools`, remove
