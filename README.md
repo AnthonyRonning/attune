@@ -17,6 +17,8 @@ provider. It makes tool use an explicit, inspectable, model-specific contract
 instead of assuming the provider's native tool parser, chat template, or
 inference stack will preserve the model's intent.
 
+![Attune architecture flow](docs/assets/attune-flow.png)
+
 The first target is agent tool-calling reliability for open-source and
 OpenAI-compatible models. When a model clearly intends to call a tool but the
 provider returns plain text, malformed JSON, an empty stop, reasoning-only
