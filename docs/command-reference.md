@@ -336,6 +336,7 @@ nix develop --command cargo run -- \
   --profile qwen-dsrs \
   --profile-revision 3 \
   --dsrs-history-format regenerated_context \
+  --target-provider-ignore Venice \
   --seed-artifact datasets/request-adapter/qwen-dsrs-sonnet-fresh-r1-regenerated-context-gepa.json \
   --artifact-id request-adapter/qwen-dsrs/sonnet-post50-r2-regenerated-context \
   --iterations 5 \
@@ -345,10 +346,14 @@ nix develop --command cargo run -- \
 
 Add `ATTUNE_GEPA_DEBUG=1` when diagnosing optimizer behavior. It prints one line
 per scored rollout with the layer, case ID, score, generalized judge feedback,
-and parsed prediction. GEPA infrastructure failures are intentionally fatal:
-target-model HTTP failures, judge HTTP failures, non-JSON judge responses, and
-invalid judge JSON abort the command and do not write artifacts. Model behavior
-failures, such as empty content with empty tool calls, are still scoreable data.
+and parsed prediction. Request-adapter and correction-agent target-model calls
+use Attune's OpenAI-compatible upstream client, preserve the dataset request's
+token controls without adding `max_tokens`, and accept `--target-provider-ignore`
+for OpenRouter provider routing. Target transport/status/decode failures are
+retried and then recorded as unusable scoreable rollouts so long runs can
+continue. Judge HTTP failures, non-JSON judge responses, and invalid judge JSON
+remain fatal and do not write artifacts. Model behavior failures, such as empty
+content with empty tool calls, are still scoreable data.
 
 To compare history format behavior, run the same dataset again with the other
 history format and a different output/artifact ID:

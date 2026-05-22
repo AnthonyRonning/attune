@@ -202,6 +202,8 @@ enum Command {
         profile: Option<String>,
         #[arg(long)]
         profile_revision: Option<u32>,
+        #[arg(long = "target-provider-ignore")]
+        target_provider_ignore: Vec<String>,
         #[arg(long)]
         artifact_id: Option<String>,
         #[arg(long)]
@@ -254,6 +256,8 @@ enum Command {
         profile_revision: Option<u32>,
         #[arg(long)]
         dsrs_history_format: Option<DsrsHistoryFormat>,
+        #[arg(long = "target-provider-ignore")]
+        target_provider_ignore: Vec<String>,
         #[arg(long)]
         artifact_id: Option<String>,
         #[arg(long)]
@@ -555,6 +559,7 @@ async fn main() -> anyhow::Result<()> {
             target_model,
             profile,
             profile_revision,
+            target_provider_ignore,
             artifact_id,
             seed_artifact,
             iterations,
@@ -584,6 +589,7 @@ async fn main() -> anyhow::Result<()> {
                 profile,
                 profile_revision,
                 dsrs_history_format: None,
+                target_provider: target_provider_from_ignore(target_provider_ignore),
                 artifact_id,
                 seed_artifact_path: seed_artifact.map(Into::into),
                 iterations,
@@ -608,6 +614,7 @@ async fn main() -> anyhow::Result<()> {
             profile,
             profile_revision,
             dsrs_history_format,
+            target_provider_ignore,
             artifact_id,
             seed_artifact,
             iterations,
@@ -637,6 +644,7 @@ async fn main() -> anyhow::Result<()> {
                 profile,
                 profile_revision,
                 dsrs_history_format,
+                target_provider: target_provider_from_ignore(target_provider_ignore),
                 artifact_id,
                 seed_artifact_path: seed_artifact.map(Into::into),
                 iterations,
@@ -991,6 +999,18 @@ fn first_non_empty(values: impl IntoIterator<Item = Option<String>>) -> Option<S
         .into_iter()
         .flatten()
         .find(|value| !value.trim().is_empty())
+}
+
+fn target_provider_from_ignore(ignore: Vec<String>) -> Option<ProviderRouting> {
+    let ignore = ignore
+        .into_iter()
+        .map(|provider| provider.trim().to_string())
+        .filter(|provider| !provider.is_empty())
+        .collect::<Vec<_>>();
+    (!ignore.is_empty()).then(|| ProviderRouting {
+        ignore,
+        ..ProviderRouting::default()
+    })
 }
 
 fn gepa_role_api_key(

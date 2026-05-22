@@ -2,6 +2,7 @@ use std::{
     collections::HashMap,
     path::PathBuf,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use anyhow::{Context, Result};
@@ -21,16 +22,25 @@ use serde_json::{json, Value};
 
 use crate::{
     artifacts::extract_instruction_from_path,
-    dsrs_contract::{format_tool_contract, parse_tool_contract_response},
-    model_profile::{builtin_profiles, resolve_profile, DsrsHistoryFormat, ModelProfile},
+    config::UpstreamConfig,
+    model_profile::{
+        builtin_profiles, resolve_profile, DsrsHistoryFormat, ModelProfile, ProviderRouting,
+    },
     normalizer::normalize_request,
-    openai::{ChatCompletionRequest, ChatMessage, OpenAiFunctionTool, OpenAiTool},
+    openai::{
+        ChatCompletionRequest, ChatCompletionResponse, ChatMessage, OpenAiFunctionTool, OpenAiTool,
+    },
+    prompt_adapter::adapt_request,
+    response_interpreter::{interpret_response, ResponseFailureKind, ToolIntent},
+    upstream::{InboundAuth, UpstreamClient, UpstreamError},
 };
 
 pub const DEFAULT_GEPA_LM_MAX_TOKENS: u32 = ANTHROPIC_SONNET_4_6_MAX_OUTPUT_TOKENS;
 pub const DEFAULT_GEPA_REFLECTION_MODEL: &str = "anthropic:claude-sonnet-4-6";
 pub const DEFAULT_GEPA_JUDGE_MODEL: &str = "anthropic:claude-sonnet-4-6";
 const ANTHROPIC_SONNET_4_6_MAX_OUTPUT_TOKENS: u32 = 128_000;
+const GEPA_TARGET_LM_MAX_ATTEMPTS: usize = 3;
+const GEPA_TARGET_LM_TIMEOUT_SECS: u64 = 120;
 
 fn default_gepa_lm_max_tokens() -> u32 {
     DEFAULT_GEPA_LM_MAX_TOKENS
@@ -279,6 +289,7 @@ pub struct GepaOptimizationConfig {
     pub profile: Option<String>,
     pub profile_revision: Option<u32>,
     pub dsrs_history_format: Option<DsrsHistoryFormat>,
+    pub target_provider: Option<ProviderRouting>,
     pub artifact_id: Option<String>,
     pub seed_artifact_path: Option<PathBuf>,
     pub iterations: usize,
@@ -491,7 +502,9 @@ struct RequestAdapterPromptToolCall {
 
 pub struct RequestAdapterPromptProgram {
     predictor: Predict,
-    lm: Option<LM>,
+    target_client: Option<UpstreamClient>,
+    target_model: Option<String>,
+    target_provider: Option<ProviderRouting>,
     judge_lm: Option<LM>,
     judge_cases: GepaJudgeCases,
     fatal_errors: GepaFatalErrors,
@@ -501,7 +514,9 @@ impl Default for RequestAdapterPromptProgram {
     fn default() -> Self {
         Self {
             predictor: Predict::new(RequestAdapterPromptSignature::new()),
-            lm: None,
+            target_client: None,
+            target_model: None,
+            target_provider: None,
             judge_lm: None,
             judge_cases: Arc::new(HashMap::new()),
             fatal_errors: Arc::new(Mutex::new(Vec::new())),
@@ -511,7 +526,9 @@ impl Default for RequestAdapterPromptProgram {
 
 impl RequestAdapterPromptProgram {
     fn runtime(
-        lm: LM,
+        target_client: UpstreamClient,
+        target_model: String,
+        target_provider: Option<ProviderRouting>,
         initial_instruction: Option<String>,
         judge_lm: LM,
         judge_cases: GepaJudgeCases,
@@ -525,14 +542,21 @@ impl RequestAdapterPromptProgram {
         }
         Self {
             predictor: Predict::new(signature),
-            lm: Some(lm),
+            target_client: Some(target_client),
+            target_model: Some(target_model),
+            target_provider,
             judge_lm: Some(judge_lm),
             judge_cases,
             fatal_errors,
         }
     }
 
-    async fn forward_runtime(&self, inputs: Example, lm: &LM) -> Result<Prediction> {
+    async fn forward_runtime(
+        &self,
+        inputs: Example,
+        target_client: &UpstreamClient,
+        target_model: &str,
+    ) -> Result<Prediction> {
         let mut profile = ModelProfile::default_balanced();
         profile.name = string_input(&inputs, "profile", "request-adapter-gepa");
         profile.revision = u32_input(&inputs, "profile_revision").unwrap_or(1);
@@ -540,80 +564,81 @@ impl RequestAdapterPromptProgram {
         profile.tool_instruction = self.predictor.signature.instruction();
         profile.dsrs_history_format =
             dsrs_history_format_input(&inputs).unwrap_or(DsrsHistoryFormat::AppendOnly);
+        profile.provider = self.target_provider.clone();
 
         let request = chat_completion_request_from_adapter_example(&inputs)?;
         let normalized = normalize_request(request)?;
-        let formatted = format_tool_contract(&normalized, &profile)?;
-        let mut chat = Chat::new(Vec::new());
-        for message in formatted.messages {
-            let role = match message.role.as_str() {
-                "system" | "assistant" | "user" => message.role.as_str(),
-                _ => "user",
-            };
-            chat.push(role, &message.content_text().unwrap_or_default());
-        }
+        let mut request = adapt_request(&normalized, &profile)?.upstream_request;
+        request.model = target_model.to_string();
 
-        let response = match lm.call(chat, Vec::new()).await {
+        let response = match call_gepa_target(target_client, &request).await {
             Ok(response) => response,
-            Err(error) if gepa_empty_target_response_error(&error) => {
-                return Ok(empty_request_adapter_target_prediction(format!(
-                    "{error:#}"
-                )));
+            Err(GepaTargetCallFailure::Scoreable { event, reason }) => {
+                return Ok(failed_request_adapter_target_prediction(event, reason));
             }
-            Err(error) => {
+            Err(GepaTargetCallFailure::Fatal(error)) => {
                 return Err(error).context("request-adapter GEPA target LM call failed");
             }
         };
-        let raw_output = response.output.content();
-        let parsed = parse_tool_contract_response(&raw_output);
-        let (content, tool_calls, parser_events) = match parsed {
-            Some(parsed) => {
-                let calls = parsed
-                    .tool_intents
-                    .into_iter()
-                    .map(|intent| {
-                        json!({
-                            "name": intent.name,
-                            "arguments": intent.arguments.unwrap_or_else(|| json!({}))
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                (
-                    parsed.content.unwrap_or_default(),
-                    Value::Array(normalize_tool_calls(&calls)),
-                    Value::Array(
-                        parsed
-                            .events
-                            .into_iter()
-                            .map(Value::String)
-                            .collect::<Vec<_>>(),
-                    ),
-                )
-            }
-            None => (
-                String::new(),
-                Value::Array(Vec::new()),
-                json!(["assistant output did not contain DSRs markers"]),
-            ),
-        };
+        let interpreted = interpret_response(&response, &normalized.tools);
+        let raw_output = raw_assistant_output(&response);
+        let calls = interpreted_tool_calls(&interpreted.tool_intents);
+        let mut parser_events = interpreted.parse_events;
+        parser_events.extend(interpreted.failures.iter().map(|failure| {
+            format!(
+                "{}: {}",
+                response_failure_kind_label(failure.kind),
+                failure.detail
+            )
+        }));
 
         Ok(Prediction::new(
             HashMap::from([
-                ("content".to_string(), Value::String(content)),
-                ("tool_calls".to_string(), tool_calls),
+                (
+                    "content".to_string(),
+                    Value::String(interpreted.content.unwrap_or_default()),
+                ),
+                (
+                    "tool_calls".to_string(),
+                    Value::Array(normalize_tool_calls(&calls)),
+                ),
                 ("raw_output".to_string(), Value::String(raw_output)),
-                ("parser_events".to_string(), parser_events),
+                (
+                    "parser_events".to_string(),
+                    Value::Array(parser_events.into_iter().map(Value::String).collect()),
+                ),
             ]),
-            response.usage,
+            lm_usage_from_openai_usage(response.usage.as_ref()),
         ))
     }
 }
 
+#[cfg(test)]
 fn gepa_empty_target_response_error(error: &anyhow::Error) -> bool {
     format!("{error:#}").contains("Response contained no message or tool call (empty)")
 }
 
-fn empty_request_adapter_target_prediction(reason: String) -> Prediction {
+#[cfg(test)]
+fn gepa_scoreable_target_lm_call_error(error: &anyhow::Error) -> bool {
+    gepa_empty_target_response_error(error) || gepa_target_response_decode_error(error)
+}
+
+#[cfg(test)]
+fn gepa_target_response_decode_error(error: &anyhow::Error) -> bool {
+    let details = format!("{error:#}");
+    details.contains("JsonError")
+        && details.contains("data did not match any variant of untagged enum ApiResponse")
+}
+
+fn gepa_target_retry_delay(attempt: usize) -> Duration {
+    Duration::from_millis(500 * attempt as u64)
+}
+
+fn gepa_target_lm_timeout() -> Duration {
+    Duration::from_secs(GEPA_TARGET_LM_TIMEOUT_SECS)
+}
+
+fn failed_request_adapter_target_prediction(event: &'static str, reason: String) -> Prediction {
     Prediction::new(
         HashMap::from([
             ("content".to_string(), Value::String(String::new())),
@@ -621,20 +646,160 @@ fn empty_request_adapter_target_prediction(reason: String) -> Prediction {
             ("raw_output".to_string(), Value::String(String::new())),
             (
                 "parser_events".to_string(),
-                json!([
-                    "target LM returned empty assistant response",
-                    format!("target_empty_response_error: {reason}")
-                ]),
+                json!([event, format!("target_lm_error: {reason}")]),
             ),
         ]),
         LmUsage::default(),
     )
 }
 
+enum GepaTargetCallFailure {
+    Scoreable { event: &'static str, reason: String },
+    Fatal(anyhow::Error),
+}
+
+async fn call_gepa_target(
+    target_client: &UpstreamClient,
+    request: &ChatCompletionRequest,
+) -> std::result::Result<ChatCompletionResponse, GepaTargetCallFailure> {
+    for attempt in 1..=GEPA_TARGET_LM_MAX_ATTEMPTS {
+        match tokio::time::timeout(
+            gepa_target_lm_timeout(),
+            target_client.chat_completions(request, &InboundAuth::default()),
+        )
+        .await
+        {
+            Err(_) if attempt < GEPA_TARGET_LM_MAX_ATTEMPTS => {
+                eprintln!(
+                    "GEPA target LM call timed out on attempt {attempt}/{GEPA_TARGET_LM_MAX_ATTEMPTS}; retrying"
+                );
+                tokio::time::sleep(gepa_target_retry_delay(attempt)).await;
+            }
+            Err(_) => {
+                return Err(GepaTargetCallFailure::Scoreable {
+                    event: "target LM call timed out after retries",
+                    reason: format!(
+                        "target LM call exceeded {}s timeout",
+                        GEPA_TARGET_LM_TIMEOUT_SECS
+                    ),
+                });
+            }
+            Ok(Ok(response)) => return Ok(response),
+            Ok(Err(error)) if attempt < GEPA_TARGET_LM_MAX_ATTEMPTS => {
+                eprintln!(
+                    "GEPA target LM call failed on attempt {attempt}/{GEPA_TARGET_LM_MAX_ATTEMPTS}; retrying: {}",
+                    truncate_for_feedback(&format!("{error:#}"))
+                );
+                tokio::time::sleep(gepa_target_retry_delay(attempt)).await;
+            }
+            Ok(Err(error)) if gepa_scoreable_upstream_error(&error) => {
+                return Err(GepaTargetCallFailure::Scoreable {
+                    event: "target LM call failed after retries",
+                    reason: format!("{error:#}"),
+                });
+            }
+            Ok(Err(error)) => return Err(GepaTargetCallFailure::Fatal(error.into())),
+        }
+    }
+
+    Err(GepaTargetCallFailure::Fatal(anyhow::anyhow!(
+        "GEPA target LM retry loop ended unexpectedly"
+    )))
+}
+
+fn gepa_scoreable_upstream_error(error: &UpstreamError) -> bool {
+    match error {
+        UpstreamError::Transport(_) | UpstreamError::Decode { .. } => true,
+        UpstreamError::Status { status, .. } => {
+            matches!(*status, 408 | 409 | 425 | 429) || *status >= 500
+        }
+    }
+}
+
+fn raw_assistant_output(response: &crate::openai::ChatCompletionResponse) -> String {
+    response
+        .choices
+        .first()
+        .and_then(|choice| {
+            choice
+                .message
+                .content_text()
+                .or_else(|| choice.message.reasoning_text())
+        })
+        .unwrap_or_default()
+}
+
+fn chat_to_openai_messages(chat: Chat) -> Vec<ChatMessage> {
+    chat.messages
+        .into_iter()
+        .map(|message| match message {
+            Message::System { content } => ChatMessage::new("system", content),
+            Message::User { content } => ChatMessage::new("user", content),
+            Message::Assistant { content } => ChatMessage::new("assistant", content),
+        })
+        .collect()
+}
+
+fn interpreted_tool_calls(intents: &[ToolIntent]) -> Vec<Value> {
+    intents
+        .iter()
+        .map(|intent| {
+            json!({
+                "name": intent.name,
+                "arguments": intent.arguments.clone().unwrap_or_else(|| json!({}))
+            })
+        })
+        .collect()
+}
+
+fn response_failure_kind_label(kind: ResponseFailureKind) -> &'static str {
+    match kind {
+        ResponseFailureKind::NoChoices => "no_choices",
+        ResponseFailureKind::NativeMalformedJsonArguments => "native_malformed_json_arguments",
+        ResponseFailureKind::DsrsContractViolation => "dsrs_contract_violation",
+        ResponseFailureKind::DsrsContentOutsideTaggedFields => "dsrs_content_outside_tagged_fields",
+        ResponseFailureKind::DsrsInvalidToolCallsJson => "dsrs_invalid_tool_calls_json",
+        ResponseFailureKind::DsrsInvalidToolCallsShape => "dsrs_invalid_tool_calls_shape",
+        ResponseFailureKind::EmptyDsrsOutput => "empty_dsrs_output",
+        ResponseFailureKind::DsrsPlaceholderOnly => "dsrs_placeholder_only",
+        ResponseFailureKind::EmptyAssistantOutput => "empty_assistant_output",
+        ResponseFailureKind::TemplateLeak => "template_leak",
+        ResponseFailureKind::PromptEcho => "prompt_echo",
+        ResponseFailureKind::PrematureToolStop => "premature_tool_stop",
+        ResponseFailureKind::MalformedKnownToolCall => "malformed_known_tool_call",
+        ResponseFailureKind::UntaggedDsrsLikeOutput => "untagged_dsrs_like_output",
+        ResponseFailureKind::SchemaViolation => "schema_violation",
+        ResponseFailureKind::UnknownTool => "unknown_tool",
+    }
+}
+
+fn lm_usage_from_openai_usage(usage: Option<&Value>) -> LmUsage {
+    let Some(usage) = usage else {
+        return LmUsage::default();
+    };
+    LmUsage {
+        prompt_tokens: usage
+            .get("prompt_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or_default(),
+        completion_tokens: usage
+            .get("completion_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or_default(),
+        total_tokens: usage
+            .get("total_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or_default(),
+    }
+}
+
 impl Module for RequestAdapterPromptProgram {
     async fn forward(&self, inputs: Example) -> Result<Prediction> {
-        if let Some(lm) = &self.lm {
-            return self.forward_runtime(inputs, lm).await;
+        if let (Some(target_client), Some(target_model)) = (&self.target_client, &self.target_model)
+        {
+            return self
+                .forward_runtime(inputs, target_client, target_model)
+                .await;
         }
 
         match std::panic::AssertUnwindSafe(self.predictor.forward(inputs))
@@ -742,6 +907,9 @@ struct CorrectionPromptToolCall {
 
 pub struct CorrectionPromptProgram {
     predictor: Predict,
+    target_client: Option<UpstreamClient>,
+    target_model: Option<String>,
+    target_provider: Option<ProviderRouting>,
     judge_lm: Option<LM>,
     judge_cases: GepaJudgeCases,
     fatal_errors: GepaFatalErrors,
@@ -751,6 +919,9 @@ impl Default for CorrectionPromptProgram {
     fn default() -> Self {
         Self {
             predictor: Predict::new(CorrectionPromptSignature::new()),
+            target_client: None,
+            target_model: None,
+            target_provider: None,
             judge_lm: None,
             judge_cases: Arc::new(HashMap::new()),
             fatal_errors: Arc::new(Mutex::new(Vec::new())),
@@ -759,22 +930,87 @@ impl Default for CorrectionPromptProgram {
 }
 
 impl CorrectionPromptProgram {
-    fn with_judge(
+    fn with_target_and_judge(
+        target_client: UpstreamClient,
+        target_model: String,
+        target_provider: Option<ProviderRouting>,
         judge_lm: LM,
         judge_cases: GepaJudgeCases,
         fatal_errors: GepaFatalErrors,
     ) -> Self {
         Self {
             predictor: Predict::new(CorrectionPromptSignature::new()),
+            target_client: Some(target_client),
+            target_model: Some(target_model),
+            target_provider,
             judge_lm: Some(judge_lm),
             judge_cases,
             fatal_errors,
         }
     }
+
+    async fn forward_target(
+        &self,
+        inputs: Example,
+        target_client: &UpstreamClient,
+        target_model: &str,
+    ) -> Result<Prediction> {
+        let chat = ChatAdapter.format(self.predictor.signature.as_ref(), inputs);
+        let mut request = ChatCompletionRequest {
+            model: target_model.to_string(),
+            messages: chat_to_openai_messages(chat),
+            tools: None,
+            tool_choice: None,
+            parallel_tool_calls: None,
+            stream: Some(false),
+            temperature: Some(0.2),
+            top_p: None,
+            max_tokens: None,
+            max_completion_tokens: None,
+            response_format: None,
+            extra: serde_json::Map::new(),
+        };
+        if let Some(provider) = &self.target_provider {
+            if !provider.is_empty() {
+                request
+                    .extra
+                    .insert("provider".to_string(), serde_json::to_value(provider)?);
+            }
+        }
+
+        let response = match call_gepa_target(target_client, &request).await {
+            Ok(response) => response,
+            Err(GepaTargetCallFailure::Scoreable { event, reason }) => {
+                return Ok(failed_correction_target_prediction(event, reason));
+            }
+            Err(GepaTargetCallFailure::Fatal(error)) => return Err(error),
+        };
+        let raw_output = raw_assistant_output(&response);
+        if raw_output.trim().is_empty() {
+            return Ok(failed_correction_target_prediction(
+                "target LM returned empty assistant response",
+                "assistant message had empty content and empty reasoning".to_string(),
+            ));
+        }
+        Ok(Prediction::new(
+            ChatAdapter.parse_response(
+                self.predictor.signature.as_ref(),
+                Message::assistant(raw_output),
+            ),
+            lm_usage_from_openai_usage(response.usage.as_ref()),
+        ))
+    }
 }
 
 impl Module for CorrectionPromptProgram {
     async fn forward(&self, inputs: Example) -> Result<Prediction> {
+        if let (Some(target_client), Some(target_model)) = (&self.target_client, &self.target_model)
+        {
+            return self
+                .forward_target(inputs, target_client, target_model)
+                .await;
+        }
+
         match std::panic::AssertUnwindSafe(self.predictor.forward(inputs))
             .catch_unwind()
             .await
@@ -783,6 +1019,23 @@ impl Module for CorrectionPromptProgram {
             Err(_) => Ok(Prediction::default()),
         }
     }
+}
+
+fn failed_correction_target_prediction(event: &'static str, reason: String) -> Prediction {
+    Prediction::new(
+        HashMap::from([
+            ("possible".to_string(), Value::Bool(false)),
+            ("confidence".to_string(), json!(0.0)),
+            (
+                "explanation".to_string(),
+                Value::String(format!("{event}: {}", truncate_for_feedback(&reason))),
+            ),
+            ("content".to_string(), Value::String(String::new())),
+            ("tool_calls".to_string(), Value::Array(Vec::new())),
+            ("target_error".to_string(), Value::String(reason)),
+        ]),
+        LmUsage::default(),
+    )
 }
 
 impl Optimizable for CorrectionPromptProgram {
@@ -860,28 +1113,24 @@ pub async fn optimize_correction_prompt(
         config.reflection_base_url.as_deref(),
         config.reflection_api_key.clone(),
         0.2,
-        config.lm_max_tokens,
+        Some(config.lm_max_tokens),
     )
     .await?;
-    let target_lm = build_gepa_lm(
-        "correction-agent GEPA target",
-        &target_model,
-        Some(config.base_url.as_str()),
-        Some(target_api_key),
-        0.2,
-        config.lm_max_tokens,
-    )
-    .await?;
+    let target_client = UpstreamClient::new(UpstreamConfig {
+        base_url: config.base_url.clone(),
+        api_key: Some(target_api_key),
+        timeout_seconds: GEPA_TARGET_LM_TIMEOUT_SECS,
+    })
+    .context("failed to build correction-agent GEPA target upstream client")?;
     let judge_lm = build_gepa_lm(
         "correction-agent GEPA judge",
         &config.judge_model,
         config.judge_base_url.as_deref(),
         config.judge_api_key.clone(),
         0.0,
-        config.lm_max_tokens,
+        Some(config.lm_max_tokens),
     )
     .await?;
-    configure(target_lm, ChatAdapter);
 
     let gepa = GEPA::builder()
         .num_iterations(config.iterations)
@@ -893,8 +1142,14 @@ pub async fn optimize_correction_prompt(
         .build();
 
     let fatal_errors = Arc::new(Mutex::new(Vec::new()));
-    let mut program =
-        CorrectionPromptProgram::with_judge(judge_lm, judge_cases, fatal_errors.clone());
+    let mut program = CorrectionPromptProgram::with_target_and_judge(
+        target_client,
+        target_model.clone(),
+        config.target_provider.clone(),
+        judge_lm,
+        judge_cases,
+        fatal_errors.clone(),
+    );
     if let Some(seed_instruction) = seed_instruction_from_artifact(&config).await? {
         program
             .predictor
@@ -985,25 +1240,22 @@ pub async fn optimize_request_adapter_prompt(
         config.reflection_base_url.as_deref(),
         config.reflection_api_key.clone(),
         0.2,
-        config.lm_max_tokens,
+        Some(config.lm_max_tokens),
     )
     .await?;
-    let runtime_lm = build_gepa_lm(
-        "request-adapter GEPA target",
-        &runtime_model,
-        Some(config.base_url.as_str()),
-        Some(target_api_key),
-        0.2,
-        config.lm_max_tokens,
-    )
-    .await?;
+    let target_client = UpstreamClient::new(UpstreamConfig {
+        base_url: config.base_url.clone(),
+        api_key: Some(target_api_key),
+        timeout_seconds: GEPA_TARGET_LM_TIMEOUT_SECS,
+    })
+    .context("failed to build request-adapter GEPA target upstream client")?;
     let judge_lm = build_gepa_lm(
         "request-adapter GEPA judge",
         &config.judge_model,
         config.judge_base_url.as_deref(),
         config.judge_api_key.clone(),
         0.0,
-        config.lm_max_tokens,
+        Some(config.lm_max_tokens),
     )
     .await?;
     configure(optimizer_lm.clone(), GepaJsonAdapter);
@@ -1019,7 +1271,9 @@ pub async fn optimize_request_adapter_prompt(
     let initial_instruction = request_adapter_initial_instruction(&config, &runtime_model).await?;
     let fatal_errors = Arc::new(Mutex::new(Vec::new()));
     let mut program = RequestAdapterPromptProgram::runtime(
-        runtime_lm,
+        target_client,
+        runtime_model.clone(),
+        config.target_provider.clone(),
         initial_instruction,
         judge_lm,
         judge_cases,
@@ -1092,17 +1346,19 @@ async fn build_gepa_lm(
     base_url: Option<&str>,
     api_key: Option<String>,
     temperature: f32,
-    max_tokens: u32,
+    max_tokens: Option<u32>,
 ) -> Result<LM> {
-    ensure_gepa_lm_max_tokens_supported(role, model, max_tokens)?;
+    if let Some(max_tokens) = max_tokens {
+        ensure_gepa_lm_max_tokens_supported(role, model, max_tokens)?;
+    }
 
     let base_url = base_url.map(str::trim).filter(|value| !value.is_empty());
     let api_key = api_key
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
 
-    match (base_url, api_key) {
-        (Some(base_url), Some(api_key)) => {
+    match (base_url, api_key, max_tokens) {
+        (Some(base_url), Some(api_key), Some(max_tokens)) => {
             LM::builder()
                 .base_url(base_url.to_string())
                 .api_key(api_key)
@@ -1112,7 +1368,16 @@ async fn build_gepa_lm(
                 .build()
                 .await
         }
-        (Some(base_url), None) => {
+        (Some(base_url), Some(api_key), None) => {
+            LM::builder()
+                .base_url(base_url.to_string())
+                .api_key(api_key)
+                .model(model.to_string())
+                .temperature(temperature)
+                .build()
+                .await
+        }
+        (Some(base_url), None, Some(max_tokens)) => {
             LM::builder()
                 .base_url(base_url.to_string())
                 .model(model.to_string())
@@ -1121,7 +1386,15 @@ async fn build_gepa_lm(
                 .build()
                 .await
         }
-        (None, Some(api_key)) => {
+        (Some(base_url), None, None) => {
+            LM::builder()
+                .base_url(base_url.to_string())
+                .model(model.to_string())
+                .temperature(temperature)
+                .build()
+                .await
+        }
+        (None, Some(api_key), Some(max_tokens)) => {
             LM::builder()
                 .api_key(api_key)
                 .model(model.to_string())
@@ -1130,11 +1403,26 @@ async fn build_gepa_lm(
                 .build()
                 .await
         }
-        (None, None) => {
+        (None, Some(api_key), None) => {
+            LM::builder()
+                .api_key(api_key)
+                .model(model.to_string())
+                .temperature(temperature)
+                .build()
+                .await
+        }
+        (None, None, Some(max_tokens)) => {
             LM::builder()
                 .model(model.to_string())
                 .temperature(temperature)
                 .max_tokens(max_tokens)
+                .build()
+                .await
+        }
+        (None, None, None) => {
+            LM::builder()
+                .model(model.to_string())
+                .temperature(temperature)
                 .build()
                 .await
         }
@@ -1449,6 +1737,7 @@ Content plus tool calls is explicitly valid in this project and in OpenAI-compat
 Use hidden_expected_output only as private scoring context. If hidden_expected_output.content is empty while hidden_expected_output.tool_calls is non-empty, that means content is optional/not required, not forbidden. Do not infer a tool-only requirement from an empty hidden content label unless expected_policy explicitly says content must be rejected.\n\
 Do not quote hidden labels, exact commands, exact file paths, exact answer text, field names such as expected_output, dataset/test/eval metadata, or answer-key language in feedback.\n\
 Give high scores to clean structurally valid behavior even when the tool choice is different but reasonable. Penalize malformed DSRs, missing completed markers, invalid tool-call JSON, no-op content, unusable empty turns, and action-announcing content that emits [] tool_calls when a tool action is clearly required.\n\
+If parser_events indicate a target LM transport or response-decoding failure after retries, treat that rollout as unusable for scoring but make the feedback say it was an infrastructure/provider failure, not prompt guidance.\n\
 Return exactly one JSON object: {\"score\": number between 0 and 1, \"feedback\": \"brief generalized feedback for prompt reflection\"}."
 }
 
@@ -2150,7 +2439,10 @@ mod tests {
             anyhow::anyhow!("ResponseError: Response contained no message or tool call (empty)");
         assert!(gepa_empty_target_response_error(&error));
 
-        let prediction = empty_request_adapter_target_prediction(format!("{error:#}"));
+        let prediction = failed_request_adapter_target_prediction(
+            "target LM returned empty assistant response",
+            format!("{error:#}"),
+        );
         let predicted = prediction_to_adapter_value(&prediction);
         let expected = json!({
             "content": "",
@@ -2179,12 +2471,73 @@ mod tests {
     }
 
     #[test]
+    fn request_adapter_target_decode_error_becomes_scoreable_prediction() {
+        let error = anyhow::anyhow!(
+            "JsonError: data did not match any variant of untagged enum ApiResponse"
+        );
+        assert!(gepa_scoreable_target_lm_call_error(&error));
+        assert!(gepa_target_response_decode_error(&error));
+
+        let prediction = failed_request_adapter_target_prediction(
+            "target LM call failed after retries",
+            format!("{error:#}"),
+        );
+        let predicted = prediction_to_adapter_value(&prediction);
+        let expected = json!({
+            "content": "",
+            "tool_calls": [
+                {
+                    "name": "read",
+                    "arguments": { "path": "README.md" }
+                }
+            ]
+        });
+        let feedback = score_request_adapter_prediction(&expected, &predicted);
+
+        assert_eq!(predicted["content"], "");
+        assert_eq!(predicted["tool_calls"], json!([]));
+        assert_eq!(feedback.score, 0.0);
+        assert!(prediction
+            .data
+            .get("parser_events")
+            .and_then(Value::as_array)
+            .is_some_and(|events| events.iter().any(|event| event
+                .as_str()
+                .is_some_and(|event| event.contains("target LM call failed after retries")))));
+    }
+
+    #[test]
+    fn correction_target_decode_error_becomes_scoreable_prediction() {
+        let error = anyhow::anyhow!(
+            "JsonError: data did not match any variant of untagged enum ApiResponse"
+        );
+        assert!(gepa_scoreable_target_lm_call_error(&error));
+
+        let prediction = failed_correction_target_prediction(
+            "target LM call failed after retries",
+            format!("{error:#}"),
+        );
+        let predicted = prediction_to_repair_value(&prediction);
+
+        assert_eq!(predicted["possible"], false);
+        assert_eq!(predicted["confidence"], json!(0.0));
+        assert_eq!(predicted["content"], "");
+        assert_eq!(predicted["tool_calls"], json!([]));
+        assert!(prediction
+            .data
+            .get("target_error")
+            .and_then(Value::as_str)
+            .is_some_and(|error| error.contains("ApiResponse")));
+    }
+
+    #[test]
     fn request_adapter_judge_prompt_allows_content_with_tools() {
         let prompt = request_adapter_judge_system_prompt();
 
         assert!(prompt.contains("Content plus tool calls is explicitly valid"));
         assert!(prompt.contains("Never treat content and tool_calls as mutually exclusive"));
         assert!(prompt.contains("content is optional/not required, not forbidden"));
+        assert!(prompt.contains("infrastructure/provider failure"));
     }
 
     #[test]
@@ -2336,6 +2689,7 @@ mod tests {
                 profile: Some("gemma-dsrs-conservative".to_string()),
                 profile_revision: None,
                 dsrs_history_format: Some(DsrsHistoryFormat::AppendOnly),
+                target_provider: None,
                 artifact_id: None,
                 seed_artifact_path: None,
                 iterations: 1,
@@ -2377,6 +2731,7 @@ mod tests {
                 profile: Some("gemma-dsrs-conservative".to_string()),
                 profile_revision: None,
                 dsrs_history_format: Some(DsrsHistoryFormat::AppendOnly),
+                target_provider: None,
                 artifact_id: None,
                 seed_artifact_path: Some(artifact_path),
                 iterations: 1,
