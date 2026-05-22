@@ -62,8 +62,8 @@ Gemma r4 artifact remains embedded for provenance.
 
 Runtime config files still match before these built-ins. For example,
 `configs/qwen-dsrs.toml` and `configs/gemma-dsrs-conservative.toml` are
-filesystem-artifact overrides that point at the same reviewed instructions as
-the embedded defaults.
+config overrides that point at the embedded reviewed defaults. The Qwen sample
+also includes the OpenRouter provider ignore used during local Qwen testing.
 
 ## Commands
 

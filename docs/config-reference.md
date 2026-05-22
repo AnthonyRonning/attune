@@ -230,7 +230,7 @@ nix develop --command cargo run -- \
   serve
 ```
 
-### Use The Local Gemma Filesystem Artifact Override
+### Use The Local Gemma Profile Override
 
 ```sh
 export OPENROUTER_API_KEY="..."

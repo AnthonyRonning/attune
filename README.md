@@ -156,6 +156,7 @@ optimization until that rerun lands.
 Start with embedded built-in profile defaults:
 
 ```sh
+cp .env.example .env
 export OPENROUTER_API_KEY="..."
 nix develop --command cargo run --
 ```
@@ -426,7 +427,6 @@ Near-term directions:
 
 - rerun the Qwen 500-scenario baseline comparison with aligned proxy/harness
   timeouts
-- add `.env.example` before public MVP release
 - harden config-file validation and parser/repair policy configuration
 - add profile validation and migration tooling
 - expand trace-harness and GEPA datasets across more model families

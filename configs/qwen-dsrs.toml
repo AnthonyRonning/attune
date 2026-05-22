@@ -1,6 +1,13 @@
 [[model_profiles]]
 name = "qwen-dsrs"
-model_patterns = ["qwen/qwen3.5-9b"]
-revision = 1
-request_adapter_artifact = "../datasets/request-adapter/qwen-dsrs-sonnet-post50-r2-regenerated-context-gepa.json"
+model_patterns = ["qwen", "qwq"]
+revision = 4
+request_adapter_artifact = "builtin:request-adapter/qwen-dsrs/sonnet-post50-r2-regenerated-context"
+tool_mode = "proxy_owned"
+tool_format = "dsrs"
 dsrs_history_format = "regenerated_context"
+max_correction_passes = 1
+supports_parallel_tool_calls = true
+
+[model_profiles.provider]
+ignore = ["venice"]
