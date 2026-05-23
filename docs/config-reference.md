@@ -215,7 +215,7 @@ Current active built-in request-adapter defaults:
 
 | Profile | Artifact | History format |
 | --- | --- | --- |
-| `qwen-dsrs` | `builtin:request-adapter/qwen-dsrs/sonnet-post50-r2-regenerated-context` | `regenerated_context` |
+| `qwen-dsrs` | `builtin:request-adapter/qwen-dsrs/sonnet-qwen500-r2-regenerated-context` | `regenerated_context` |
 | `gemma-dsrs-conservative` | `builtin:request-adapter/gemma-dsrs-conservative/sonnet-post50-r2-append-only` | `append_only` |
 
 ## Examples
@@ -247,8 +247,8 @@ nix develop --command cargo run -- \
 [[model_profiles]]
 name = "qwen-dsrs"
 model_patterns = ["qwen", "qwq"]
-revision = 4
-request_adapter_artifact = "builtin:request-adapter/qwen-dsrs/sonnet-post50-r2-regenerated-context"
+revision = 5
+request_adapter_artifact = "builtin:request-adapter/qwen-dsrs/sonnet-qwen500-r2-regenerated-context"
 tool_mode = "proxy_owned"
 tool_format = "dsrs"
 dsrs_history_format = "regenerated_context"

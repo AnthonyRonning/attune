@@ -47,6 +47,12 @@ artifact_type = "request_adapter_instruction"
 path = "datasets/request-adapter/gemma-dsrs-conservative-sonnet-post50-r2-append-only-gepa.json"
 profile = "gemma-dsrs-conservative"
 
+[[artifacts]]
+id = "request-adapter/qwen-dsrs/sonnet-qwen500-r2-regenerated-context"
+artifact_type = "request_adapter_instruction"
+path = "datasets/request-adapter/qwen-dsrs-sonnet-qwen500-r2-regenerated-context-gepa.json"
+profile = "qwen-dsrs"
+
 [[profiles]]
 name = "gemma-dsrs-conservative"
 revision = 8
@@ -57,6 +63,6 @@ request_adapter_artifact = "request-adapter/gemma-dsrs-conservative/sonnet-post5
 [[profiles]]
 name = "qwen-dsrs"
 model_patterns = ["qwen", "qwq"]
-revision = 4
-request_adapter_artifact = "request-adapter/qwen-dsrs/sonnet-post50-r2-regenerated-context"
+revision = 5
+request_adapter_artifact = "request-adapter/qwen-dsrs/sonnet-qwen500-r2-regenerated-context"
 dsrs_history_format = "regenerated_context"

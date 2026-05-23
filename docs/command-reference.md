@@ -319,7 +319,7 @@ nix develop --command cargo run -- \
   --lm-max-tokens 128000
 ```
 
-Reproduce the promoted Qwen regenerated-context post-50 optimization line:
+Reproduce the promoted Qwen regenerated-context Qwen-500 follow-up line:
 
 ```sh
 export OPENROUTER_API_KEY="..."
@@ -327,20 +327,20 @@ export ANTHROPIC_API_KEY="..."
 
 nix develop --command cargo run -- \
   optimize-request-adapter-prompt \
-  --dataset-path /tmp/qwen-request-adapter-all.jsonl \
-  --output-path datasets/request-adapter/qwen-dsrs-sonnet-post50-r2-regenerated-context-gepa.json \
+  --dataset-path datasets/request-adapter/qwen-dsrs-trace-harness-curated.jsonl \
+  --output-path datasets/request-adapter/qwen-dsrs-sonnet-qwen500-r2-regenerated-context-gepa.json \
   --base-url https://openrouter.ai/api/v1 \
   --model anthropic:claude-sonnet-4-6 \
   --judge-model anthropic:claude-sonnet-4-6 \
   --target-model qwen/qwen3.5-9b \
   --profile qwen-dsrs \
-  --profile-revision 3 \
+  --profile-revision 4 \
   --dsrs-history-format regenerated_context \
   --target-provider-ignore Venice \
-  --seed-artifact datasets/request-adapter/qwen-dsrs-sonnet-fresh-r1-regenerated-context-gepa.json \
-  --artifact-id request-adapter/qwen-dsrs/sonnet-post50-r2-regenerated-context \
+  --seed-artifact datasets/request-adapter/qwen-dsrs-sonnet-post50-r2-regenerated-context-gepa.json \
+  --artifact-id request-adapter/qwen-dsrs/sonnet-qwen500-r2-regenerated-context \
   --iterations 5 \
-  --max-examples 8 \
+  --max-examples 22 \
   --lm-max-tokens 128000
 ```
 
@@ -363,7 +363,7 @@ history format and a different output/artifact ID:
 | `gemma-dsrs-conservative` | `append_only` | `datasets/request-adapter/gemma-dsrs-conservative-sonnet-post50-r2-append-only-gepa.json` | `request-adapter/gemma-dsrs-conservative/sonnet-post50-r2-append-only` |
 | `gemma-dsrs-conservative` | `regenerated_context` | `datasets/request-adapter/gemma-dsrs-conservative-sonnet-fresh-r1-regenerated-context-gepa.json` | `request-adapter/gemma-dsrs-conservative/sonnet-fresh-r1-regenerated-context` |
 | `qwen-dsrs` | `append_only` | `datasets/request-adapter/qwen-dsrs-sonnet-fresh-r1-append-only-gepa.json` | `request-adapter/qwen-dsrs/sonnet-fresh-r1-append-only` |
-| `qwen-dsrs` | `regenerated_context` | `datasets/request-adapter/qwen-dsrs-sonnet-post50-r2-regenerated-context-gepa.json` | `request-adapter/qwen-dsrs/sonnet-post50-r2-regenerated-context` |
+| `qwen-dsrs` | `regenerated_context` | `datasets/request-adapter/qwen-dsrs-sonnet-qwen500-r2-regenerated-context-gepa.json` | `request-adapter/qwen-dsrs/sonnet-qwen500-r2-regenerated-context` |
 
 When continuing an existing line of experimentation, seed from the current best
 artifact:
@@ -553,6 +553,33 @@ passes. The three proxy regressions were reviewed and added to
 the correction-agent failure from one of those cases was added to
 `datasets/corrections.jsonl`.
 
+The latest Qwen 3.5 9B follow-up reused the prior 500-scenario Qwen comparison
+baseline instead of rerunning direct OpenRouter. The prior comparison had
+487/500 direct baseline passes and 457/500 proxy passes. After promoting the
+Qwen-500 regenerated-context artifact, a proxy-only replay of the same scenario
+file produced 471/500 passes:
+
+```sh
+export OPENROUTER_API_KEY="..."
+
+nix develop --command cargo run -- \
+  --config configs/qwen-dsrs.toml \
+  trace-harness run \
+  --scenarios-path eval/trace-harness/scenarios/pi-hermes-500-20260509.local.jsonl \
+  --output-path eval/trace-harness/results/qwen-ignore-venice-pi-hermes-500-qwen500-r2.local.json \
+  --model qwen/qwen3.5-9b \
+  --provider-ignore venice \
+  --limit 500 \
+  --parallel 8 \
+  --request-timeout-seconds 420 \
+  --retries 3
+```
+
+Six recovered Qwen traces from that replay were appended to
+`datasets/request-adapter/qwen-dsrs-trace-harness-curated.jsonl` with
+`export-request-adapter-dataset --use-final-response`; the same six
+correction-agent tool-recovery traces were appended to `datasets/corrections.jsonl`.
+
 The compare report records:
 
 - direct baseline structural pass/fail
@@ -579,10 +606,10 @@ endpoint. Use `--proxy-url` when you already have a proxy process running and do
 not want the harness to start one in-process.
 
 When running very slow models or providers, make sure the harness timeout and
-the in-process proxy upstream timeout are aligned. A paused Qwen 500-scenario
-run used `--request-timeout-seconds 360`, but exposed that the embedded proxy
-path still had a lower upstream timeout. Treat partial comparison results from
-that run as diagnostic only until it is rerun with matching timeouts.
+the in-process proxy upstream timeout are aligned. The Qwen 500-scenario replay
+used `--request-timeout-seconds 420` and retries, but still showed some
+upstream body-decode/transport failures from slow provider responses. Treat
+those separately from structural output failures when curating GEPA examples.
 
 If you already have a proxy running externally, pass `--proxy-url` to avoid the
 in-process proxy:

@@ -132,24 +132,31 @@ Pi/Hermes trace-harness run against `google/gemma-4-26b-a4b-it` on OpenRouter:
 Attune fixed all 25 direct baseline structural failures. The 3 proxy
 regressions from that run were reviewed and added to the curated GEPA datasets.
 
-Qwen is currently flagged as the highest-priority in-progress profile. Earlier
-Qwen 3.5 9B runs showed strong practical improvement in live Pi testing, but
-the latest 500-scenario curation run exposed request-adapter and correction
-agent gaps that should not be marketed as solved yet:
+Qwen is still the highest-priority in-progress profile, but the latest GEPA
+promotion closed a meaningful part of the gap. The original 500-scenario
+Pi/Hermes comparison found that direct OpenRouter passed 487/500 structural
+checks while the previous Attune proxy profile passed 457/500. After promoting
+the Qwen-500 regenerated-context artifact, the same 500-scenario file was
+replayed through the proxy without rerunning the direct baseline:
 
-| Qwen 3.5 9B curation run | Count |
+| Qwen 3.5 9B 500-scenario run | Structural passes |
 | --- | ---: |
-| Direct baseline structural passes | 487/500 |
-| Attune proxy structural passes | 457/500 |
-| Baseline failures fixed by Attune | 13 |
-| Proxy regressions to learn from | 43 |
+| Direct OpenRouter baseline from prior comparison | 487/500 |
+| Previous Attune proxy profile | 457/500 |
+| Promoted Qwen-500 Attune proxy profile | 471/500 |
 
-Those Qwen regressions were reviewed by category: premature action without a
-tool call, tool-like text without OpenAI `tool_calls`, unrecovered fallback
-responses, and correction-agent failures. Representative cases were promoted
-into the Qwen request-adapter dataset and the correction-agent dataset so the
-next GEPA pass can train directly against them. Treat Qwen as actively under
-optimization until that rerun lands.
+That is a 14-case proxy improvement on the same scenario set. It is still not
+better than the prior direct baseline, but it fixed 36 previous proxy failures
+and gave the next optimization loop better evidence. Remaining failures are
+mostly tool intent leaking as prose or malformed tool text instead of clean
+OpenAI `tool_calls`, plus correction-agent failures where repaired DSRs
+`tool_calls` JSON was still invalid.
+
+Representative Qwen traces from this replay were promoted into both the Qwen
+request-adapter dataset and the shared correction-agent dataset. These examples
+cover recovered malformed DSRs, recovered tool-like text, and correction-agent
+tool recoveries so future GEPA runs can learn both to avoid the correction path
+and to repair it more reliably when needed.
 
 ## Try It
 
@@ -425,8 +432,8 @@ Attune is published under the MIT License. See [`LICENSE`](LICENSE).
 
 Near-term directions:
 
-- rerun the Qwen 500-scenario baseline comparison with aligned proxy/harness
-  timeouts
+- harden the Qwen correction-agent path, especially cases where the repair
+  model returns prose or invalid DSRs `tool_calls` JSON instead of typed calls
 - harden config-file validation and parser/repair policy configuration
 - add profile validation and migration tooling
 - expand trace-harness and GEPA datasets across more model families

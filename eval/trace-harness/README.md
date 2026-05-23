@@ -171,6 +171,16 @@ comparison run against `google/gemma-4-26b-a4b-it`. Direct baseline passed
 regressions from that run were added as request-adapter GEPA examples, and the
 one correction-agent failure was added to `datasets/corrections.jsonl`.
 
+The Qwen curated file now includes representative failures and recovered
+internal failures from the Qwen 3.5 9B Pi/Hermes runs. The first 500-scenario
+comparison had 487/500 direct baseline structural passes and 457/500 Attune
+proxy passes. After a Qwen-500 regenerated-context GEPA promotion, the same
+500-scenario file was replayed through the proxy and improved to 471/500
+passes. Six recovered Qwen traces from that replay were added to
+`datasets/request-adapter/qwen-dsrs-trace-harness-curated.jsonl`, and the same
+six correction-agent tool-recovery traces were added to
+`datasets/corrections.jsonl`.
+
 For the latest Gemma request-adapter GEPA run, combine the curated harness rows with the existing hand-labeled and trace-faithful datasets:
 
 ```bash
