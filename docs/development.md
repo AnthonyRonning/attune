@@ -40,7 +40,8 @@ promotion, and mock upstream workflows:
 │   ├── command-reference.md
 │   ├── config-reference.md
 │   ├── development.md
-│   └── model-configurability.md
+│   ├── model-configurability.md
+│   └── polar-attune.md
 ├── profiles/
 │   ├── README.md
 │   └── builtin-defaults.toml

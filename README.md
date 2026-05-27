@@ -400,6 +400,9 @@ If the README hook is enough and you want the machinery, start here:
 - [Model configurability](docs/model-configurability.md): the deeper
   architecture behind shared vs model-specific behavior, request-adapter GEPA,
   correction-agent GEPA, hidden labels, profile revisions, and promotion.
+- [Polar and Attune](docs/polar-attune.md): how NVIDIA's Polar / ProRL Agent
+  Server compares to Attune, and how trace-driven RL and DSRs/GEPA runtime
+  reliability could combine.
 - [Trace harness](eval/trace-harness/README.md): how third-party agent traces
   become neutral OpenAI-compatible scenarios for direct-baseline vs Attune
   comparisons.
