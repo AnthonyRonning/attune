@@ -265,6 +265,7 @@ nix develop --command cargo run -- \
   --reflection-temperature 1.0 \
   --judge-temperature 0.0 \
   --target-timeout-seconds 420 \
+  --seed 0 \
   --max-rollouts 60
 ```
 
@@ -285,6 +286,9 @@ Rules:
   variance.
 - `--max-rollouts` is the real optimizer budget cap in the pinned DSRs release.
   Use it for hard spend limits; otherwise runs stop by `--iterations`.
+- `--seed` controls the local epoch-shuffled GEPA minibatch sampler. Keep it
+  fixed for reproducible runs; change it only when intentionally testing sampler
+  variance.
 - `--validation-dataset-path` is optional for smoke runs but should be supplied
   for candidate artifacts. Without it, GEPA uses the training examples for
   candidate validation, so treat the GEPA score as optimizer telemetry only and
@@ -347,6 +351,7 @@ nix develop --command cargo run -- \
   --reflection-temperature 1.0 \
   --judge-temperature 0.0 \
   --target-timeout-seconds 420 \
+  --seed 0 \
   --max-rollouts 75
 ```
 
@@ -376,6 +381,7 @@ nix develop --command cargo run -- \
   --reflection-temperature 1.0 \
   --judge-temperature 0.0 \
   --target-timeout-seconds 420 \
+  --seed 0 \
   --max-rollouts 150
 ```
 
@@ -389,6 +395,11 @@ retried and then recorded as unusable scoreable rollouts so long runs can
 continue. Judge HTTP failures, non-JSON judge responses, and invalid judge JSON
 remain fatal and do not write artifacts. Model behavior failures, such as empty
 content with empty tool calls, are still scoreable data.
+
+Attune currently patches the pinned DSRs GEPA implementation locally so
+minibatches use GEPA's epoch-shuffled coverage pattern instead of reusing the
+first rows every generation. Remove the local Cargo patch only after upstream
+DSRs ships equivalent sampler behavior.
 
 To compare history format behavior, run the same dataset again with the other
 history format and a different output/artifact ID:

@@ -42,6 +42,7 @@ pub const DEFAULT_GEPA_JUDGE_MODEL: &str = "anthropic/claude-sonnet-5";
 pub const DEFAULT_GEPA_REFLECTION_TEMPERATURE: f32 = 1.0;
 pub const DEFAULT_GEPA_JUDGE_TEMPERATURE: f32 = 0.0;
 pub const DEFAULT_GEPA_TARGET_TIMEOUT_SECS: u64 = 420;
+pub const DEFAULT_GEPA_SEED: u64 = 0;
 const ANTHROPIC_SONNET_MAX_OUTPUT_TOKENS: u32 = 128_000;
 const GEPA_TARGET_LM_MAX_ATTEMPTS: usize = 3;
 
@@ -59,6 +60,10 @@ fn default_gepa_judge_temperature() -> f32 {
 
 fn default_gepa_target_timeout_seconds() -> u64 {
     DEFAULT_GEPA_TARGET_TIMEOUT_SECS
+}
+
+fn default_gepa_seed() -> u64 {
+    DEFAULT_GEPA_SEED
 }
 
 fn default_gepa_judge_model_string() -> String {
@@ -315,6 +320,7 @@ pub struct GepaOptimizationConfig {
     pub judge_temperature: f32,
     pub target_timeout_seconds: u64,
     pub max_rollouts: Option<usize>,
+    pub seed: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -357,6 +363,8 @@ pub struct GepaOptimizationReport {
     pub target_timeout_seconds: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_rollouts: Option<usize>,
+    #[serde(default = "default_gepa_seed")]
+    pub seed: u64,
     pub best_instruction: String,
     pub best_average_score: f32,
     pub total_rollouts: usize,
@@ -1190,6 +1198,7 @@ pub async fn optimize_correction_prompt(
         .maybe_prompt_model(Some(optimizer_lm.clone()))
         .maybe_valset(validation_examples.clone())
         .maybe_max_rollouts(config.max_rollouts)
+        .seed(config.seed)
         .build();
 
     let fatal_errors = Arc::new(Mutex::new(Vec::new()));
@@ -1250,6 +1259,7 @@ pub async fn optimize_correction_prompt(
         judge_temperature: config.judge_temperature,
         target_timeout_seconds: config.target_timeout_seconds,
         max_rollouts: config.max_rollouts,
+        seed: config.seed,
         artifact_warnings: artifact_instruction_warnings(&artifact_type, &best_instruction),
         best_instruction,
         best_average_score: result.best_candidate.average_score(),
@@ -1340,6 +1350,7 @@ pub async fn optimize_request_adapter_prompt(
         .track_stats(true)
         .maybe_valset(validation_examples.clone())
         .maybe_max_rollouts(config.max_rollouts)
+        .seed(config.seed)
         .build();
 
     let initial_instruction = request_adapter_initial_instruction(&config, &runtime_model).await?;
@@ -1394,6 +1405,7 @@ pub async fn optimize_request_adapter_prompt(
         judge_temperature: config.judge_temperature,
         target_timeout_seconds: config.target_timeout_seconds,
         max_rollouts: config.max_rollouts,
+        seed: config.seed,
         judge_model: config.judge_model.clone(),
         artifact_warnings: artifact_instruction_warnings(&artifact_type, &best_instruction),
         best_instruction,
@@ -2906,6 +2918,7 @@ mod tests {
                 judge_temperature: DEFAULT_GEPA_JUDGE_TEMPERATURE,
                 target_timeout_seconds: DEFAULT_GEPA_TARGET_TIMEOUT_SECS,
                 max_rollouts: None,
+                seed: DEFAULT_GEPA_SEED,
             },
             "google/gemma-4-26b-a4b-it",
         )
@@ -2953,6 +2966,7 @@ mod tests {
                 judge_temperature: DEFAULT_GEPA_JUDGE_TEMPERATURE,
                 target_timeout_seconds: DEFAULT_GEPA_TARGET_TIMEOUT_SECS,
                 max_rollouts: None,
+                seed: DEFAULT_GEPA_SEED,
             },
             "google/gemma-4-26b-a4b-it",
         )

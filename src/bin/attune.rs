@@ -17,7 +17,7 @@ use attune::{
         optimize_correction_prompt, optimize_request_adapter_prompt, GepaOptimizationConfig,
         DEFAULT_GEPA_JUDGE_MODEL, DEFAULT_GEPA_JUDGE_TEMPERATURE, DEFAULT_GEPA_LM_MAX_TOKENS,
         DEFAULT_GEPA_REFLECTION_MODEL, DEFAULT_GEPA_REFLECTION_TEMPERATURE,
-        DEFAULT_GEPA_ROLE_BASE_URL, DEFAULT_GEPA_TARGET_TIMEOUT_SECS,
+        DEFAULT_GEPA_ROLE_BASE_URL, DEFAULT_GEPA_SEED, DEFAULT_GEPA_TARGET_TIMEOUT_SECS,
     },
     promotion::{
         promote_artifact, promote_default_artifact, ArtifactPromotionConfig,
@@ -238,6 +238,8 @@ enum Command {
         target_timeout_seconds: u64,
         #[arg(long, env = "ATTUNE_GEPA_MAX_ROLLOUTS")]
         max_rollouts: Option<usize>,
+        #[arg(long, env = "ATTUNE_GEPA_SEED", default_value_t = DEFAULT_GEPA_SEED)]
+        seed: u64,
     },
     OptimizeRequestAdapterPrompt {
         #[arg(
@@ -314,6 +316,8 @@ enum Command {
         target_timeout_seconds: u64,
         #[arg(long, env = "ATTUNE_GEPA_MAX_ROLLOUTS")]
         max_rollouts: Option<usize>,
+        #[arg(long, env = "ATTUNE_GEPA_SEED", default_value_t = DEFAULT_GEPA_SEED)]
+        seed: u64,
     },
     PromoteArtifact {
         #[arg(long)]
@@ -616,6 +620,7 @@ async fn main() -> anyhow::Result<()> {
             judge_temperature,
             target_timeout_seconds,
             max_rollouts,
+            seed,
         } => {
             let reflection_base_url = gepa_role_base_url(&model, reflection_base_url.as_deref());
             let judge_base_url = gepa_role_base_url(&judge_model, judge_base_url.as_deref());
@@ -653,6 +658,7 @@ async fn main() -> anyhow::Result<()> {
                 judge_temperature,
                 target_timeout_seconds,
                 max_rollouts,
+                seed,
             })
             .await?;
             println!("{}", serde_json::to_string_pretty(&report)?);
@@ -683,6 +689,7 @@ async fn main() -> anyhow::Result<()> {
             judge_temperature,
             target_timeout_seconds,
             max_rollouts,
+            seed,
         } => {
             let reflection_base_url = gepa_role_base_url(&model, reflection_base_url.as_deref());
             let judge_base_url = gepa_role_base_url(&judge_model, judge_base_url.as_deref());
@@ -720,6 +727,7 @@ async fn main() -> anyhow::Result<()> {
                 judge_temperature,
                 target_timeout_seconds,
                 max_rollouts,
+                seed,
             })
             .await?;
             println!("{}", serde_json::to_string_pretty(&report)?);
