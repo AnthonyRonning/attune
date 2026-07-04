@@ -15,8 +15,9 @@ use attune::{
     model_profile::{DsrsHistoryFormat, ProviderRouting},
     optimization::{
         optimize_correction_prompt, optimize_request_adapter_prompt, GepaOptimizationConfig,
-        DEFAULT_GEPA_JUDGE_MODEL, DEFAULT_GEPA_LM_MAX_TOKENS, DEFAULT_GEPA_REFLECTION_MODEL,
-        DEFAULT_GEPA_ROLE_BASE_URL,
+        DEFAULT_GEPA_JUDGE_MODEL, DEFAULT_GEPA_JUDGE_TEMPERATURE, DEFAULT_GEPA_LM_MAX_TOKENS,
+        DEFAULT_GEPA_REFLECTION_MODEL, DEFAULT_GEPA_REFLECTION_TEMPERATURE,
+        DEFAULT_GEPA_ROLE_BASE_URL, DEFAULT_GEPA_TARGET_TIMEOUT_SECS,
     },
     promotion::{
         promote_artifact, promote_default_artifact, ArtifactPromotionConfig,
@@ -213,8 +214,28 @@ enum Command {
         iterations: usize,
         #[arg(long, default_value_t = 12)]
         max_examples: usize,
-        #[arg(long, default_value_t = DEFAULT_GEPA_LM_MAX_TOKENS)]
+        #[arg(long, env = "ATTUNE_GEPA_LM_MAX_TOKENS", default_value_t = DEFAULT_GEPA_LM_MAX_TOKENS)]
         lm_max_tokens: u32,
+        #[arg(
+            long,
+            env = "ATTUNE_GEPA_REFLECTION_TEMPERATURE",
+            default_value_t = DEFAULT_GEPA_REFLECTION_TEMPERATURE
+        )]
+        reflection_temperature: f32,
+        #[arg(
+            long,
+            env = "ATTUNE_GEPA_JUDGE_TEMPERATURE",
+            default_value_t = DEFAULT_GEPA_JUDGE_TEMPERATURE
+        )]
+        judge_temperature: f32,
+        #[arg(
+            long,
+            env = "ATTUNE_GEPA_TARGET_TIMEOUT_SECONDS",
+            default_value_t = DEFAULT_GEPA_TARGET_TIMEOUT_SECS
+        )]
+        target_timeout_seconds: u64,
+        #[arg(long, env = "ATTUNE_GEPA_MAX_ROLLOUTS")]
+        max_rollouts: Option<usize>,
     },
     OptimizeRequestAdapterPrompt {
         #[arg(
@@ -267,8 +288,28 @@ enum Command {
         iterations: usize,
         #[arg(long, default_value_t = 12)]
         max_examples: usize,
-        #[arg(long, default_value_t = DEFAULT_GEPA_LM_MAX_TOKENS)]
+        #[arg(long, env = "ATTUNE_GEPA_LM_MAX_TOKENS", default_value_t = DEFAULT_GEPA_LM_MAX_TOKENS)]
         lm_max_tokens: u32,
+        #[arg(
+            long,
+            env = "ATTUNE_GEPA_REFLECTION_TEMPERATURE",
+            default_value_t = DEFAULT_GEPA_REFLECTION_TEMPERATURE
+        )]
+        reflection_temperature: f32,
+        #[arg(
+            long,
+            env = "ATTUNE_GEPA_JUDGE_TEMPERATURE",
+            default_value_t = DEFAULT_GEPA_JUDGE_TEMPERATURE
+        )]
+        judge_temperature: f32,
+        #[arg(
+            long,
+            env = "ATTUNE_GEPA_TARGET_TIMEOUT_SECONDS",
+            default_value_t = DEFAULT_GEPA_TARGET_TIMEOUT_SECS
+        )]
+        target_timeout_seconds: u64,
+        #[arg(long, env = "ATTUNE_GEPA_MAX_ROLLOUTS")]
+        max_rollouts: Option<usize>,
     },
     PromoteArtifact {
         #[arg(long)]
@@ -566,6 +607,10 @@ async fn main() -> anyhow::Result<()> {
             iterations,
             max_examples,
             lm_max_tokens,
+            reflection_temperature,
+            judge_temperature,
+            target_timeout_seconds,
+            max_rollouts,
         } => {
             let reflection_base_url = gepa_role_base_url(&model, reflection_base_url.as_deref());
             let judge_base_url = gepa_role_base_url(&judge_model, judge_base_url.as_deref());
@@ -598,6 +643,10 @@ async fn main() -> anyhow::Result<()> {
                 iterations,
                 max_examples,
                 lm_max_tokens,
+                reflection_temperature,
+                judge_temperature,
+                target_timeout_seconds,
+                max_rollouts,
             })
             .await?;
             println!("{}", serde_json::to_string_pretty(&report)?);
@@ -623,6 +672,10 @@ async fn main() -> anyhow::Result<()> {
             iterations,
             max_examples,
             lm_max_tokens,
+            reflection_temperature,
+            judge_temperature,
+            target_timeout_seconds,
+            max_rollouts,
         } => {
             let reflection_base_url = gepa_role_base_url(&model, reflection_base_url.as_deref());
             let judge_base_url = gepa_role_base_url(&judge_model, judge_base_url.as_deref());
@@ -655,6 +708,10 @@ async fn main() -> anyhow::Result<()> {
                 iterations,
                 max_examples,
                 lm_max_tokens,
+                reflection_temperature,
+                judge_temperature,
+                target_timeout_seconds,
+                max_rollouts,
             })
             .await?;
             println!("{}", serde_json::to_string_pretty(&report)?);

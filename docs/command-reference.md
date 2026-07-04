@@ -261,7 +261,11 @@ nix develop --command cargo run -- \
   --artifact-id correction-agent/qwen-dsrs/local-r1 \
   --iterations 3 \
   --max-examples 12 \
-  --lm-max-tokens 128000
+  --lm-max-tokens 32768 \
+  --reflection-temperature 1.0 \
+  --judge-temperature 0.0 \
+  --target-timeout-seconds 420 \
+  --max-rollouts 60
 ```
 
 Rules:
@@ -276,6 +280,19 @@ Rules:
   `ANTHROPIC_API_KEY`; pass an empty `--reflection-base-url` or
   `--judge-base-url` if you also have an OpenRouter role-base-url env override
   set.
+- `--reflection-temperature` defaults to `1.0` for GEPA prompt exploration.
+  Keep `--judge-temperature` at `0.0` unless intentionally testing judge
+  variance.
+- `--max-rollouts` is the real optimizer budget cap in the pinned DSRs release.
+  Use it for hard spend limits; otherwise runs stop by `--iterations`.
+
+Suggested run tiers:
+
+| Tier | Iterations | Max examples | LM max tokens | Max rollouts | Use |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Smoke | 3 | 8-12 | 32768 | 60-100 | Verify setup and judge behavior |
+| Candidate artifact | 5 | 20-30 | 32768-64000 | 150-250 | First serious model/profile artifact |
+| Broad profile | 8-12 | 50-100 | 64000-128000 | 500-1200 | Only after baseline and smoke checks |
 
 ## Request-Adapter GEPA
 
@@ -322,7 +339,11 @@ nix develop --command cargo run -- \
   --artifact-id request-adapter/gemma-dsrs-conservative/sonnet-post50-r2-append-only \
   --iterations 5 \
   --max-examples 6 \
-  --lm-max-tokens 128000
+  --lm-max-tokens 32768 \
+  --reflection-temperature 1.0 \
+  --judge-temperature 0.0 \
+  --target-timeout-seconds 420 \
+  --max-rollouts 75
 ```
 
 Run the Qwen regenerated-context Qwen-500 follow-up line with the current GEPA
@@ -347,7 +368,11 @@ nix develop --command cargo run -- \
   --artifact-id request-adapter/qwen-dsrs/sonnet-qwen500-r2-regenerated-context \
   --iterations 5 \
   --max-examples 22 \
-  --lm-max-tokens 128000
+  --lm-max-tokens 64000 \
+  --reflection-temperature 1.0 \
+  --judge-temperature 0.0 \
+  --target-timeout-seconds 420 \
+  --max-rollouts 150
 ```
 
 Add `ATTUNE_GEPA_DEBUG=1` when diagnosing optimizer behavior. It prints one line

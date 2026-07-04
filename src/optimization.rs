@@ -39,12 +39,26 @@ pub const DEFAULT_GEPA_LM_MAX_TOKENS: u32 = ANTHROPIC_SONNET_MAX_OUTPUT_TOKENS;
 pub const DEFAULT_GEPA_ROLE_BASE_URL: &str = "https://openrouter.ai/api/v1";
 pub const DEFAULT_GEPA_REFLECTION_MODEL: &str = "anthropic/claude-sonnet-5";
 pub const DEFAULT_GEPA_JUDGE_MODEL: &str = "anthropic/claude-sonnet-5";
+pub const DEFAULT_GEPA_REFLECTION_TEMPERATURE: f32 = 1.0;
+pub const DEFAULT_GEPA_JUDGE_TEMPERATURE: f32 = 0.0;
+pub const DEFAULT_GEPA_TARGET_TIMEOUT_SECS: u64 = 420;
 const ANTHROPIC_SONNET_MAX_OUTPUT_TOKENS: u32 = 128_000;
 const GEPA_TARGET_LM_MAX_ATTEMPTS: usize = 3;
-const GEPA_TARGET_LM_TIMEOUT_SECS: u64 = 120;
 
 fn default_gepa_lm_max_tokens() -> u32 {
     DEFAULT_GEPA_LM_MAX_TOKENS
+}
+
+fn default_gepa_reflection_temperature() -> f32 {
+    DEFAULT_GEPA_REFLECTION_TEMPERATURE
+}
+
+fn default_gepa_judge_temperature() -> f32 {
+    DEFAULT_GEPA_JUDGE_TEMPERATURE
+}
+
+fn default_gepa_target_timeout_seconds() -> u64 {
+    DEFAULT_GEPA_TARGET_TIMEOUT_SECS
 }
 
 fn default_gepa_judge_model_string() -> String {
@@ -296,6 +310,10 @@ pub struct GepaOptimizationConfig {
     pub iterations: usize,
     pub max_examples: usize,
     pub lm_max_tokens: u32,
+    pub reflection_temperature: f32,
+    pub judge_temperature: f32,
+    pub target_timeout_seconds: u64,
+    pub max_rollouts: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -326,6 +344,14 @@ pub struct GepaOptimizationReport {
     pub examples_loaded: usize,
     #[serde(default = "default_gepa_lm_max_tokens")]
     pub lm_max_tokens: u32,
+    #[serde(default = "default_gepa_reflection_temperature")]
+    pub reflection_temperature: f32,
+    #[serde(default = "default_gepa_judge_temperature")]
+    pub judge_temperature: f32,
+    #[serde(default = "default_gepa_target_timeout_seconds")]
+    pub target_timeout_seconds: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_rollouts: Option<usize>,
     pub best_instruction: String,
     pub best_average_score: f32,
     pub total_rollouts: usize,
@@ -505,6 +531,7 @@ pub struct RequestAdapterPromptProgram {
     predictor: Predict,
     target_client: Option<UpstreamClient>,
     target_model: Option<String>,
+    target_timeout_seconds: u64,
     target_provider: Option<ProviderRouting>,
     judge_lm: Option<LM>,
     judge_cases: GepaJudgeCases,
@@ -517,6 +544,7 @@ impl Default for RequestAdapterPromptProgram {
             predictor: Predict::new(RequestAdapterPromptSignature::new()),
             target_client: None,
             target_model: None,
+            target_timeout_seconds: DEFAULT_GEPA_TARGET_TIMEOUT_SECS,
             target_provider: None,
             judge_lm: None,
             judge_cases: Arc::new(HashMap::new()),
@@ -529,6 +557,7 @@ impl RequestAdapterPromptProgram {
     fn runtime(
         target_client: UpstreamClient,
         target_model: String,
+        target_timeout_seconds: u64,
         target_provider: Option<ProviderRouting>,
         initial_instruction: Option<String>,
         judge_lm: LM,
@@ -545,6 +574,7 @@ impl RequestAdapterPromptProgram {
             predictor: Predict::new(signature),
             target_client: Some(target_client),
             target_model: Some(target_model),
+            target_timeout_seconds,
             target_provider,
             judge_lm: Some(judge_lm),
             judge_cases,
@@ -572,15 +602,16 @@ impl RequestAdapterPromptProgram {
         let mut request = adapt_request(&normalized, &profile)?.upstream_request;
         request.model = target_model.to_string();
 
-        let response = match call_gepa_target(target_client, &request).await {
-            Ok(response) => response,
-            Err(GepaTargetCallFailure::Scoreable { event, reason }) => {
-                return Ok(failed_request_adapter_target_prediction(event, reason));
-            }
-            Err(GepaTargetCallFailure::Fatal(error)) => {
-                return Err(error).context("request-adapter GEPA target LM call failed");
-            }
-        };
+        let response =
+            match call_gepa_target(target_client, &request, self.target_timeout_seconds).await {
+                Ok(response) => response,
+                Err(GepaTargetCallFailure::Scoreable { event, reason }) => {
+                    return Ok(failed_request_adapter_target_prediction(event, reason));
+                }
+                Err(GepaTargetCallFailure::Fatal(error)) => {
+                    return Err(error).context("request-adapter GEPA target LM call failed");
+                }
+            };
         let interpreted = interpret_response(&response, &normalized.tools);
         let raw_output = raw_assistant_output(&response);
         let calls = interpreted_tool_calls(&interpreted.tool_intents);
@@ -635,8 +666,8 @@ fn gepa_target_retry_delay(attempt: usize) -> Duration {
     Duration::from_millis(500 * attempt as u64)
 }
 
-fn gepa_target_lm_timeout() -> Duration {
-    Duration::from_secs(GEPA_TARGET_LM_TIMEOUT_SECS)
+fn gepa_target_lm_timeout(timeout_seconds: u64) -> Duration {
+    Duration::from_secs(timeout_seconds)
 }
 
 fn failed_request_adapter_target_prediction(event: &'static str, reason: String) -> Prediction {
@@ -662,10 +693,11 @@ enum GepaTargetCallFailure {
 async fn call_gepa_target(
     target_client: &UpstreamClient,
     request: &ChatCompletionRequest,
+    timeout_seconds: u64,
 ) -> std::result::Result<ChatCompletionResponse, GepaTargetCallFailure> {
     for attempt in 1..=GEPA_TARGET_LM_MAX_ATTEMPTS {
         match tokio::time::timeout(
-            gepa_target_lm_timeout(),
+            gepa_target_lm_timeout(timeout_seconds),
             target_client.chat_completions(request, &InboundAuth::default()),
         )
         .await
@@ -679,10 +711,7 @@ async fn call_gepa_target(
             Err(_) => {
                 return Err(GepaTargetCallFailure::Scoreable {
                     event: "target LM call timed out after retries",
-                    reason: format!(
-                        "target LM call exceeded {}s timeout",
-                        GEPA_TARGET_LM_TIMEOUT_SECS
-                    ),
+                    reason: format!("target LM call exceeded {}s timeout", timeout_seconds),
                 });
             }
             Ok(Ok(response)) => return Ok(response),
@@ -910,6 +939,7 @@ pub struct CorrectionPromptProgram {
     predictor: Predict,
     target_client: Option<UpstreamClient>,
     target_model: Option<String>,
+    target_timeout_seconds: u64,
     target_provider: Option<ProviderRouting>,
     judge_lm: Option<LM>,
     judge_cases: GepaJudgeCases,
@@ -922,6 +952,7 @@ impl Default for CorrectionPromptProgram {
             predictor: Predict::new(CorrectionPromptSignature::new()),
             target_client: None,
             target_model: None,
+            target_timeout_seconds: DEFAULT_GEPA_TARGET_TIMEOUT_SECS,
             target_provider: None,
             judge_lm: None,
             judge_cases: Arc::new(HashMap::new()),
@@ -934,6 +965,7 @@ impl CorrectionPromptProgram {
     fn with_target_and_judge(
         target_client: UpstreamClient,
         target_model: String,
+        target_timeout_seconds: u64,
         target_provider: Option<ProviderRouting>,
         judge_lm: LM,
         judge_cases: GepaJudgeCases,
@@ -943,6 +975,7 @@ impl CorrectionPromptProgram {
             predictor: Predict::new(CorrectionPromptSignature::new()),
             target_client: Some(target_client),
             target_model: Some(target_model),
+            target_timeout_seconds,
             target_provider,
             judge_lm: Some(judge_lm),
             judge_cases,
@@ -979,13 +1012,14 @@ impl CorrectionPromptProgram {
             }
         }
 
-        let response = match call_gepa_target(target_client, &request).await {
-            Ok(response) => response,
-            Err(GepaTargetCallFailure::Scoreable { event, reason }) => {
-                return Ok(failed_correction_target_prediction(event, reason));
-            }
-            Err(GepaTargetCallFailure::Fatal(error)) => return Err(error),
-        };
+        let response =
+            match call_gepa_target(target_client, &request, self.target_timeout_seconds).await {
+                Ok(response) => response,
+                Err(GepaTargetCallFailure::Scoreable { event, reason }) => {
+                    return Ok(failed_correction_target_prediction(event, reason));
+                }
+                Err(GepaTargetCallFailure::Fatal(error)) => return Err(error),
+            };
         let raw_output = raw_assistant_output(&response);
         if raw_output.trim().is_empty() {
             return Ok(failed_correction_target_prediction(
@@ -1087,6 +1121,8 @@ impl FeedbackEvaluator for CorrectionPromptProgram {
 pub async fn optimize_correction_prompt(
     config: GepaOptimizationConfig,
 ) -> Result<GepaOptimizationReport> {
+    ensure_gepa_temperature("reflection temperature", config.reflection_temperature)?;
+    ensure_gepa_temperature("judge temperature", config.judge_temperature)?;
     let Some(target_api_key) = config.api_key.clone() else {
         anyhow::bail!(
             "OPENROUTER_API_KEY or target --api-key equivalent is required for GEPA target-model calls"
@@ -1113,14 +1149,14 @@ pub async fn optimize_correction_prompt(
         &config.model,
         config.reflection_base_url.as_deref(),
         config.reflection_api_key.clone(),
-        0.2,
+        config.reflection_temperature,
         Some(config.lm_max_tokens),
     )
     .await?;
     let target_client = UpstreamClient::new(UpstreamConfig {
         base_url: config.base_url.clone(),
         api_key: Some(target_api_key),
-        timeout_seconds: GEPA_TARGET_LM_TIMEOUT_SECS,
+        timeout_seconds: config.target_timeout_seconds,
     })
     .context("failed to build correction-agent GEPA target upstream client")?;
     let judge_lm = build_gepa_lm(
@@ -1128,7 +1164,7 @@ pub async fn optimize_correction_prompt(
         &config.judge_model,
         config.judge_base_url.as_deref(),
         config.judge_api_key.clone(),
-        0.0,
+        config.judge_temperature,
         Some(config.lm_max_tokens),
     )
     .await?;
@@ -1136,16 +1172,17 @@ pub async fn optimize_correction_prompt(
     let gepa = GEPA::builder()
         .num_iterations(config.iterations)
         .minibatch_size(examples.len().clamp(1, 3))
-        .temperature(0.7)
+        .temperature(config.reflection_temperature)
         .track_stats(true)
         .maybe_prompt_model(Some(optimizer_lm.clone()))
-        .maybe_max_lm_calls(Some((config.iterations.max(1) * 16) + 16))
+        .maybe_max_rollouts(config.max_rollouts)
         .build();
 
     let fatal_errors = Arc::new(Mutex::new(Vec::new()));
     let mut program = CorrectionPromptProgram::with_target_and_judge(
         target_client,
         target_model.clone(),
+        config.target_timeout_seconds,
         config.target_provider.clone(),
         judge_lm,
         judge_cases,
@@ -1193,6 +1230,10 @@ pub async fn optimize_correction_prompt(
         created_at: Utc::now(),
         examples_loaded: examples.len(),
         lm_max_tokens: config.lm_max_tokens,
+        reflection_temperature: config.reflection_temperature,
+        judge_temperature: config.judge_temperature,
+        target_timeout_seconds: config.target_timeout_seconds,
+        max_rollouts: config.max_rollouts,
         artifact_warnings: artifact_instruction_warnings(&artifact_type, &best_instruction),
         best_instruction,
         best_average_score: result.best_candidate.average_score(),
@@ -1209,6 +1250,8 @@ pub async fn optimize_correction_prompt(
 pub async fn optimize_request_adapter_prompt(
     config: GepaOptimizationConfig,
 ) -> Result<GepaOptimizationReport> {
+    ensure_gepa_temperature("reflection temperature", config.reflection_temperature)?;
+    ensure_gepa_temperature("judge temperature", config.judge_temperature)?;
     let Some(target_api_key) = config.api_key.clone() else {
         anyhow::bail!(
             "OPENROUTER_API_KEY or target --api-key equivalent is required for GEPA target-model calls"
@@ -1240,14 +1283,14 @@ pub async fn optimize_request_adapter_prompt(
         &config.model,
         config.reflection_base_url.as_deref(),
         config.reflection_api_key.clone(),
-        0.2,
+        config.reflection_temperature,
         Some(config.lm_max_tokens),
     )
     .await?;
     let target_client = UpstreamClient::new(UpstreamConfig {
         base_url: config.base_url.clone(),
         api_key: Some(target_api_key),
-        timeout_seconds: GEPA_TARGET_LM_TIMEOUT_SECS,
+        timeout_seconds: config.target_timeout_seconds,
     })
     .context("failed to build request-adapter GEPA target upstream client")?;
     let judge_lm = build_gepa_lm(
@@ -1255,7 +1298,7 @@ pub async fn optimize_request_adapter_prompt(
         &config.judge_model,
         config.judge_base_url.as_deref(),
         config.judge_api_key.clone(),
-        0.0,
+        config.judge_temperature,
         Some(config.lm_max_tokens),
     )
     .await?;
@@ -1264,9 +1307,9 @@ pub async fn optimize_request_adapter_prompt(
     let gepa = GEPA::builder()
         .num_iterations(config.iterations)
         .minibatch_size(examples.len().clamp(1, 3))
-        .temperature(0.7)
+        .temperature(config.reflection_temperature)
         .track_stats(true)
-        .maybe_max_lm_calls(Some((config.iterations.max(1) * 16) + 16))
+        .maybe_max_rollouts(config.max_rollouts)
         .build();
 
     let initial_instruction = request_adapter_initial_instruction(&config, &runtime_model).await?;
@@ -1274,6 +1317,7 @@ pub async fn optimize_request_adapter_prompt(
     let mut program = RequestAdapterPromptProgram::runtime(
         target_client,
         runtime_model.clone(),
+        config.target_timeout_seconds,
         config.target_provider.clone(),
         initial_instruction,
         judge_lm,
@@ -1314,6 +1358,10 @@ pub async fn optimize_request_adapter_prompt(
         created_at: Utc::now(),
         examples_loaded: examples.len(),
         lm_max_tokens: config.lm_max_tokens,
+        reflection_temperature: config.reflection_temperature,
+        judge_temperature: config.judge_temperature,
+        target_timeout_seconds: config.target_timeout_seconds,
+        max_rollouts: config.max_rollouts,
         judge_model: config.judge_model.clone(),
         artifact_warnings: artifact_instruction_warnings(&artifact_type, &best_instruction),
         best_instruction,
@@ -1455,6 +1503,13 @@ fn ensure_gepa_lm_max_tokens_supported(role: &str, model: &str, max_tokens: u32)
                 "{role} --lm-max-tokens {max_tokens} exceeds the known provider cap {limit} for model {model:?}; lower --lm-max-tokens before starting live GEPA calls"
             );
         }
+    }
+    Ok(())
+}
+
+fn ensure_gepa_temperature(label: &str, temperature: f32) -> Result<()> {
+    if !temperature.is_finite() || !(0.0..=2.0).contains(&temperature) {
+        anyhow::bail!("GEPA {label} must be a finite value between 0.0 and 2.0, got {temperature}");
     }
     Ok(())
 }
@@ -1902,9 +1957,9 @@ pub fn correction_gepa_config(iterations: usize) -> GEPA {
     GEPA::builder()
         .num_iterations(iterations)
         .minibatch_size(3)
-        .temperature(0.7)
+        .temperature(DEFAULT_GEPA_REFLECTION_TEMPERATURE)
         .track_stats(true)
-        .maybe_max_lm_calls(Some(64))
+        .maybe_max_rollouts(Some(64))
         .build()
 }
 
@@ -2463,6 +2518,23 @@ mod tests {
     }
 
     #[test]
+    fn gepa_temperature_accepts_default_reflection_value() {
+        ensure_gepa_temperature(
+            "reflection temperature",
+            DEFAULT_GEPA_REFLECTION_TEMPERATURE,
+        )
+        .expect("default reflection temperature should be accepted");
+    }
+
+    #[test]
+    fn gepa_temperature_rejects_non_finite_value() {
+        let error = ensure_gepa_temperature("judge temperature", f32::NAN)
+            .expect_err("NaN temperature should be rejected");
+
+        assert!(format!("{error:#}").contains("finite value"));
+    }
+
+    #[test]
     fn gepa_lm_max_tokens_recognizes_openrouter_prefixed_sonnet_models() {
         assert_eq!(
             known_gepa_lm_max_tokens("openrouter:anthropic/claude-sonnet-5"),
@@ -2747,6 +2819,10 @@ mod tests {
                 iterations: 1,
                 max_examples: 1,
                 lm_max_tokens: DEFAULT_GEPA_LM_MAX_TOKENS,
+                reflection_temperature: DEFAULT_GEPA_REFLECTION_TEMPERATURE,
+                judge_temperature: DEFAULT_GEPA_JUDGE_TEMPERATURE,
+                target_timeout_seconds: DEFAULT_GEPA_TARGET_TIMEOUT_SECS,
+                max_rollouts: None,
             },
             "google/gemma-4-26b-a4b-it",
         )
@@ -2789,6 +2865,10 @@ mod tests {
                 iterations: 1,
                 max_examples: 1,
                 lm_max_tokens: DEFAULT_GEPA_LM_MAX_TOKENS,
+                reflection_temperature: DEFAULT_GEPA_REFLECTION_TEMPERATURE,
+                judge_temperature: DEFAULT_GEPA_JUDGE_TEMPERATURE,
+                target_timeout_seconds: DEFAULT_GEPA_TARGET_TIMEOUT_SECS,
+                max_rollouts: None,
             },
             "google/gemma-4-26b-a4b-it",
         )

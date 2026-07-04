@@ -252,9 +252,9 @@ pub fn correction_gepa_config() -> GEPA {
     GEPA::builder()
         .num_iterations(3)
         .minibatch_size(3)
-        .temperature(0.7)
+        .temperature(crate::optimization::DEFAULT_GEPA_REFLECTION_TEMPERATURE)
         .track_stats(true)
-        .maybe_max_lm_calls(Some(64))
+        .maybe_max_rollouts(Some(64))
         .build()
 }
 
