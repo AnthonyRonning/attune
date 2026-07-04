@@ -514,15 +514,36 @@ impl GEPA {
                 }
             }
 
-            // Collect execution traces
-            let traces = self.collect_traces(module, &minibatch).await?;
+            // Collect execution traces. Once the frontier is initialized, a late
+            // provider or transport failure should preserve the best candidate
+            // found so far instead of discarding the entire expensive run.
+            let traces = match self.collect_traces(module, &minibatch).await {
+                Ok(traces) => traces,
+                Err(error) => {
+                    eprintln!(
+                        "  Stopping GEPA early after generation {} trace collection failed: {error:#}",
+                        generation + 1
+                    );
+                    break;
+                }
+            };
             total_rollouts += traces.len();
 
             // Generate mutation through LLM reflection
             let task_desc = "Perform the task as specified";
-            let new_instruction = self
+            let new_instruction = match self
                 .generate_mutation(&parent.instruction, &traces, task_desc)
-                .await?;
+                .await
+            {
+                Ok(instruction) => instruction,
+                Err(error) => {
+                    eprintln!(
+                        "  Stopping GEPA early after generation {} reflection failed: {error:#}",
+                        generation + 1
+                    );
+                    break;
+                }
+            };
 
             total_lm_calls += 2; // Reflection + proposal
 
@@ -539,7 +560,16 @@ impl GEPA {
                 }
             }
 
-            let child_scores = self.evaluate_candidate(module, eval_set, &child).await?;
+            let child_scores = match self.evaluate_candidate(module, eval_set, &child).await {
+                Ok(scores) => scores,
+                Err(error) => {
+                    eprintln!(
+                        "  Stopping GEPA early after generation {} child evaluation failed: {error:#}",
+                        generation + 1
+                    );
+                    break;
+                }
+            };
             total_rollouts += child_scores.len();
 
             let child_avg = child_scores.iter().sum::<f32>() / child_scores.len() as f32;
