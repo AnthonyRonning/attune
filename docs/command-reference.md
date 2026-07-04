@@ -285,6 +285,10 @@ Rules:
   variance.
 - `--max-rollouts` is the real optimizer budget cap in the pinned DSRs release.
   Use it for hard spend limits; otherwise runs stop by `--iterations`.
+- `--validation-dataset-path` is optional for smoke runs but should be supplied
+  for candidate artifacts. Without it, GEPA uses the training examples for
+  candidate validation, so treat the GEPA score as optimizer telemetry only and
+  gate promotion with the trace harness.
 
 Suggested run tiers:
 

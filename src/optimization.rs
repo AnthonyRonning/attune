@@ -291,6 +291,7 @@ fn balanced_json_object(raw: &str) -> Option<&str> {
 #[derive(Debug, Clone)]
 pub struct GepaOptimizationConfig {
     pub dataset_path: PathBuf,
+    pub validation_dataset_path: Option<PathBuf>,
     pub output_path: PathBuf,
     pub base_url: String,
     pub api_key: Option<String>,
@@ -342,6 +343,10 @@ pub struct GepaOptimizationReport {
     pub judge_model: String,
     pub created_at: DateTime<Utc>,
     pub examples_loaded: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validation_dataset_path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub validation_examples_loaded: usize,
     #[serde(default = "default_gepa_lm_max_tokens")]
     pub lm_max_tokens: u32,
     #[serde(default = "default_gepa_reflection_temperature")]
@@ -1135,6 +1140,9 @@ pub async fn optimize_correction_prompt(
     if examples.is_empty() {
         anyhow::bail!("dataset contained no optimization examples");
     }
+    let validation_rows =
+        read_validation_dataset_rows(config.validation_dataset_path.as_ref()).await?;
+    let validation_examples = optional_examples(traces_to_gepa_examples(&validation_rows));
     let target_model = required_gepa_target_model(&config, "correction-agent GEPA")?;
     ensure_gepa_model_role_separation(
         "correction-agent GEPA",
@@ -1142,7 +1150,12 @@ pub async fn optimize_correction_prompt(
         &config.judge_model,
         &target_model,
     )?;
-    let judge_cases = gepa_judge_cases(&rows, "expected_repair", "expected_repair_policy")?;
+    let judge_cases = gepa_judge_cases_for_splits(
+        &rows,
+        &validation_rows,
+        "expected_repair",
+        "expected_repair_policy",
+    )?;
 
     let optimizer_lm = build_gepa_lm(
         "correction-agent GEPA reflection/proposal",
@@ -1175,6 +1188,7 @@ pub async fn optimize_correction_prompt(
         .temperature(config.reflection_temperature)
         .track_stats(true)
         .maybe_prompt_model(Some(optimizer_lm.clone()))
+        .maybe_valset(validation_examples.clone())
         .maybe_max_rollouts(config.max_rollouts)
         .build();
 
@@ -1229,6 +1243,8 @@ pub async fn optimize_correction_prompt(
         judge_model: config.judge_model.clone(),
         created_at: Utc::now(),
         examples_loaded: examples.len(),
+        validation_dataset_path: config.validation_dataset_path.clone(),
+        validation_examples_loaded: validation_examples.as_ref().map_or(0, Vec::len),
         lm_max_tokens: config.lm_max_tokens,
         reflection_temperature: config.reflection_temperature,
         judge_temperature: config.judge_temperature,
@@ -1269,6 +1285,14 @@ pub async fn optimize_request_adapter_prompt(
     if examples.is_empty() {
         anyhow::bail!("dataset contained no request-adapter optimization examples");
     }
+    let validation_rows =
+        read_validation_dataset_rows(config.validation_dataset_path.as_ref()).await?;
+    let validation_examples = optional_examples(request_adapter_rows_to_gepa_examples_with_format(
+        &validation_rows,
+        config.dsrs_history_format,
+        config.profile.as_deref(),
+        config.profile_revision,
+    ));
     let runtime_model = required_gepa_target_model(&config, "request-adapter GEPA")?;
     ensure_gepa_model_role_separation(
         "request-adapter GEPA",
@@ -1276,7 +1300,12 @@ pub async fn optimize_request_adapter_prompt(
         &config.judge_model,
         &runtime_model,
     )?;
-    let judge_cases = gepa_judge_cases(&rows, "expected_output", "expected_adapter_policy")?;
+    let judge_cases = gepa_judge_cases_for_splits(
+        &rows,
+        &validation_rows,
+        "expected_output",
+        "expected_adapter_policy",
+    )?;
 
     let optimizer_lm = build_gepa_lm(
         "request-adapter GEPA reflection/proposal",
@@ -1309,6 +1338,7 @@ pub async fn optimize_request_adapter_prompt(
         .minibatch_size(examples.len().clamp(1, 3))
         .temperature(config.reflection_temperature)
         .track_stats(true)
+        .maybe_valset(validation_examples.clone())
         .maybe_max_rollouts(config.max_rollouts)
         .build();
 
@@ -1357,6 +1387,8 @@ pub async fn optimize_request_adapter_prompt(
         optimizer_model: config.model.clone(),
         created_at: Utc::now(),
         examples_loaded: examples.len(),
+        validation_dataset_path: config.validation_dataset_path.clone(),
+        validation_examples_loaded: validation_examples.as_ref().map_or(0, Vec::len),
         lm_max_tokens: config.lm_max_tokens,
         reflection_temperature: config.reflection_temperature,
         judge_temperature: config.judge_temperature,
@@ -1620,34 +1652,69 @@ async fn seed_instruction_from_artifact(config: &GepaOptimizationConfig) -> Resu
     Ok(Some(instruction))
 }
 
+#[cfg(test)]
 fn gepa_judge_cases(
     dataset_rows: &[Value],
     expected_key: &str,
     policy_key: &str,
 ) -> Result<GepaJudgeCases> {
+    gepa_judge_cases_for_splits(dataset_rows, &[], expected_key, policy_key)
+}
+
+fn gepa_judge_cases_for_splits(
+    train_rows: &[Value],
+    validation_rows: &[Value],
+    expected_key: &str,
+    policy_key: &str,
+) -> Result<GepaJudgeCases> {
     let mut cases = HashMap::new();
+    insert_gepa_judge_cases(&mut cases, train_rows, "training", expected_key, policy_key)?;
+    insert_gepa_judge_cases(
+        &mut cases,
+        validation_rows,
+        "validation",
+        expected_key,
+        policy_key,
+    )?;
+    Ok(Arc::new(cases))
+}
+
+fn insert_gepa_judge_cases(
+    cases: &mut HashMap<String, GepaJudgeCase>,
+    dataset_rows: &[Value],
+    split: &str,
+    expected_key: &str,
+    policy_key: &str,
+) -> Result<()> {
     for (index, row) in dataset_rows.iter().enumerate() {
         let case_id = gepa_case_id(row, index);
         let expected = row.get(expected_key).cloned().with_context(|| {
-            format!("GEPA dataset row {index} is missing required label {expected_key:?}")
+            format!("GEPA {split} dataset row {index} is missing required label {expected_key:?}")
         })?;
-        cases.insert(
-            case_id,
-            GepaJudgeCase {
-                expected,
-                policy: row.get(policy_key).cloned().unwrap_or(Value::Null),
-                observed_problem: row
-                    .get("observed_problem")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-                observed_failure_kind: row
-                    .get("observed_failure_kind")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-            },
-        );
+        if cases
+            .insert(
+                case_id.clone(),
+                GepaJudgeCase {
+                    expected,
+                    policy: row.get(policy_key).cloned().unwrap_or(Value::Null),
+                    observed_problem: row
+                        .get("observed_problem")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    observed_failure_kind: row
+                        .get("observed_failure_kind")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                },
+            )
+            .is_some()
+        {
+            anyhow::bail!(
+                "GEPA {split} dataset row {index} produced duplicate case_id {case_id:?}; trace_id plus row index must be unique across train and validation splits"
+            );
+        }
     }
-    Ok(Arc::new(cases))
+    Ok(())
 }
 
 fn gepa_case_id(row: &Value, index: usize) -> String {
@@ -1974,6 +2041,21 @@ async fn read_dataset_rows(path: &PathBuf) -> Result<Vec<Value>> {
             serde_json::from_str::<Value>(line).context("failed to parse dataset JSONL row")
         })
         .collect()
+}
+
+async fn read_validation_dataset_rows(path: Option<&PathBuf>) -> Result<Vec<Value>> {
+    let Some(path) = path else {
+        return Ok(Vec::new());
+    };
+    read_dataset_rows(path).await
+}
+
+fn optional_examples(examples: Vec<Example>) -> Option<Vec<Example>> {
+    (!examples.is_empty()).then_some(examples)
+}
+
+fn is_zero_usize(value: &usize) -> bool {
+    *value == 0
 }
 
 fn stringify_field(value: Option<&Value>) -> String {
@@ -2800,6 +2882,7 @@ mod tests {
         let instruction = request_adapter_initial_instruction(
             &GepaOptimizationConfig {
                 dataset_path: PathBuf::from("dataset.jsonl"),
+                validation_dataset_path: None,
                 output_path: PathBuf::from("artifact.json"),
                 base_url: "https://openrouter.ai/api/v1".to_string(),
                 api_key: None,
@@ -2846,6 +2929,7 @@ mod tests {
         let instruction = request_adapter_initial_instruction(
             &GepaOptimizationConfig {
                 dataset_path: PathBuf::from("dataset.jsonl"),
+                validation_dataset_path: None,
                 output_path: PathBuf::from("artifact.json"),
                 base_url: "https://openrouter.ai/api/v1".to_string(),
                 api_key: None,

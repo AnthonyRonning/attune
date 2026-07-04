@@ -174,6 +174,8 @@ enum Command {
     OptimizePrompts {
         #[arg(long, default_value = "datasets/corrections.jsonl")]
         dataset_path: String,
+        #[arg(long)]
+        validation_dataset_path: Option<String>,
         #[arg(long, default_value = "datasets/gepa-correction-prompt.json")]
         output_path: String,
         #[arg(
@@ -243,6 +245,8 @@ enum Command {
             default_value = "datasets/request-adapter/gemma-dsrs-conservative.jsonl"
         )]
         dataset_path: String,
+        #[arg(long)]
+        validation_dataset_path: Option<String>,
         #[arg(
             long,
             default_value = "datasets/request-adapter/gemma-dsrs-conservative-local-append-only-gepa.json"
@@ -590,6 +594,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::OptimizePrompts {
             dataset_path,
+            validation_dataset_path,
             output_path,
             base_url,
             model,
@@ -616,6 +621,7 @@ async fn main() -> anyhow::Result<()> {
             let judge_base_url = gepa_role_base_url(&judge_model, judge_base_url.as_deref());
             let report = optimize_correction_prompt(GepaOptimizationConfig {
                 dataset_path: dataset_path.into(),
+                validation_dataset_path: validation_dataset_path.map(Into::into),
                 output_path: output_path.into(),
                 base_url,
                 api_key: std::env::var("OPENROUTER_API_KEY").ok(),
@@ -654,6 +660,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::OptimizeRequestAdapterPrompt {
             dataset_path,
+            validation_dataset_path,
             output_path,
             base_url,
             model,
@@ -681,6 +688,7 @@ async fn main() -> anyhow::Result<()> {
             let judge_base_url = gepa_role_base_url(&judge_model, judge_base_url.as_deref());
             let report = optimize_request_adapter_prompt(GepaOptimizationConfig {
                 dataset_path: dataset_path.into(),
+                validation_dataset_path: validation_dataset_path.map(Into::into),
                 output_path: output_path.into(),
                 base_url,
                 api_key: std::env::var("OPENROUTER_API_KEY").ok(),
