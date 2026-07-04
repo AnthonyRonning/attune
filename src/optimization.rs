@@ -1835,23 +1835,68 @@ async fn call_gepa_judge(
             return fatal_gepa_feedback(message);
         }
     };
-    let Some(value) = extract_json_object(&response) else {
-        let message = format!(
-            "LLM judge returned non-JSON output: {}",
-            truncate_for_feedback(&response)
-        );
-        return fatal_gepa_feedback(message);
-    };
-    let decision = match serde_json::from_value::<GepaJudgeDecision>(value) {
+    let decision = match parse_gepa_judge_decision(&response) {
         Ok(decision) => decision,
-        Err(error) => {
-            return fatal_gepa_feedback(format!("LLM judge JSON was invalid: {error}"));
-        }
+        Err(error) => return fatal_gepa_feedback(error),
     };
     FeedbackMetric::new(
         decision.score.clamp(0.0, 1.0),
         sanitize_gepa_judge_feedback(&decision.feedback),
     )
+}
+
+fn parse_gepa_judge_decision(response: &str) -> std::result::Result<GepaJudgeDecision, String> {
+    if let Some(value) = extract_json_object(response) {
+        return serde_json::from_value::<GepaJudgeDecision>(value)
+            .map_err(|error| format!("LLM judge JSON was invalid: {error}"));
+    }
+
+    lenient_gepa_judge_decision(response).ok_or_else(|| {
+        format!(
+            "LLM judge returned non-JSON output: {}",
+            truncate_for_feedback(response)
+        )
+    })
+}
+
+fn lenient_gepa_judge_decision(response: &str) -> Option<GepaJudgeDecision> {
+    let score = lenient_json_number_field(response, "score")? as f32;
+    let feedback = lenient_json_string_field(response, "feedback")
+        .unwrap_or_else(|| truncate_for_feedback(response));
+    Some(GepaJudgeDecision { score, feedback })
+}
+
+fn lenient_json_number_field(response: &str, field: &str) -> Option<f64> {
+    let after_colon = after_json_field_colon(response, field)?;
+    let end = after_colon
+        .find(|ch: char| !(ch.is_ascii_digit() || matches!(ch, '-' | '+' | '.' | 'e' | 'E')))
+        .unwrap_or(after_colon.len());
+    after_colon[..end].trim().parse().ok()
+}
+
+fn lenient_json_string_field(response: &str, field: &str) -> Option<String> {
+    let after_colon = after_json_field_colon(response, field)?;
+    let value = after_colon.trim_start();
+    if !value.starts_with('"') {
+        return Some(value.trim_end_matches('}').trim().to_string());
+    }
+
+    let last_quote = value
+        .char_indices()
+        .rev()
+        .find_map(|(index, ch)| (ch == '"').then_some(index))?;
+    let quoted = value.get(..=last_quote)?;
+    serde_json::from_str::<String>(quoted)
+        .ok()
+        .or_else(|| Some(quoted.trim_matches('"').replace("\\\"", "\"")))
+}
+
+fn after_json_field_colon<'a>(response: &'a str, field: &str) -> Option<&'a str> {
+    let key = format!("\"{field}\"");
+    let after_key = response.split_once(&key)?.1;
+    after_key
+        .split_once(':')
+        .map(|(_, value)| value.trim_start())
 }
 
 fn fatal_gepa_feedback(message: String) -> FeedbackMetric {
@@ -2626,6 +2671,29 @@ mod tests {
             .expect_err("NaN temperature should be rejected");
 
         assert!(format!("{error:#}").contains("finite value"));
+    }
+
+    #[test]
+    fn parses_strict_gepa_judge_json() {
+        let decision = parse_gepa_judge_decision(
+            r#"{"score":0.4,"feedback":"Valid shape, but leaked text before markers."}"#,
+        )
+        .expect("strict JSON should parse");
+
+        assert_eq!(decision.score, 0.4);
+        assert!(decision.feedback.contains("Valid shape"));
+    }
+
+    #[test]
+    fn parses_lenient_gepa_judge_feedback_with_unescaped_json_example() {
+        let decision = parse_gepa_judge_decision(
+            r#"{"score": 0.05, "feedback": "The tool_call blocks contain malformed JSON (using "name": "x": {...} instead of "name": "x", "arguments": {...}), so no valid tool_calls were parsed."}"#,
+        )
+        .expect("lenient judge parser should recover score and feedback");
+
+        assert_eq!(decision.score, 0.05);
+        assert!(decision.feedback.contains("malformed JSON"));
+        assert!(decision.feedback.contains("\"arguments\""));
     }
 
     #[test]
