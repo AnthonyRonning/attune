@@ -109,7 +109,26 @@ pub struct GEPAResult {
 
     /// Pareto frontier statistics over time
     pub frontier_history: Vec<ParetoStatistics>,
+
+    /// Number of evolutionary iterations that completed successfully
+    pub completed_iterations: usize,
+
+    /// Reason GEPA stopped before exhausting its configured iteration budget
+    pub stopped_early_reason: Option<String>,
 }
+
+/// Best-candidate checkpoint emitted during GEPA optimization.
+#[derive(Debug, Clone)]
+pub struct GEPACheckpoint {
+    pub best_candidate: GEPACandidate,
+    pub generation: usize,
+    pub total_rollouts: usize,
+    pub total_lm_calls: usize,
+    pub completed: bool,
+    pub stopped_early_reason: Option<String>,
+}
+
+pub type GEPACheckpointCallback = Arc<dyn Fn(GEPACheckpoint) -> Result<()> + Send + Sync>;
 
 /// Statistics about Pareto frontier (re-exported from pareto module)
 pub use super::pareto::ParetoStatistics;
@@ -220,6 +239,9 @@ pub struct GEPA {
 
     /// Validation set for Pareto evaluation (if None, uses trainset)
     pub valset: Option<Vec<Example>>,
+
+    /// Optional callback for persisting the best candidate during long runs
+    pub checkpoint_callback: Option<GEPACheckpointCallback>,
 }
 
 #[derive(Debug, Clone)]
@@ -281,6 +303,32 @@ fn shuffled_indices(dataset_len: usize, seed: u64, epoch: u64) -> Vec<usize> {
 impl GEPA {
     fn minibatch_sampler(&self, trainset_len: usize) -> EpochShuffledMinibatchSampler {
         EpochShuffledMinibatchSampler::new(trainset_len, self.minibatch_size, self.seed)
+    }
+
+    fn checkpoint_best_candidate(
+        &self,
+        frontier: &ParetoFrontier,
+        generation: usize,
+        total_rollouts: usize,
+        total_lm_calls: usize,
+        completed: bool,
+        stopped_early_reason: Option<String>,
+    ) -> Result<()> {
+        let Some(callback) = &self.checkpoint_callback else {
+            return Ok(());
+        };
+        let best_candidate = frontier
+            .best_by_average()
+            .context("No candidates on frontier for GEPA checkpoint")?
+            .clone();
+        callback(GEPACheckpoint {
+            best_candidate,
+            generation,
+            total_rollouts,
+            total_lm_calls,
+            completed,
+            stopped_early_reason,
+        })
     }
 
     /// Initialize the Pareto frontier with the seed program
@@ -472,6 +520,15 @@ impl GEPA {
         let mut frontier_history = Vec::new();
         let mut total_rollouts = 0;
         let mut total_lm_calls = 0;
+        let mut completed_iterations = 0;
+        let mut stopped_early_reason = None;
+        let mut last_checkpointed_score = None;
+
+        self.checkpoint_best_candidate(&frontier, 0, total_rollouts, total_lm_calls, false, None)
+            .context("GEPA checkpoint callback failed after frontier initialization")?;
+        if let Some(best) = frontier.best_by_average() {
+            last_checkpointed_score = Some(best.average_score());
+        }
 
         let mut minibatch_sampler = self.minibatch_sampler(trainset.len());
 
@@ -520,10 +577,12 @@ impl GEPA {
             let traces = match self.collect_traces(module, &minibatch).await {
                 Ok(traces) => traces,
                 Err(error) => {
-                    eprintln!(
-                        "  Stopping GEPA early after generation {} trace collection failed: {error:#}",
+                    let reason = format!(
+                        "generation {} trace collection failed: {error:#}",
                         generation + 1
                     );
+                    eprintln!("  Stopping GEPA early after {reason}");
+                    stopped_early_reason = Some(reason);
                     break;
                 }
             };
@@ -537,10 +596,10 @@ impl GEPA {
             {
                 Ok(instruction) => instruction,
                 Err(error) => {
-                    eprintln!(
-                        "  Stopping GEPA early after generation {} reflection failed: {error:#}",
-                        generation + 1
-                    );
+                    let reason =
+                        format!("generation {} reflection failed: {error:#}", generation + 1);
+                    eprintln!("  Stopping GEPA early after {reason}");
+                    stopped_early_reason = Some(reason);
                     break;
                 }
             };
@@ -563,10 +622,12 @@ impl GEPA {
             let child_scores = match self.evaluate_candidate(module, eval_set, &child).await {
                 Ok(scores) => scores,
                 Err(error) => {
-                    eprintln!(
-                        "  Stopping GEPA early after generation {} child evaluation failed: {error:#}",
+                    let reason = format!(
+                        "generation {} child evaluation failed: {error:#}",
                         generation + 1
                     );
+                    eprintln!("  Stopping GEPA early after {reason}");
+                    stopped_early_reason = Some(reason);
                     break;
                 }
             };
@@ -595,6 +656,29 @@ impl GEPA {
             }
 
             println!("  Frontier size: {}", frontier.len());
+            completed_iterations = generation + 1;
+
+            let best_score = frontier
+                .best_by_average()
+                .map(|candidate| candidate.average_score())
+                .unwrap_or(0.0);
+            if last_checkpointed_score.map_or(true, |score| best_score > score) {
+                self.checkpoint_best_candidate(
+                    &frontier,
+                    generation + 1,
+                    total_rollouts,
+                    total_lm_calls,
+                    false,
+                    None,
+                )
+                .with_context(|| {
+                    format!(
+                        "GEPA checkpoint callback failed after generation {}",
+                        generation + 1
+                    )
+                })?;
+                last_checkpointed_score = Some(best_score);
+            }
         }
 
         // Get best candidate
@@ -610,6 +694,15 @@ impl GEPA {
         );
         println!("  Total rollouts: {}", total_rollouts);
         println!("  Total LM calls: {}", total_lm_calls);
+        self.checkpoint_best_candidate(
+            &frontier,
+            completed_iterations,
+            total_rollouts,
+            total_lm_calls,
+            stopped_early_reason.is_none(),
+            stopped_early_reason.clone(),
+        )
+        .context("GEPA final checkpoint callback failed")?;
 
         // Apply best instruction to module
         {
@@ -628,6 +721,8 @@ impl GEPA {
             highest_score_achieved_per_val_task: vec![], // TODO: Track per-task bests
             best_outputs_valset: None, // TODO: Implement if track_best_outputs is true
             frontier_history,
+            completed_iterations,
+            stopped_early_reason,
         })
     }
 }

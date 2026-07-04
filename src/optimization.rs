@@ -10,8 +10,8 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use dspy_rs::{
     adapter::Adapter, configure, example, Chat, ChatAdapter, Evaluator, Example, FeedbackEvaluator,
-    FeedbackMetric, GEPAResult, LmUsage, Message, MetaSignature, Module, Optimizable, Predict,
-    Prediction, Predictor, Signature, GEPA, LM,
+    FeedbackMetric, GEPACheckpoint, GEPAResult, LmUsage, Message, MetaSignature, Module,
+    Optimizable, Predict, Prediction, Predictor, Signature, GEPA, LM,
 };
 use futures::FutureExt;
 use indexmap::IndexMap;
@@ -372,7 +372,108 @@ pub struct GepaOptimizationReport {
     pub total_lm_calls: usize,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifact_warnings: Vec<ArtifactWarning>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub partial_checkpoint: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopped_early_reason: Option<String>,
     pub output_path: PathBuf,
+}
+
+#[derive(Clone)]
+struct GepaArtifactCheckpointSpec {
+    artifact_id: String,
+    artifact_type: String,
+    signature: String,
+    target_model: Option<String>,
+    profile: Option<String>,
+    profile_revision: Option<u32>,
+    dsrs_history_format: Option<DsrsHistoryFormat>,
+    seed_artifact_path: Option<PathBuf>,
+    optimizer_model: String,
+    judge_model: String,
+    examples_loaded: usize,
+    validation_dataset_path: Option<PathBuf>,
+    validation_examples_loaded: usize,
+    lm_max_tokens: u32,
+    reflection_temperature: f32,
+    judge_temperature: f32,
+    target_timeout_seconds: u64,
+    max_rollouts: Option<usize>,
+    seed: u64,
+    output_path: PathBuf,
+}
+
+impl GepaArtifactCheckpointSpec {
+    fn report(&self, checkpoint: &GEPACheckpoint) -> Option<GepaOptimizationReport> {
+        let best_instruction = checkpoint.best_candidate.instruction.clone();
+        if best_instruction.trim().is_empty() {
+            return None;
+        }
+        let partial_checkpoint = !checkpoint.completed;
+        Some(GepaOptimizationReport {
+            artifact_id: self.artifact_id.clone(),
+            artifact_type: self.artifact_type.clone(),
+            signature: self.signature.clone(),
+            target_model: self.target_model.clone(),
+            profile: self.profile.clone(),
+            profile_revision: self.profile_revision,
+            dsrs_history_format: self.dsrs_history_format,
+            seed_artifact_path: self.seed_artifact_path.clone(),
+            optimizer_model: self.optimizer_model.clone(),
+            judge_model: self.judge_model.clone(),
+            created_at: Utc::now(),
+            examples_loaded: self.examples_loaded,
+            validation_dataset_path: self.validation_dataset_path.clone(),
+            validation_examples_loaded: self.validation_examples_loaded,
+            lm_max_tokens: self.lm_max_tokens,
+            reflection_temperature: self.reflection_temperature,
+            judge_temperature: self.judge_temperature,
+            target_timeout_seconds: self.target_timeout_seconds,
+            max_rollouts: self.max_rollouts,
+            seed: self.seed,
+            artifact_warnings: gepa_artifact_warnings(
+                &self.artifact_type,
+                &best_instruction,
+                partial_checkpoint,
+                checkpoint.stopped_early_reason.as_deref(),
+            ),
+            best_instruction,
+            best_average_score: checkpoint.best_candidate.average_score(),
+            total_rollouts: checkpoint.total_rollouts,
+            total_lm_calls: checkpoint.total_lm_calls,
+            partial_checkpoint,
+            stopped_early_reason: checkpoint.stopped_early_reason.clone(),
+            output_path: self.output_path.clone(),
+        })
+    }
+}
+
+fn gepa_artifact_checkpoint_callback(
+    spec: GepaArtifactCheckpointSpec,
+) -> Arc<dyn Fn(GEPACheckpoint) -> Result<()> + Send + Sync> {
+    Arc::new(move |checkpoint| {
+        let Some(report) = spec.report(&checkpoint) else {
+            return Ok(());
+        };
+        write_gepa_checkpoint_report(&report)?;
+        eprintln!(
+            "  Saved GEPA best artifact checkpoint to {} (score {:.3}, generation {}, partial={})",
+            report.output_path.display(),
+            report.best_average_score,
+            checkpoint.generation,
+            report.partial_checkpoint
+        );
+        Ok(())
+    })
+}
+
+fn write_gepa_checkpoint_report(report: &GepaOptimizationReport) -> Result<()> {
+    if let Some(parent) = report.output_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    std::fs::write(&report.output_path, serde_json::to_vec_pretty(report)?)
+        .with_context(|| format!("failed to write {}", report.output_path.display()))
 }
 
 pub fn artifact_instruction_warnings(
@@ -444,6 +545,25 @@ pub fn artifact_instruction_warnings(
         });
     }
 
+    warnings
+}
+
+fn gepa_artifact_warnings(
+    artifact_type: &str,
+    instruction: &str,
+    partial_checkpoint: bool,
+    stopped_early_reason: Option<&str>,
+) -> Vec<ArtifactWarning> {
+    let mut warnings = artifact_instruction_warnings(artifact_type, instruction);
+    if partial_checkpoint {
+        warnings.push(ArtifactWarning {
+            code: "gepa_partial_checkpoint".to_string(),
+            message: "GEPA artifact was written as a best-so-far checkpoint before the configured run completed; review before promotion".to_string(),
+            matched: stopped_early_reason
+                .map(str::to_string)
+                .or_else(|| Some("run still in progress".to_string())),
+        });
+    }
     warnings
 }
 
@@ -1190,6 +1310,32 @@ pub async fn optimize_correction_prompt(
         Some(config.lm_max_tokens),
     )
     .await?;
+    let artifact_type = "correction_agent_instruction".to_string();
+    let artifact_id = config.artifact_id.clone().unwrap_or_else(|| {
+        default_correction_artifact_id(config.profile.as_deref(), config.target_model.as_deref())
+    });
+    let checkpoint_callback = gepa_artifact_checkpoint_callback(GepaArtifactCheckpointSpec {
+        artifact_id: artifact_id.clone(),
+        artifact_type: artifact_type.clone(),
+        signature: "correct_malformed_tool_response/v1".to_string(),
+        target_model: Some(target_model.clone()),
+        profile: config.profile.clone(),
+        profile_revision: config.profile_revision,
+        dsrs_history_format: None,
+        seed_artifact_path: config.seed_artifact_path.clone(),
+        optimizer_model: config.model.clone(),
+        judge_model: config.judge_model.clone(),
+        examples_loaded: examples.len(),
+        validation_dataset_path: config.validation_dataset_path.clone(),
+        validation_examples_loaded: validation_examples.as_ref().map_or(0, Vec::len),
+        lm_max_tokens: config.lm_max_tokens,
+        reflection_temperature: config.reflection_temperature,
+        judge_temperature: config.judge_temperature,
+        target_timeout_seconds: config.target_timeout_seconds,
+        max_rollouts: config.max_rollouts,
+        seed: config.seed,
+        output_path: config.output_path.clone(),
+    });
 
     let gepa = GEPA::builder()
         .num_iterations(config.iterations)
@@ -1199,6 +1345,7 @@ pub async fn optimize_correction_prompt(
         .maybe_prompt_model(Some(optimizer_lm.clone()))
         .maybe_valset(validation_examples.clone())
         .maybe_max_rollouts(config.max_rollouts)
+        .maybe_checkpoint_callback(Some(checkpoint_callback))
         .seed(config.seed)
         .build();
 
@@ -1230,18 +1377,12 @@ pub async fn optimize_correction_prompt(
             .await
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
-    let artifact_type = "correction_agent_instruction".to_string();
     let best_instruction = result.best_candidate.instruction.clone();
     if best_instruction.trim().is_empty() {
         anyhow::bail!("GEPA correction-prompt optimization produced an empty best instruction; refusing to write an unusable artifact");
     }
     let report = GepaOptimizationReport {
-        artifact_id: config.artifact_id.clone().unwrap_or_else(|| {
-            default_correction_artifact_id(
-                config.profile.as_deref(),
-                config.target_model.as_deref(),
-            )
-        }),
+        artifact_id,
         artifact_type: artifact_type.clone(),
         signature: "correct_malformed_tool_response/v1".to_string(),
         target_model: Some(target_model),
@@ -1261,11 +1402,18 @@ pub async fn optimize_correction_prompt(
         target_timeout_seconds: config.target_timeout_seconds,
         max_rollouts: config.max_rollouts,
         seed: config.seed,
-        artifact_warnings: artifact_instruction_warnings(&artifact_type, &best_instruction),
+        artifact_warnings: gepa_artifact_warnings(
+            &artifact_type,
+            &best_instruction,
+            result.stopped_early_reason.is_some(),
+            result.stopped_early_reason.as_deref(),
+        ),
         best_instruction,
         best_average_score: result.best_candidate.average_score(),
         total_rollouts: result.total_rollouts,
         total_lm_calls: result.total_lm_calls,
+        partial_checkpoint: result.stopped_early_reason.is_some(),
+        stopped_early_reason: result.stopped_early_reason.clone(),
         output_path: config.output_path.clone(),
     };
     tokio::fs::write(&config.output_path, serde_json::to_vec_pretty(&report)?)
@@ -1343,6 +1491,35 @@ pub async fn optimize_request_adapter_prompt(
     )
     .await?;
     configure(optimizer_lm.clone(), GepaJsonAdapter);
+    let artifact_type = "request_adapter_instruction".to_string();
+    let artifact_id = config.artifact_id.clone().unwrap_or_else(|| {
+        default_request_adapter_artifact_id(
+            config.profile.as_deref(),
+            config.target_model.as_deref(),
+        )
+    });
+    let checkpoint_callback = gepa_artifact_checkpoint_callback(GepaArtifactCheckpointSpec {
+        artifact_id: artifact_id.clone(),
+        artifact_type: artifact_type.clone(),
+        signature: "openai_tool_use_contract_profile_guidance/v1".to_string(),
+        target_model: Some(runtime_model.clone()),
+        profile: config.profile.clone(),
+        profile_revision: config.profile_revision,
+        dsrs_history_format: config.dsrs_history_format,
+        seed_artifact_path: config.seed_artifact_path.clone(),
+        optimizer_model: config.model.clone(),
+        judge_model: config.judge_model.clone(),
+        examples_loaded: examples.len(),
+        validation_dataset_path: config.validation_dataset_path.clone(),
+        validation_examples_loaded: validation_examples.as_ref().map_or(0, Vec::len),
+        lm_max_tokens: config.lm_max_tokens,
+        reflection_temperature: config.reflection_temperature,
+        judge_temperature: config.judge_temperature,
+        target_timeout_seconds: config.target_timeout_seconds,
+        max_rollouts: config.max_rollouts,
+        seed: config.seed,
+        output_path: config.output_path.clone(),
+    });
 
     let gepa = GEPA::builder()
         .num_iterations(config.iterations)
@@ -1351,6 +1528,7 @@ pub async fn optimize_request_adapter_prompt(
         .track_stats(true)
         .maybe_valset(validation_examples.clone())
         .maybe_max_rollouts(config.max_rollouts)
+        .maybe_checkpoint_callback(Some(checkpoint_callback))
         .seed(config.seed)
         .build();
 
@@ -1377,18 +1555,12 @@ pub async fn optimize_request_adapter_prompt(
             .await
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
-    let artifact_type = "request_adapter_instruction".to_string();
     let best_instruction = result.best_candidate.instruction.clone();
     if best_instruction.trim().is_empty() {
         anyhow::bail!("GEPA request-adapter optimization produced an empty best instruction; refusing to write an unusable artifact");
     }
     let report = GepaOptimizationReport {
-        artifact_id: config.artifact_id.clone().unwrap_or_else(|| {
-            default_request_adapter_artifact_id(
-                config.profile.as_deref(),
-                config.target_model.as_deref(),
-            )
-        }),
+        artifact_id,
         artifact_type: artifact_type.clone(),
         signature: "openai_tool_use_contract_profile_guidance/v1".to_string(),
         target_model: Some(runtime_model),
@@ -1408,11 +1580,18 @@ pub async fn optimize_request_adapter_prompt(
         max_rollouts: config.max_rollouts,
         seed: config.seed,
         judge_model: config.judge_model.clone(),
-        artifact_warnings: artifact_instruction_warnings(&artifact_type, &best_instruction),
+        artifact_warnings: gepa_artifact_warnings(
+            &artifact_type,
+            &best_instruction,
+            result.stopped_early_reason.is_some(),
+            result.stopped_early_reason.as_deref(),
+        ),
         best_instruction,
         best_average_score: result.best_candidate.average_score(),
         total_rollouts: result.total_rollouts,
         total_lm_calls: result.total_lm_calls,
+        partial_checkpoint: result.stopped_early_reason.is_some(),
+        stopped_early_reason: result.stopped_early_reason.clone(),
         output_path: config.output_path.clone(),
     };
     tokio::fs::write(&config.output_path, serde_json::to_vec_pretty(&report)?)
@@ -2138,6 +2317,10 @@ fn is_zero_usize(value: &usize) -> bool {
     *value == 0
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 fn stringify_field(value: Option<&Value>) -> String {
     match value {
         Some(Value::String(text)) => text.clone(),
@@ -2654,6 +2837,58 @@ mod tests {
 
         ensure_no_gepa_fatal_errors("GEPA test run", &errors)
             .expect("scoreable model failures should not abort as infrastructure errors");
+    }
+
+    #[test]
+    fn gepa_checkpoint_report_marks_partial_unpromoted_best() {
+        let spec = GepaArtifactCheckpointSpec {
+            artifact_id: "request-adapter/test/checkpoint".to_string(),
+            artifact_type: "request_adapter_instruction".to_string(),
+            signature: "openai_tool_use_contract_profile_guidance/v1".to_string(),
+            target_model: Some("provider/model".to_string()),
+            profile: Some("test-profile".to_string()),
+            profile_revision: Some(3),
+            dsrs_history_format: Some(DsrsHistoryFormat::RegeneratedContext),
+            seed_artifact_path: None,
+            optimizer_model: "anthropic/claude-sonnet-5".to_string(),
+            judge_model: "anthropic/claude-sonnet-5".to_string(),
+            examples_loaded: 22,
+            validation_dataset_path: None,
+            validation_examples_loaded: 0,
+            lm_max_tokens: 64000,
+            reflection_temperature: 1.0,
+            judge_temperature: 0.0,
+            target_timeout_seconds: 420,
+            max_rollouts: Some(500),
+            seed: 0,
+            output_path: PathBuf::from("checkpoint.json"),
+        };
+        let checkpoint = GEPACheckpoint {
+            best_candidate: dspy_rs::GEPACandidate {
+                id: 7,
+                instruction: "Use robust tool-call structure.".to_string(),
+                module_name: "predictor".to_string(),
+                example_scores: vec![0.7, 0.9],
+                parent_id: Some(0),
+                generation: 7,
+            },
+            generation: 7,
+            total_rollouts: 123,
+            total_lm_calls: 14,
+            completed: false,
+            stopped_early_reason: None,
+        };
+
+        let report = spec.report(&checkpoint).expect("checkpoint report");
+
+        assert!(report.partial_checkpoint);
+        assert_eq!(report.stopped_early_reason, None);
+        assert!((report.best_average_score - 0.8).abs() < f32::EPSILON);
+        assert_eq!(report.total_rollouts, 123);
+        assert!(report
+            .artifact_warnings
+            .iter()
+            .any(|warning| warning.code == "gepa_partial_checkpoint"));
     }
 
     #[test]
