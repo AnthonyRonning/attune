@@ -35,10 +35,11 @@ use crate::{
     upstream::{InboundAuth, UpstreamClient, UpstreamError},
 };
 
-pub const DEFAULT_GEPA_LM_MAX_TOKENS: u32 = ANTHROPIC_SONNET_4_6_MAX_OUTPUT_TOKENS;
-pub const DEFAULT_GEPA_REFLECTION_MODEL: &str = "anthropic:claude-sonnet-4-6";
-pub const DEFAULT_GEPA_JUDGE_MODEL: &str = "anthropic:claude-sonnet-4-6";
-const ANTHROPIC_SONNET_4_6_MAX_OUTPUT_TOKENS: u32 = 128_000;
+pub const DEFAULT_GEPA_LM_MAX_TOKENS: u32 = ANTHROPIC_SONNET_MAX_OUTPUT_TOKENS;
+pub const DEFAULT_GEPA_ROLE_BASE_URL: &str = "https://openrouter.ai/api/v1";
+pub const DEFAULT_GEPA_REFLECTION_MODEL: &str = "anthropic/claude-sonnet-5";
+pub const DEFAULT_GEPA_JUDGE_MODEL: &str = "anthropic/claude-sonnet-5";
+const ANTHROPIC_SONNET_MAX_OUTPUT_TOKENS: u32 = 128_000;
 const GEPA_TARGET_LM_MAX_ATTEMPTS: usize = 3;
 const GEPA_TARGET_LM_TIMEOUT_SECS: u64 = 120;
 
@@ -1356,13 +1357,14 @@ async fn build_gepa_lm(
     let api_key = api_key
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
+    let model = gepa_lm_wire_model(model, base_url);
 
     match (base_url, api_key, max_tokens) {
         (Some(base_url), Some(api_key), Some(max_tokens)) => {
             LM::builder()
                 .base_url(base_url.to_string())
                 .api_key(api_key)
-                .model(model.to_string())
+                .model(model.clone())
                 .temperature(temperature)
                 .max_tokens(max_tokens)
                 .build()
@@ -1372,7 +1374,7 @@ async fn build_gepa_lm(
             LM::builder()
                 .base_url(base_url.to_string())
                 .api_key(api_key)
-                .model(model.to_string())
+                .model(model.clone())
                 .temperature(temperature)
                 .build()
                 .await
@@ -1380,7 +1382,7 @@ async fn build_gepa_lm(
         (Some(base_url), None, Some(max_tokens)) => {
             LM::builder()
                 .base_url(base_url.to_string())
-                .model(model.to_string())
+                .model(model.clone())
                 .temperature(temperature)
                 .max_tokens(max_tokens)
                 .build()
@@ -1389,7 +1391,7 @@ async fn build_gepa_lm(
         (Some(base_url), None, None) => {
             LM::builder()
                 .base_url(base_url.to_string())
-                .model(model.to_string())
+                .model(model.clone())
                 .temperature(temperature)
                 .build()
                 .await
@@ -1397,7 +1399,7 @@ async fn build_gepa_lm(
         (None, Some(api_key), Some(max_tokens)) => {
             LM::builder()
                 .api_key(api_key)
-                .model(model.to_string())
+                .model(model.clone())
                 .temperature(temperature)
                 .max_tokens(max_tokens)
                 .build()
@@ -1406,14 +1408,14 @@ async fn build_gepa_lm(
         (None, Some(api_key), None) => {
             LM::builder()
                 .api_key(api_key)
-                .model(model.to_string())
+                .model(model.clone())
                 .temperature(temperature)
                 .build()
                 .await
         }
         (None, None, Some(max_tokens)) => {
             LM::builder()
-                .model(model.to_string())
+                .model(model.clone())
                 .temperature(temperature)
                 .max_tokens(max_tokens)
                 .build()
@@ -1421,13 +1423,29 @@ async fn build_gepa_lm(
         }
         (None, None, None) => {
             LM::builder()
-                .model(model.to_string())
+                .model(model.clone())
                 .temperature(temperature)
                 .build()
                 .await
         }
     }
     .with_context(|| format!("failed to build {role} LM for model {model:?}"))
+}
+
+fn gepa_lm_wire_model(model: &str, base_url: Option<&str>) -> String {
+    let trimmed = model.trim();
+    if base_url
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .contains("openrouter.ai")
+    {
+        trimmed
+            .strip_prefix("openrouter:")
+            .unwrap_or(trimmed)
+            .to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 fn ensure_gepa_lm_max_tokens_supported(role: &str, model: &str, max_tokens: u32) -> Result<()> {
@@ -1442,11 +1460,22 @@ fn ensure_gepa_lm_max_tokens_supported(role: &str, model: &str, max_tokens: u32)
 }
 
 fn known_gepa_lm_max_tokens(model: &str) -> Option<u32> {
-    let normalized = model
-        .trim()
+    match providerless_model_id(model).as_str() {
+        "claude-sonnet-4-6" | "claude-sonnet-5" => Some(ANTHROPIC_SONNET_MAX_OUTPUT_TOKENS),
+        _ => None,
+    }
+}
+
+fn providerless_model_id(model: &str) -> String {
+    let normalized = model.trim().to_ascii_lowercase().replace('.', "-");
+    let normalized = normalized
+        .strip_prefix("openrouter:")
+        .unwrap_or(normalized.as_str());
+    normalized
         .strip_prefix("anthropic:")
-        .unwrap_or_else(|| model.trim());
-    (normalized == "claude-sonnet-4-6").then_some(ANTHROPIC_SONNET_4_6_MAX_OUTPUT_TOKENS)
+        .or_else(|| normalized.strip_prefix("anthropic/"))
+        .unwrap_or(normalized)
+        .to_string()
 }
 
 fn required_gepa_target_model(config: &GepaOptimizationConfig, layer: &str) -> Result<String> {
@@ -1730,7 +1759,7 @@ fn ensure_no_gepa_fatal_errors(layer: &str, errors: &GepaFatalErrors) -> Result<
 }
 
 fn request_adapter_judge_system_prompt() -> &'static str {
-    "You are Claude Sonnet 4.6 acting as the GEPA judge for a request-adapter prompt optimizer.\n\
+    "You are the configured GEPA judge model for a request-adapter prompt optimizer.\n\
 Judge whether the target model produced a structurally usable OpenAI-compatible assistant turn after Attune's DSRs formatting.\n\
 Attune is optimizing structure and contract following, not task intelligence. Valid outputs include content only, tool calls only, and content plus tool calls. Empty visible content with [] tool_calls is a failure.\n\
 Content plus tool calls is explicitly valid in this project and in OpenAI-compatible assistant turns. Never treat content and tool_calls as mutually exclusive. Do not penalize a prediction solely because it includes brief useful user-facing content alongside valid tool_calls.\n\
@@ -1742,7 +1771,7 @@ Return exactly one JSON object: {\"score\": number between 0 and 1, \"feedback\"
 }
 
 fn correction_judge_system_prompt() -> &'static str {
-    "You are Claude Sonnet 4.6 acting as the GEPA judge for a DSRs correction-agent prompt optimizer.\n\
+    "You are the configured GEPA judge model for a DSRs correction-agent prompt optimizer.\n\
 Judge whether the correction agent safely recovered the malformed assistant response into typed DSRs fields without inventing unsupported tools, arguments, facts, or user intent.\n\
 Use hidden_expected_repair only as private scoring context. Do not quote hidden labels, exact commands, exact file paths, field names such as expected_repair, dataset/test/eval metadata, or answer-key language in feedback.\n\
 Give high scores to safe repairs that preserve the original model intent and produce usable content/tool_calls. Penalize invented tools, invented required arguments, unsafe repairs, no-op repairs, and malformed DSRs outputs.\n\
@@ -2414,8 +2443,8 @@ mod tests {
     fn gepa_lm_max_tokens_rejects_known_provider_over_cap_before_live_call() {
         let error = ensure_gepa_lm_max_tokens_supported(
             "request-adapter GEPA judge",
-            "anthropic:claude-sonnet-4-6",
-            ANTHROPIC_SONNET_4_6_MAX_OUTPUT_TOKENS + 1,
+            "anthropic:claude-sonnet-5",
+            ANTHROPIC_SONNET_MAX_OUTPUT_TOKENS + 1,
         )
         .expect_err("known invalid token cap should be rejected before LM calls");
 
@@ -2427,10 +2456,33 @@ mod tests {
     fn gepa_lm_max_tokens_allows_known_provider_cap() {
         ensure_gepa_lm_max_tokens_supported(
             "request-adapter GEPA judge",
-            "anthropic:claude-sonnet-4-6",
-            ANTHROPIC_SONNET_4_6_MAX_OUTPUT_TOKENS,
+            "anthropic/claude-sonnet-5",
+            ANTHROPIC_SONNET_MAX_OUTPUT_TOKENS,
         )
         .expect("provider cap should be accepted");
+    }
+
+    #[test]
+    fn gepa_lm_max_tokens_recognizes_openrouter_prefixed_sonnet_models() {
+        assert_eq!(
+            known_gepa_lm_max_tokens("openrouter:anthropic/claude-sonnet-5"),
+            Some(ANTHROPIC_SONNET_MAX_OUTPUT_TOKENS)
+        );
+    }
+
+    #[test]
+    fn gepa_lm_wire_model_strips_openrouter_alias_for_openrouter_base_url() {
+        assert_eq!(
+            gepa_lm_wire_model(
+                "openrouter:anthropic/claude-sonnet-5",
+                Some(DEFAULT_GEPA_ROLE_BASE_URL)
+            ),
+            "anthropic/claude-sonnet-5"
+        );
+        assert_eq!(
+            gepa_lm_wire_model("anthropic:claude-sonnet-5", None),
+            "anthropic:claude-sonnet-5"
+        );
     }
 
     #[test]

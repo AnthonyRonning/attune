@@ -17,12 +17,15 @@ The examples below use `nix develop --command` where reproducibility matters.
 
 ```sh
 export OPENROUTER_API_KEY="..."
+# Optional: only needed when GEPA roles use native Anthropic model ids.
 export ANTHROPIC_API_KEY="..."
 ```
 
-`OPENROUTER_API_KEY` is used for OpenRouter target-model calls and normal
-serving. `ANTHROPIC_API_KEY` is used by GEPA reflection/proposal and judge calls
-when the model is `anthropic:claude-sonnet-4-6`.
+`OPENROUTER_API_KEY` is used for OpenRouter target-model calls, normal serving,
+and the default GEPA reflection/proposal and judge calls through
+`anthropic/claude-sonnet-5`. `ANTHROPIC_API_KEY` is only needed when a GEPA role
+uses a native Anthropic model id such as `anthropic:claude-sonnet-5` with no
+role base URL.
 
 Useful logging:
 
@@ -244,15 +247,14 @@ the same as request-adapter GEPA.
 
 ```sh
 export OPENROUTER_API_KEY="..."
-export ANTHROPIC_API_KEY="..."
 
 nix develop --command cargo run -- \
   optimize-prompts \
   --dataset-path datasets/corrections.jsonl \
   --output-path datasets/gepa-correction-prompt.json \
   --base-url https://openrouter.ai/api/v1 \
-  --model anthropic:claude-sonnet-4-6 \
-  --judge-model anthropic:claude-sonnet-4-6 \
+  --model anthropic/claude-sonnet-5 \
+  --judge-model anthropic/claude-sonnet-5 \
   --target-model qwen/qwen3.5-9b \
   --profile qwen-dsrs \
   --profile-revision 3 \
@@ -268,8 +270,12 @@ Rules:
 - `--model` is the GEPA reflection/proposal model.
 - `--judge-model` is the scoring model.
 - Reflection and judge must not be the same model as the target.
-- Anthropic roles use `ANTHROPIC_API_KEY`; OpenRouter target calls use
-  `OPENROUTER_API_KEY`.
+- OpenRouter role model ids such as `anthropic/claude-sonnet-5` use
+  `OPENROUTER_API_KEY` and default to `https://openrouter.ai/api/v1`.
+- Native Anthropic role model ids such as `anthropic:claude-sonnet-5` use
+  `ANTHROPIC_API_KEY`; pass an empty `--reflection-base-url` or
+  `--judge-base-url` if you also have an OpenRouter role-base-url env override
+  set.
 
 ## Request-Adapter GEPA
 
@@ -295,19 +301,19 @@ jq -c . \
   > /tmp/qwen-request-adapter-all.jsonl
 ```
 
-Reproduce the promoted Gemma append-only post-50 optimization line:
+Run the Gemma append-only post-50 optimization line with the current GEPA
+defaults:
 
 ```sh
 export OPENROUTER_API_KEY="..."
-export ANTHROPIC_API_KEY="..."
 
 nix develop --command cargo run -- \
   optimize-request-adapter-prompt \
   --dataset-path /tmp/gemma-request-adapter-all.jsonl \
   --output-path datasets/request-adapter/gemma-dsrs-conservative-sonnet-post50-r2-append-only-gepa.json \
   --base-url https://openrouter.ai/api/v1 \
-  --model anthropic:claude-sonnet-4-6 \
-  --judge-model anthropic:claude-sonnet-4-6 \
+  --model anthropic/claude-sonnet-5 \
+  --judge-model anthropic/claude-sonnet-5 \
   --target-model google/gemma-4-26b-a4b-it \
   --profile gemma-dsrs-conservative \
   --profile-revision 7 \
@@ -319,19 +325,19 @@ nix develop --command cargo run -- \
   --lm-max-tokens 128000
 ```
 
-Reproduce the promoted Qwen regenerated-context Qwen-500 follow-up line:
+Run the Qwen regenerated-context Qwen-500 follow-up line with the current GEPA
+defaults:
 
 ```sh
 export OPENROUTER_API_KEY="..."
-export ANTHROPIC_API_KEY="..."
 
 nix develop --command cargo run -- \
   optimize-request-adapter-prompt \
   --dataset-path datasets/request-adapter/qwen-dsrs-trace-harness-curated.jsonl \
   --output-path datasets/request-adapter/qwen-dsrs-sonnet-qwen500-r2-regenerated-context-gepa.json \
   --base-url https://openrouter.ai/api/v1 \
-  --model anthropic:claude-sonnet-4-6 \
-  --judge-model anthropic:claude-sonnet-4-6 \
+  --model anthropic/claude-sonnet-5 \
+  --judge-model anthropic/claude-sonnet-5 \
   --target-model qwen/qwen3.5-9b \
   --profile qwen-dsrs \
   --profile-revision 4 \

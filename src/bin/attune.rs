@@ -16,6 +16,7 @@ use attune::{
     optimization::{
         optimize_correction_prompt, optimize_request_adapter_prompt, GepaOptimizationConfig,
         DEFAULT_GEPA_JUDGE_MODEL, DEFAULT_GEPA_LM_MAX_TOKENS, DEFAULT_GEPA_REFLECTION_MODEL,
+        DEFAULT_GEPA_ROLE_BASE_URL,
     },
     promotion::{
         promote_artifact, promote_default_artifact, ArtifactPromotionConfig,
@@ -566,6 +567,8 @@ async fn main() -> anyhow::Result<()> {
             max_examples,
             lm_max_tokens,
         } => {
+            let reflection_base_url = gepa_role_base_url(&model, reflection_base_url.as_deref());
+            let judge_base_url = gepa_role_base_url(&judge_model, judge_base_url.as_deref());
             let report = optimize_correction_prompt(GepaOptimizationConfig {
                 dataset_path: dataset_path.into(),
                 output_path: output_path.into(),
@@ -621,6 +624,8 @@ async fn main() -> anyhow::Result<()> {
             max_examples,
             lm_max_tokens,
         } => {
+            let reflection_base_url = gepa_role_base_url(&model, reflection_base_url.as_deref());
+            let judge_base_url = gepa_role_base_url(&judge_model, judge_base_url.as_deref());
             let report = optimize_request_adapter_prompt(GepaOptimizationConfig {
                 dataset_path: dataset_path.into(),
                 output_path: output_path.into(),
@@ -1022,11 +1027,11 @@ fn gepa_role_api_key(
     let base_url = base_url.unwrap_or_default().to_ascii_lowercase();
     first_non_empty([
         explicit,
-        (provider_model.starts_with("anthropic:"))
-            .then(|| std::env::var("ANTHROPIC_API_KEY").ok())
-            .flatten(),
         (provider_model.starts_with("openrouter:") || base_url.contains("openrouter.ai"))
             .then(|| std::env::var("OPENROUTER_API_KEY").ok())
+            .flatten(),
+        (provider_model.starts_with("anthropic:"))
+            .then(|| std::env::var("ANTHROPIC_API_KEY").ok())
             .flatten(),
         (provider_model.starts_with("openai:"))
             .then(|| std::env::var("OPENAI_API_KEY").ok())
@@ -1035,4 +1040,44 @@ fn gepa_role_api_key(
             .then(|| std::env::var("GEMINI_API_KEY").ok())
             .flatten(),
     ])
+}
+
+fn gepa_role_base_url(model: &str, explicit: Option<&str>) -> Option<String> {
+    if let Some(explicit) = explicit {
+        let explicit = explicit.trim();
+        return (!explicit.is_empty()).then(|| explicit.to_string());
+    }
+
+    gepa_role_uses_openrouter_default(model).then(|| DEFAULT_GEPA_ROLE_BASE_URL.to_string())
+}
+
+fn gepa_role_uses_openrouter_default(model: &str) -> bool {
+    let model = model.trim().to_ascii_lowercase();
+    model.starts_with("openrouter:") || (!model.contains(':') && model.contains('/'))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gepa_role_base_url_defaults_openrouter_for_slash_model_ids() {
+        assert_eq!(
+            gepa_role_base_url("anthropic/claude-sonnet-5", None).as_deref(),
+            Some(DEFAULT_GEPA_ROLE_BASE_URL)
+        );
+    }
+
+    #[test]
+    fn gepa_role_base_url_leaves_native_anthropic_models_direct() {
+        assert_eq!(gepa_role_base_url("anthropic:claude-sonnet-5", None), None);
+    }
+
+    #[test]
+    fn gepa_role_base_url_empty_explicit_value_disables_default() {
+        assert_eq!(
+            gepa_role_base_url("anthropic/claude-sonnet-5", Some("")),
+            None
+        );
+    }
 }
