@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::{collections::BTreeMap, fmt, time::Instant};
 
 use anyhow::{Context, Result};
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
@@ -149,6 +149,7 @@ impl UpstreamClient {
             }
         };
         let status = response.status();
+        let diagnostics = UpstreamDiagnostics::from_headers(response.headers());
         let body = match response.text().await {
             Ok(body) => body,
             Err(error) => {
@@ -169,11 +170,13 @@ impl UpstreamClient {
                 elapsed_ms = started.elapsed().as_millis(),
                 body_len = body.len(),
                 body_preview = %preview(&body),
+                diagnostic_headers = ?diagnostics.headers,
                 "upstream returned non-success status"
             );
             return Err(UpstreamError::Status {
                 status: status.as_u16(),
                 body,
+                diagnostics,
             });
         }
 
@@ -186,10 +189,15 @@ impl UpstreamClient {
                     elapsed_ms = started.elapsed().as_millis(),
                     body_len = body.len(),
                     body_preview = %preview(&body),
+                    diagnostic_headers = ?diagnostics.headers,
                     error = %source,
                     "failed to decode upstream response"
                 );
-                return Err(UpstreamError::Decode { source, body });
+                return Err(UpstreamError::Decode {
+                    source,
+                    body,
+                    diagnostics,
+                });
             }
         };
 
@@ -201,6 +209,8 @@ impl UpstreamClient {
             choices = decoded.choices.len(),
             finish_reason = ?first_finish_reason(&decoded),
             usage_present = decoded.usage.is_some(),
+            response_provider = ?response_provider(&decoded),
+            diagnostic_headers = ?diagnostics.headers,
             "upstream request completed"
         );
         Ok(decoded)
@@ -237,6 +247,7 @@ impl UpstreamClient {
             }
         };
         let status = response.status();
+        let diagnostics = UpstreamDiagnostics::from_headers(response.headers());
         let body = match response.text().await {
             Ok(body) => body,
             Err(error) => {
@@ -257,11 +268,13 @@ impl UpstreamClient {
                 elapsed_ms = started.elapsed().as_millis(),
                 body_len = body.len(),
                 body_preview = %preview(&body),
+                diagnostic_headers = ?diagnostics.headers,
                 "upstream returned non-success status"
             );
             return Err(UpstreamError::Status {
                 status: status.as_u16(),
                 body,
+                diagnostics,
             });
         }
 
@@ -274,10 +287,15 @@ impl UpstreamClient {
                     elapsed_ms = started.elapsed().as_millis(),
                     body_len = body.len(),
                     body_preview = %preview(&body),
+                    diagnostic_headers = ?diagnostics.headers,
                     error = %source,
                     "failed to decode upstream response"
                 );
-                return Err(UpstreamError::Decode { source, body });
+                return Err(UpstreamError::Decode {
+                    source,
+                    body,
+                    diagnostics,
+                });
             }
         };
 
@@ -426,6 +444,38 @@ fn first_finish_reason(response: &ChatCompletionResponse) -> Option<&str> {
         .and_then(|choice| choice.finish_reason.as_deref())
 }
 
+fn response_provider(response: &ChatCompletionResponse) -> Option<&str> {
+    response
+        .extra
+        .get("provider")
+        .and_then(|value| value.as_str())
+}
+
+fn diagnostic_headers(headers: &HeaderMap) -> BTreeMap<String, String> {
+    headers
+        .iter()
+        .filter_map(|(name, value)| {
+            let name = name.as_str().to_ascii_lowercase();
+            if !is_diagnostic_header(&name) {
+                return None;
+            }
+            let value = value
+                .to_str()
+                .map(preview)
+                .unwrap_or_else(|_| "<non-utf8>".to_string());
+            Some((name, value))
+        })
+        .collect()
+}
+
+fn is_diagnostic_header(name: &str) -> bool {
+    name.starts_with("x-openrouter")
+        || name.starts_with("openrouter")
+        || name.contains("provider")
+        || name.starts_with("x-ratelimit")
+        || matches!(name, "retry-after" | "cf-ray" | "x-request-id")
+}
+
 fn preview(value: &str) -> String {
     const MAX: usize = 512;
     let mut preview = value.chars().take(MAX).collect::<String>();
@@ -435,16 +485,43 @@ fn preview(value: &str) -> String {
     preview
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UpstreamDiagnostics {
+    headers: BTreeMap<String, String>,
+}
+
+impl UpstreamDiagnostics {
+    fn from_headers(headers: &HeaderMap) -> Self {
+        Self {
+            headers: diagnostic_headers(headers),
+        }
+    }
+}
+
+impl fmt::Display for UpstreamDiagnostics {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.headers.is_empty() {
+            return Ok(());
+        }
+        write!(formatter, "; diagnostic_headers={:?}", self.headers)
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum UpstreamError {
     #[error("upstream transport error: {0}")]
     Transport(#[from] reqwest::Error),
-    #[error("upstream returned HTTP {status}: {body}")]
-    Status { status: u16, body: String },
-    #[error("failed to decode upstream response: {source}; body: {body}")]
+    #[error("upstream returned HTTP {status}: {body}{diagnostics}")]
+    Status {
+        status: u16,
+        body: String,
+        diagnostics: UpstreamDiagnostics,
+    },
+    #[error("failed to decode upstream response: {source}; body: {body}{diagnostics}")]
     Decode {
         source: serde_json::Error,
         body: String,
+        diagnostics: UpstreamDiagnostics,
     },
 }
 
@@ -507,6 +584,75 @@ mod tests {
                 .as_deref(),
             Some("inbound-key")
         );
+    }
+
+    #[test]
+    fn diagnostic_headers_capture_openrouter_provider_context() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-openrouter-provider",
+            HeaderValue::from_static("deepinfra"),
+        );
+        headers.insert("x-ratelimit-remaining", HeaderValue::from_static("42"));
+        headers.insert("authorization", HeaderValue::from_static("Bearer secret"));
+
+        let diagnostics = UpstreamDiagnostics::from_headers(&headers);
+
+        assert_eq!(
+            diagnostics
+                .headers
+                .get("x-openrouter-provider")
+                .map(String::as_str),
+            Some("deepinfra")
+        );
+        assert_eq!(
+            diagnostics
+                .headers
+                .get("x-ratelimit-remaining")
+                .map(String::as_str),
+            Some("42")
+        );
+        assert!(!diagnostics.headers.contains_key("authorization"));
+    }
+
+    #[tokio::test]
+    async fn decode_error_includes_diagnostic_headers() {
+        let server = MockServer::start_async().await;
+        let chat_mock = server
+            .mock_async(|when, then| {
+                when.method(POST).path("/v1/chat/completions");
+                then.status(200)
+                    .header("x-openrouter-provider", "deepinfra")
+                    .body("not-json");
+            })
+            .await;
+
+        let error = client(format!("{}/v1", server.base_url()), None)
+            .chat_completions(
+                &ChatCompletionRequest {
+                    model: "test-model".to_string(),
+                    messages: Vec::new(),
+                    tools: None,
+                    tool_choice: None,
+                    parallel_tool_calls: None,
+                    stream: None,
+                    temperature: None,
+                    top_p: None,
+                    max_tokens: None,
+                    max_completion_tokens: None,
+                    response_format: None,
+                    extra: serde_json::Map::new(),
+                },
+                &InboundAuth::default(),
+            )
+            .await
+            .expect_err("invalid upstream JSON should fail");
+
+        chat_mock.assert_async().await;
+        let message = error.to_string();
+        assert!(message.contains("failed to decode upstream response"));
+        assert!(message.contains("x-openrouter-provider"));
+        assert!(message.contains("deepinfra"));
     }
 
     #[tokio::test]
