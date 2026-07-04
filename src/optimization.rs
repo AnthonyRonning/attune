@@ -45,6 +45,7 @@ pub const DEFAULT_GEPA_TARGET_TIMEOUT_SECS: u64 = 420;
 pub const DEFAULT_GEPA_SEED: u64 = 0;
 const ANTHROPIC_SONNET_MAX_OUTPUT_TOKENS: u32 = 128_000;
 const GEPA_TARGET_LM_MAX_ATTEMPTS: usize = 3;
+const GEPA_JUDGE_LM_MAX_ATTEMPTS: usize = 3;
 
 fn default_gepa_lm_max_tokens() -> u32 {
     DEFAULT_GEPA_LM_MAX_TOKENS
@@ -1828,21 +1829,42 @@ async fn call_gepa_judge(
         serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string())
     );
     let chat = Chat::new(vec![Message::system(system_prompt), Message::user(user)]);
-    let response = match judge_lm.call(chat, Vec::new()).await {
-        Ok(response) => response.output.content(),
-        Err(error) => {
-            let message = format!("LLM judge call failed: {error}");
-            return fatal_gepa_feedback(message);
-        }
+    let response = match call_gepa_judge_lm(judge_lm, chat).await {
+        Ok(response) => response,
+        Err(message) => return FeedbackMetric::new(0.0, message),
     };
     let decision = match parse_gepa_judge_decision(&response) {
         Ok(decision) => decision,
-        Err(error) => return fatal_gepa_feedback(error),
+        Err(error) => return FeedbackMetric::new(0.0, error),
     };
     FeedbackMetric::new(
         decision.score.clamp(0.0, 1.0),
         sanitize_gepa_judge_feedback(&decision.feedback),
     )
+}
+
+async fn call_gepa_judge_lm(judge_lm: &LM, chat: Chat) -> std::result::Result<String, String> {
+    let mut last_error = None;
+    for attempt in 1..=GEPA_JUDGE_LM_MAX_ATTEMPTS {
+        match judge_lm.call(chat.clone(), Vec::new()).await {
+            Ok(response) => return Ok(response.output.content()),
+            Err(error) => {
+                let message = format!("LLM judge call failed: {error}");
+                if attempt < GEPA_JUDGE_LM_MAX_ATTEMPTS {
+                    eprintln!(
+                        "GEPA judge LM call failed on attempt {attempt}/{GEPA_JUDGE_LM_MAX_ATTEMPTS}; retrying: {}",
+                        truncate_for_feedback(&message)
+                    );
+                    tokio::time::sleep(gepa_target_retry_delay(attempt)).await;
+                }
+                last_error = Some(message);
+            }
+        }
+    }
+    Err(format!(
+        "LLM judge infrastructure failure after {GEPA_JUDGE_LM_MAX_ATTEMPTS} attempts: {}",
+        last_error.unwrap_or_else(|| "unknown judge error".to_string())
+    ))
 }
 
 fn parse_gepa_judge_decision(response: &str) -> std::result::Result<GepaJudgeDecision, String> {
@@ -1899,6 +1921,7 @@ fn after_json_field_colon<'a>(response: &'a str, field: &str) -> Option<&'a str>
         .map(|(_, value)| value.trim_start())
 }
 
+#[cfg(test)]
 fn fatal_gepa_feedback(message: String) -> FeedbackMetric {
     FeedbackMetric::with_metadata(
         0.0,
