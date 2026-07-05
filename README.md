@@ -133,30 +133,37 @@ Attune fixed all 25 direct baseline structural failures. The 3 proxy
 regressions from that run were reviewed and added to the curated GEPA datasets.
 
 Qwen is still the highest-priority in-progress profile, but the latest GEPA
-promotion closed a meaningful part of the gap. The original 500-scenario
+promotions closed a meaningful part of the gap. The original 500-scenario
 Pi/Hermes comparison found that direct OpenRouter passed 487/500 structural
 checks while the previous Attune proxy profile passed 457/500. After promoting
-the Qwen-500 regenerated-context artifact, the same 500-scenario file was
-replayed through the proxy without rerunning the direct baseline:
+the Qwen-500 regenerated-context artifact and then the Sonnet-5 regenerated
+context artifact, the same 500-scenario file was replayed through the proxy
+without rerunning the direct baseline:
 
 | Qwen 3.5 9B 500-scenario run | Structural passes |
 | --- | ---: |
 | Direct OpenRouter baseline from prior comparison | 487/500 |
 | Previous Attune proxy profile | 457/500 |
 | Promoted Qwen-500 Attune proxy profile | 471/500 |
+| Sonnet-5 Qwen append-only profile, not promoted | 469/500 |
+| Promoted Sonnet-5 Qwen regenerated-context profile | 475/500 |
 
-That is a 14-case proxy improvement on the same scenario set. It is still not
-better than the prior direct baseline, but it fixed 36 previous proxy failures
-and gave the next optimization loop better evidence. Remaining failures are
-mostly tool intent leaking as prose or malformed tool text instead of clean
-OpenAI `tool_calls`, plus correction-agent failures where repaired DSRs
-`tool_calls` JSON was still invalid.
+That is an 18-case proxy improvement over the original proxy result on the same
+scenario set, and a 4-case improvement over the previous promoted Qwen default.
+It is still not better than the prior direct baseline. In the promoted replay,
+valid DSR `tool_calls` converted into OpenAI `tool_calls` count as expected
+adapter behavior, not correction-agent repair; the remaining failures are
+mostly tool intent leaking as prose or malformed tool text instead of clean DSRs
+output, plus correction-agent failures where repaired DSRs `tool_calls` JSON
+was still invalid.
 
 Representative Qwen traces from this replay were promoted into both the Qwen
 request-adapter dataset and the shared correction-agent dataset. These examples
-cover recovered malformed DSRs, recovered tool-like text, and correction-agent
-tool recoveries so future GEPA runs can learn both to avoid the correction path
-and to repair it more reliably when needed.
+cover inspected direct successes, recovered malformed DSRs, recovered
+content-only answers, correction-agent tool recoveries, and correction-agent
+failure states where a valid repair was still available. Future GEPA runs can
+learn both to avoid the correction path and to repair it more reliably when
+needed.
 
 ## Try It
 
@@ -440,6 +447,12 @@ Near-term directions:
 - harden config-file validation and parser/repair policy configuration
 - add profile validation and migration tooling
 - expand trace-harness and GEPA datasets across more model families
+- explore per-model tool-surface optimization: treat semantically equivalent
+  tools such as alternate edit schemas as profile-selectable artifacts, then
+  load the tool shape that evals best for each model instead of assuming one
+  universal tool schema. This is adjacent to Armin Ronacher's
+  [Better Models: Worse Tools](https://lucumr.pocoo.org/2026/7/4/better-models-worse-tools/)
+  observation that newer models can be worse at unfamiliar tool schemas.
 - add provider-specific compatibility adapters where generic OpenAI-compatible
   HTTP is not enough
 - improve streaming fidelity for corrected responses

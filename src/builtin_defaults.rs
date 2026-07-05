@@ -92,14 +92,14 @@ mod tests {
     #[test]
     fn qwen_request_adapter_artifact_is_embedded() {
         let profile = profile_default("qwen-dsrs").unwrap();
-        assert_eq!(profile.revision, 5);
+        assert_eq!(profile.revision, 6);
         assert_eq!(
             profile.dsrs_history_format,
             Some(DsrsHistoryFormat::RegeneratedContext)
         );
         assert_eq!(
             profile.request_adapter_artifact,
-            Some("request-adapter/qwen-dsrs/sonnet-qwen500-r2-regenerated-context")
+            Some("request-adapter/qwen-dsrs/sonnet5-shuffled-r1-regenerated-context")
         );
 
         let instruction = instruction_for_id(profile.request_adapter_artifact.unwrap()).unwrap();

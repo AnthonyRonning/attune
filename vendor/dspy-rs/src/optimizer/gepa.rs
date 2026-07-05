@@ -142,7 +142,10 @@ struct ReflectOnTrace {
     /// You are an expert at analyzing program execution traces and identifying
     /// areas for improvement. Given the module instruction, example traces showing
     /// inputs, outputs, and feedback, identify specific weaknesses and suggest
-    /// targeted improvements.
+    /// targeted improvements. Do not overfit to the sampled traces: prefer
+    /// reusable guidance that should improve held-out examples, and avoid
+    /// copying example-specific labels, commands, file paths, IDs, benchmark
+    /// metadata, or one-off task details into the reflected advice.
 
     #[input(desc = "The current instruction for the module")]
     pub current_instruction: String,
@@ -162,7 +165,10 @@ struct ProposeImprovedInstruction {
     /// You are an expert prompt engineer. Given the current instruction, execution
     /// traces, feedback, and reflection on weaknesses, propose an improved instruction
     /// that addresses the identified issues. Be creative and consider various prompting
-    /// techniques.
+    /// techniques. Do not overfit to the sampled traces: the improved instruction
+    /// should generalize to held-out requests, avoid benchmark-specific wording,
+    /// and avoid copying exact labels, commands, file paths, IDs, or one-off task
+    /// details from individual examples.
 
     #[input(desc = "The current instruction")]
     pub current_instruction: String,
@@ -469,13 +475,33 @@ impl GEPA {
             propose_predictor.forward(proposal_input).await?
         };
 
-        let improved = proposal_output
-            .get("improved_instruction", None)
-            .as_str()
-            .unwrap_or(current_instruction)
-            .to_string();
+        let (improved, fallback_reason) = instruction_proposal_or_current(
+            current_instruction,
+            proposal_output
+                .data
+                .get("improved_instruction")
+                .and_then(|value| value.as_str()),
+        );
+        if let Some(reason) = fallback_reason {
+            eprintln!(
+                "  GEPA proposal returned {reason} improved_instruction; keeping parent instruction for this mutation"
+            );
+        }
 
         Ok(improved)
+    }
+}
+
+fn instruction_proposal_or_current(
+    current_instruction: &str,
+    proposed_instruction: Option<&str>,
+) -> (String, Option<&'static str>) {
+    match proposed_instruction {
+        None => (current_instruction.to_string(), Some("missing")),
+        Some(instruction) if instruction.trim().is_empty() => {
+            (current_instruction.to_string(), Some("blank"))
+        }
+        Some(instruction) => (instruction.to_string(), None),
     }
 }
 
@@ -729,7 +755,7 @@ impl GEPA {
 
 #[cfg(test)]
 mod tests {
-    use super::EpochShuffledMinibatchSampler;
+    use super::{EpochShuffledMinibatchSampler, instruction_proposal_or_current};
 
     #[test]
     fn epoch_shuffled_minibatches_cover_every_example_before_repeating() {
@@ -749,6 +775,22 @@ mod tests {
 
         assert_eq!(first_epoch, vec![0, 1, 2, 3, 4]);
         assert_eq!(third.len(), 2);
+    }
+
+    #[test]
+    fn missing_or_blank_instruction_proposals_keep_current_instruction() {
+        assert_eq!(
+            instruction_proposal_or_current("keep this", None),
+            ("keep this".to_string(), Some("missing"))
+        );
+        assert_eq!(
+            instruction_proposal_or_current("keep this", Some(" \n\t ")),
+            ("keep this".to_string(), Some("blank"))
+        );
+        assert_eq!(
+            instruction_proposal_or_current("keep this", Some("use this instead")),
+            ("use this instead".to_string(), None)
+        );
     }
 
     #[test]

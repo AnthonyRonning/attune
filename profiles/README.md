@@ -53,7 +53,7 @@ in traces and profile metadata.
 
 | Profile | Active history format | Active artifact | Revision |
 | --- | --- | --- | ---: |
-| `qwen-dsrs` | `regenerated_context` | `request-adapter/qwen-dsrs/sonnet-qwen500-r2-regenerated-context` | 5 |
+| `qwen-dsrs` | `regenerated_context` | `request-adapter/qwen-dsrs/sonnet5-shuffled-r1-regenerated-context` | 6 |
 | `gemma-dsrs-conservative` | `append_only` | `request-adapter/gemma-dsrs-conservative/sonnet-post50-r2-append-only` | 8 |
 
 The earlier fresh Sonnet-judged artifacts are also embedded as reviewed

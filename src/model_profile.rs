@@ -455,14 +455,14 @@ mod tests {
         let profile = resolve_profile("qwen/qwen3.5-9b", &[]);
 
         assert_eq!(profile.name, "qwen-dsrs");
-        assert_eq!(profile.revision, 5);
+        assert_eq!(profile.revision, 6);
         assert_eq!(
             profile.dsrs_history_format,
             DsrsHistoryFormat::RegeneratedContext
         );
         assert_eq!(
             profile.request_adapter_artifact.as_deref(),
-            Some("builtin:request-adapter/qwen-dsrs/sonnet-qwen500-r2-regenerated-context")
+            Some("builtin:request-adapter/qwen-dsrs/sonnet5-shuffled-r1-regenerated-context")
         );
         assert!(profile
             .tool_instruction

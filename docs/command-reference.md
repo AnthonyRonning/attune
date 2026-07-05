@@ -355,7 +355,7 @@ nix develop --command cargo run -- \
   --max-rollouts 75
 ```
 
-Run the Qwen regenerated-context Qwen-500 follow-up line with the current GEPA
+Run the Qwen Sonnet-5 regenerated-context follow-up line with the current GEPA
 defaults:
 
 ```sh
@@ -364,25 +364,25 @@ export OPENROUTER_API_KEY="..."
 nix develop --command cargo run -- \
   optimize-request-adapter-prompt \
   --dataset-path datasets/request-adapter/qwen-dsrs-trace-harness-curated.jsonl \
-  --output-path datasets/request-adapter/qwen-dsrs-sonnet-qwen500-r2-regenerated-context-gepa.json \
+  --output-path datasets/request-adapter/qwen-dsrs-sonnet5-shuffled-r1-regenerated-context-gepa.json \
   --base-url https://openrouter.ai/api/v1 \
   --model anthropic/claude-sonnet-5 \
   --judge-model anthropic/claude-sonnet-5 \
   --target-model qwen/qwen3.5-9b \
   --profile qwen-dsrs \
-  --profile-revision 4 \
+  --profile-revision 5 \
   --dsrs-history-format regenerated_context \
   --target-provider-ignore Venice \
-  --seed-artifact datasets/request-adapter/qwen-dsrs-sonnet-post50-r2-regenerated-context-gepa.json \
-  --artifact-id request-adapter/qwen-dsrs/sonnet-qwen500-r2-regenerated-context \
-  --iterations 5 \
+  --seed-artifact datasets/request-adapter/qwen-dsrs-sonnet-qwen500-r2-regenerated-context-gepa.json \
+  --artifact-id request-adapter/qwen-dsrs/sonnet5-shuffled-r1-regenerated-context \
+  --iterations 18 \
   --max-examples 22 \
   --lm-max-tokens 64000 \
   --reflection-temperature 1.0 \
   --judge-temperature 0.0 \
   --target-timeout-seconds 420 \
   --seed 0 \
-  --max-rollouts 150
+  --max-rollouts 500
 ```
 
 Add `ATTUNE_GEPA_DEBUG=1` when diagnosing optimizer behavior. It prints one line
@@ -409,7 +409,7 @@ history format and a different output/artifact ID:
 | `gemma-dsrs-conservative` | `append_only` | `datasets/request-adapter/gemma-dsrs-conservative-sonnet-post50-r2-append-only-gepa.json` | `request-adapter/gemma-dsrs-conservative/sonnet-post50-r2-append-only` |
 | `gemma-dsrs-conservative` | `regenerated_context` | `datasets/request-adapter/gemma-dsrs-conservative-sonnet-fresh-r1-regenerated-context-gepa.json` | `request-adapter/gemma-dsrs-conservative/sonnet-fresh-r1-regenerated-context` |
 | `qwen-dsrs` | `append_only` | `datasets/request-adapter/qwen-dsrs-sonnet-fresh-r1-append-only-gepa.json` | `request-adapter/qwen-dsrs/sonnet-fresh-r1-append-only` |
-| `qwen-dsrs` | `regenerated_context` | `datasets/request-adapter/qwen-dsrs-sonnet-qwen500-r2-regenerated-context-gepa.json` | `request-adapter/qwen-dsrs/sonnet-qwen500-r2-regenerated-context` |
+| `qwen-dsrs` | `regenerated_context` | `datasets/request-adapter/qwen-dsrs-sonnet5-shuffled-r1-regenerated-context-gepa.json` | `request-adapter/qwen-dsrs/sonnet5-shuffled-r1-regenerated-context` |
 
 When continuing an existing line of experimentation, seed from the current best
 artifact:
@@ -603,7 +603,8 @@ The latest Qwen 3.5 9B follow-up reused the prior 500-scenario Qwen comparison
 baseline instead of rerunning direct OpenRouter. The prior comparison had
 487/500 direct baseline passes and 457/500 proxy passes. After promoting the
 Qwen-500 regenerated-context artifact, a proxy-only replay of the same scenario
-file produced 471/500 passes:
+file produced 471/500 passes. A follow-up Sonnet-5 regenerated-context artifact
+was then promoted after a proxy-only replay reached 475/500 passes:
 
 ```sh
 export OPENROUTER_API_KEY="..."
@@ -611,8 +612,8 @@ export OPENROUTER_API_KEY="..."
 nix develop --command cargo run -- \
   --config configs/qwen-dsrs.toml \
   trace-harness run \
-  --scenarios-path eval/trace-harness/scenarios/pi-hermes-500-20260509.local.jsonl \
-  --output-path eval/trace-harness/results/qwen-ignore-venice-pi-hermes-500-qwen500-r2.local.json \
+  --scenarios-path eval/trace-harness/scenarios/pi-hermes-500.local.jsonl \
+  --output-path eval/trace-harness/results/qwen-sonnet5-staging-pi-hermes-500-timeout420.local.json \
   --model qwen/qwen3.5-9b \
   --provider-ignore venice \
   --limit 500 \
@@ -621,10 +622,11 @@ nix develop --command cargo run -- \
   --retries 3
 ```
 
-Six recovered Qwen traces from that replay were appended to
-`datasets/request-adapter/qwen-dsrs-trace-harness-curated.jsonl` with
-`export-request-adapter-dataset --use-final-response`; the same six
-correction-agent tool-recovery traces were appended to `datasets/corrections.jsonl`.
+Representative Qwen traces from the 471/500 and 475/500 replay loops were
+appended to `datasets/request-adapter/qwen-dsrs-trace-harness-curated.jsonl`
+with `export-request-adapter-dataset --use-final-response`; matching
+correction-agent recovery and failure-state rows were appended to
+`datasets/corrections.jsonl`.
 
 The compare report records:
 
