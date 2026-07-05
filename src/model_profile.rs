@@ -439,11 +439,11 @@ mod tests {
         let profile = resolve_profile("google/gemma-4-26b-a4b-it", &[]);
 
         assert_eq!(profile.name, "gemma-dsrs-conservative");
-        assert_eq!(profile.revision, 8);
+        assert_eq!(profile.revision, 9);
         assert_eq!(profile.dsrs_history_format, DsrsHistoryFormat::AppendOnly);
         assert_eq!(
             profile.request_adapter_artifact.as_deref(),
-            Some("builtin:request-adapter/gemma-dsrs-conservative/sonnet-post50-r2-append-only")
+            Some("builtin:request-adapter/gemma-dsrs-conservative/sonnet5-shuffled-r1-append-only")
         );
         assert!(profile
             .tool_instruction

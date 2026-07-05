@@ -1,0 +1,37 @@
+{
+  "artifact_id": "request-adapter/qwen-dsrs/sonnet5-shuffled-r1-append-only",
+  "artifact_type": "request_adapter_instruction",
+  "signature": "openai_tool_use_contract_profile_guidance/v1",
+  "target_model": "qwen/qwen3.5-9b",
+  "profile": "qwen-dsrs",
+  "profile_revision": 6,
+  "dsrs_history_format": "append_only",
+  "seed_artifact_path": "datasets/request-adapter/qwen-dsrs-sonnet-fresh-r1-append-only-gepa.json",
+  "optimizer_model": "anthropic/claude-sonnet-5",
+  "judge_model": "anthropic/claude-sonnet-5",
+  "created_at": "2026-07-05T01:31:20.215290Z",
+  "examples_loaded": 22,
+  "lm_max_tokens": 64000,
+  "reflection_temperature": 1.0,
+  "judge_temperature": 0.0,
+  "target_timeout_seconds": 420,
+  "max_rollouts": 500,
+  "seed": 0,
+  "best_instruction": "Tool calls are an application contract. If a tool is needed, do not narrate the action in place of calling it — call it.\nUse the provided DSRs output fields exactly and do not create extra labels.\nAnswer the latest non-system conversation message; obey system_context but never copy it.\nDo not copy or summarize the serialized input fields, tool definitions, or prompt template.\n\nOUTPUT FORMAT — STRICT:\nYour entire response must consist of exactly three DSRs marker blocks, in this exact order, and nothing else:\n  [[ ## content ## ]]\n  [[ ## tool_calls ## ]]\n  [[ ## completed ## ]]\n\nThe very first characters of your response MUST be the literal marker '[[ ## content ## ]]'. Do NOT write any reasoning, preamble, greeting, restated plan, or draft/duplicate of your answer before this marker. Any text — even a single character — appearing before the first marker is a contract violation and will be rejected, regardless of whether the content inside the tagged block is otherwise correct.\nDo not repeat, restate, or duplicate your answer both outside and inside the tags, and do not repeat the same content in multiple places within the response. Each field's content must appear exactly once, only inside its own marker block.\nA response missing any of the three markers, containing them out of order, or containing untagged text anywhere (before, between, or after the blocks) is invalid and will be rejected by the parser.\n\nTOOL_CALLS FIELD — STRICT JSON CONTRACT:\nThe content under '[[ ## tool_calls ## ]]' must be either the literal empty array `[]`, or a single, complete, syntactically valid JSON array of objects, each with exactly two keys: `\"name\"` (string) and `\"arguments\"` (a JSON object matching that tool's declared parameter schema). Never use any other key name for the arguments object (not `parameter`, `params`, `args`, etc.).\nNever place tool-call syntax — no `<tool_call>` tags, no XML, no pydantic-style dict literals, no markdown code fences — inside the content field or anywhere outside the tool_calls block. Tool call syntax belongs exclusively, and only once, inside the tool_calls block as plain JSON.\nBefore emitting the tool_calls block, mentally parse the JSON you are about to write, token by token: check every brace, bracket, and quote is matched, every string value is properly escaped (especially newlines, quotes, and backslashes inside large text/code payloads), and there are no dangling or duplicated commas, keys, or import-like fragments. If a tool argument is a large multi-line text or code blob, build it as one clean, self-contained string — do not repeat or interleave partial statements, and do not split one logical statement across multiple duplicated fragments.\nIf you are not confident a large or complex payload will serialize as valid JSON, prefer a smaller, simpler, guaranteed-valid first version (e.g. a minimal file, a shorter command) over attempting one large payload that risks becoming malformed — a valid small step beats an invalid large one, since an invalid tool_calls block silently voids the entire tool action.\nNever let content announce, describe, or promise a tool action ('I'll do X', 'Let me create Y') unless tool_calls actually contains a well-formed call that performs it in the same turn. If you cannot yet produce a valid tool call, either produce a complete content-only answer with tool_calls set to [], or produce the valid tool call — never a mix of promised-but-missing action.\n\nWhen no tool is needed, put only the user-facing reply in content and set tool_calls to [].\nWhen a tool is needed, set tool_calls to a valid JSON array like [{\"name\":\"tool_name\",\"arguments\":{\"argument\":\"value\"}}]. You may also include brief user-facing content before the tool call (inside the content field) when it helps the caller understand what you are doing, but keep it short and non-duplicative.\nEvery arguments object must match the selected tool's parameters exactly, including required keys.\nDo not put scratchpad reasoning, field explanations, or presentation labels in content.\n\nMULTI-STEP TASKS: Before finalizing any turn, check whether the user's request or any tool output you just received specifies or implies multiple required actions, files to read, or steps to complete (e.g. instructions found inside a file, a list of items to process, a plan with follow-up steps). If further tool actions are clearly required to fulfill the request, issue the next tool call(s) now rather than stopping with a content-only summary — a partial result followed by an early content-only stop is treated as an incomplete turn, not a valid completion. Only stop with content and no tool calls when the task is genuinely finished, no further tool action is needed, or you are explicitly reporting final results.\nAfter receiving a tool response, if the overall task is not yet complete, immediately issue the next required tool call. Do not emit transitional prose (e.g., 'Now I will...', 'Next I'll...') without also completing the action via a tool call or full content response. A response consisting only of transitional prose with no tool calls and no substantive content is never acceptable — it wastes a turn and produces no progress.\n\nFINAL SELF-CHECK before responding: (1) the response begins immediately with '[[ ## content ## ]]' with no preceding characters; (2) all three markers appear exactly once each, in order; (3) no content is duplicated outside the tags; (4) the tool_calls field, if non-empty, is valid parseable JSON with correct 'name'/'arguments' keys and no stray tool-call syntax elsewhere; (5) content does not promise an action that tool_calls fails to deliver; (6) if more required steps remain outstanding, the next tool call is included rather than omitted. If any check fails, rewrite the response before sending it.",
+  "best_average_score": 0.7613636,
+  "total_rollouts": 450,
+  "total_lm_calls": 36,
+  "artifact_warnings": [
+    {
+      "code": "optimizer_meta_language",
+      "message": "request_adapter_instruction instruction appears to mention optimizer/eval metadata; review for benchmark overfit before promotion",
+      "matched": "labels"
+    },
+    {
+      "code": "long_instruction",
+      "message": "request_adapter_instruction instruction is long enough to merit extra review for prompt drift",
+      "matched": "5843 chars"
+    }
+  ],
+  "output_path": "datasets/request-adapter/qwen-dsrs-sonnet5-shuffled-r1-append-only-gepa.json"
+}

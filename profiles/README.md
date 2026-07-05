@@ -54,7 +54,7 @@ in traces and profile metadata.
 | Profile | Active history format | Active artifact | Revision |
 | --- | --- | --- | ---: |
 | `qwen-dsrs` | `regenerated_context` | `request-adapter/qwen-dsrs/sonnet5-shuffled-r1-regenerated-context` | 6 |
-| `gemma-dsrs-conservative` | `append_only` | `request-adapter/gemma-dsrs-conservative/sonnet-post50-r2-append-only` | 8 |
+| `gemma-dsrs-conservative` | `append_only` | `request-adapter/gemma-dsrs-conservative/sonnet5-shuffled-r1-append-only` | 9 |
 
 The earlier fresh Sonnet-judged artifacts are also embedded as reviewed
 alternates and provenance, but they are not active profile defaults. The older
@@ -72,7 +72,7 @@ Promote a reviewed artifact into a runtime config:
 ```sh
 cargo run -- promote-artifact \
   --config-path configs/gemma-dsrs-conservative.toml \
-  --artifact-path datasets/request-adapter/gemma-dsrs-conservative-sonnet-post50-r2-append-only-gepa.json \
+  --artifact-path datasets/request-adapter/gemma-dsrs-conservative-sonnet5-shuffled-r1-append-only-gepa.json \
   --profile gemma-dsrs-conservative
 ```
 
@@ -80,7 +80,7 @@ Promote the same reviewed artifact into the shipped built-in defaults:
 
 ```sh
 cargo run -- promote-default-artifact \
-  --artifact-path datasets/request-adapter/gemma-dsrs-conservative-sonnet-post50-r2-append-only-gepa.json \
+  --artifact-path datasets/request-adapter/gemma-dsrs-conservative-sonnet5-shuffled-r1-append-only-gepa.json \
   --profile gemma-dsrs-conservative \
   --model-pattern gemma
 ```
@@ -103,7 +103,7 @@ request_adapter_artifact = "../datasets/request-adapter/custom-gepa.json"
 They can also reuse an embedded built-in artifact:
 
 ```toml
-request_adapter_artifact = "builtin:request-adapter/gemma-dsrs-conservative/sonnet-post50-r2-append-only"
+request_adapter_artifact = "builtin:request-adapter/gemma-dsrs-conservative/sonnet5-shuffled-r1-append-only"
 ```
 
 That lets a user start from shipped defaults, override model patterns or policy,

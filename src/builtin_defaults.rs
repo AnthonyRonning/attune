@@ -78,10 +78,10 @@ mod tests {
     #[test]
     fn gemma_request_adapter_artifact_is_embedded() {
         let profile = profile_default("gemma-dsrs-conservative").unwrap();
-        assert_eq!(profile.revision, 8);
+        assert_eq!(profile.revision, 9);
         assert_eq!(
             profile.request_adapter_artifact,
-            Some("request-adapter/gemma-dsrs-conservative/sonnet-post50-r2-append-only")
+            Some("request-adapter/gemma-dsrs-conservative/sonnet5-shuffled-r1-append-only")
         );
 
         let instruction = instruction_for_id(profile.request_adapter_artifact.unwrap()).unwrap();

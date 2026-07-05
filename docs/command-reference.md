@@ -326,7 +326,7 @@ jq -c . \
   > /tmp/qwen-request-adapter-all.jsonl
 ```
 
-Run the Gemma append-only post-50 optimization line with the current GEPA
+Run the Gemma Sonnet-5 append-only optimization line with the current GEPA
 defaults:
 
 ```sh
@@ -335,24 +335,25 @@ export OPENROUTER_API_KEY="..."
 nix develop --command cargo run -- \
   optimize-request-adapter-prompt \
   --dataset-path /tmp/gemma-request-adapter-all.jsonl \
-  --output-path datasets/request-adapter/gemma-dsrs-conservative-sonnet-post50-r2-append-only-gepa.json \
+  --output-path datasets/request-adapter/gemma-dsrs-conservative-sonnet5-shuffled-r1-append-only-gepa.json \
   --base-url https://openrouter.ai/api/v1 \
   --model anthropic/claude-sonnet-5 \
   --judge-model anthropic/claude-sonnet-5 \
   --target-model google/gemma-4-26b-a4b-it \
   --profile gemma-dsrs-conservative \
-  --profile-revision 7 \
+  --profile-revision 8 \
   --dsrs-history-format append_only \
-  --seed-artifact datasets/request-adapter/gemma-dsrs-conservative-sonnet-fresh-r1-append-only-gepa.json \
-  --artifact-id request-adapter/gemma-dsrs-conservative/sonnet-post50-r2-append-only \
-  --iterations 5 \
-  --max-examples 6 \
-  --lm-max-tokens 32768 \
+  --target-provider-ignore Venice \
+  --seed-artifact datasets/request-adapter/gemma-dsrs-conservative-sonnet-post50-r2-append-only-gepa.json \
+  --artifact-id request-adapter/gemma-dsrs-conservative/sonnet5-shuffled-r1-append-only \
+  --iterations 18 \
+  --max-examples 18 \
+  --lm-max-tokens 64000 \
   --reflection-temperature 1.0 \
   --judge-temperature 0.0 \
   --target-timeout-seconds 420 \
   --seed 0 \
-  --max-rollouts 75
+  --max-rollouts 500
 ```
 
 Run the Qwen Sonnet-5 regenerated-context follow-up line with the current GEPA
@@ -406,7 +407,7 @@ history format and a different output/artifact ID:
 
 | Profile | History format | Output path | Artifact ID |
 | --- | --- | --- | --- |
-| `gemma-dsrs-conservative` | `append_only` | `datasets/request-adapter/gemma-dsrs-conservative-sonnet-post50-r2-append-only-gepa.json` | `request-adapter/gemma-dsrs-conservative/sonnet-post50-r2-append-only` |
+| `gemma-dsrs-conservative` | `append_only` | `datasets/request-adapter/gemma-dsrs-conservative-sonnet5-shuffled-r1-append-only-gepa.json` | `request-adapter/gemma-dsrs-conservative/sonnet5-shuffled-r1-append-only` |
 | `gemma-dsrs-conservative` | `regenerated_context` | `datasets/request-adapter/gemma-dsrs-conservative-sonnet-fresh-r1-regenerated-context-gepa.json` | `request-adapter/gemma-dsrs-conservative/sonnet-fresh-r1-regenerated-context` |
 | `qwen-dsrs` | `append_only` | `datasets/request-adapter/qwen-dsrs-sonnet-fresh-r1-append-only-gepa.json` | `request-adapter/qwen-dsrs/sonnet-fresh-r1-append-only` |
 | `qwen-dsrs` | `regenerated_context` | `datasets/request-adapter/qwen-dsrs-sonnet5-shuffled-r1-regenerated-context-gepa.json` | `request-adapter/qwen-dsrs/sonnet5-shuffled-r1-regenerated-context` |
@@ -415,7 +416,7 @@ When continuing an existing line of experimentation, seed from the current best
 artifact:
 
 ```sh
-  --seed-artifact datasets/request-adapter/gemma-dsrs-conservative-sonnet-post50-r2-append-only-gepa.json
+  --seed-artifact datasets/request-adapter/gemma-dsrs-conservative-sonnet5-shuffled-r1-append-only-gepa.json
 ```
 
 ## Promote GEPA Artifacts
@@ -426,7 +427,7 @@ First promote to a runtime config for local testing:
 nix develop --command cargo run -- \
   promote-artifact \
   --config-path configs/gemma-dsrs-conservative.toml \
-  --artifact-path datasets/request-adapter/gemma-dsrs-conservative-sonnet-post50-r2-append-only-gepa.json \
+  --artifact-path datasets/request-adapter/gemma-dsrs-conservative-sonnet5-shuffled-r1-append-only-gepa.json \
   --profile gemma-dsrs-conservative \
   --dry-run
 ```
@@ -437,7 +438,7 @@ Then run without `--dry-run` only after reviewing the report and artifact:
 nix develop --command cargo run -- \
   promote-artifact \
   --config-path configs/gemma-dsrs-conservative.toml \
-  --artifact-path datasets/request-adapter/gemma-dsrs-conservative-sonnet-post50-r2-append-only-gepa.json \
+  --artifact-path datasets/request-adapter/gemma-dsrs-conservative-sonnet5-shuffled-r1-append-only-gepa.json \
   --profile gemma-dsrs-conservative
 ```
 
@@ -447,7 +448,7 @@ built-in defaults:
 ```sh
 nix develop --command cargo run -- \
   promote-default-artifact \
-  --artifact-path datasets/request-adapter/gemma-dsrs-conservative-sonnet-post50-r2-append-only-gepa.json \
+  --artifact-path datasets/request-adapter/gemma-dsrs-conservative-sonnet5-shuffled-r1-append-only-gepa.json \
   --profile gemma-dsrs-conservative \
   --model-pattern gemma \
   --dry-run
@@ -458,7 +459,7 @@ Then run without `--dry-run`:
 ```sh
 nix develop --command cargo run -- \
   promote-default-artifact \
-  --artifact-path datasets/request-adapter/gemma-dsrs-conservative-sonnet-post50-r2-append-only-gepa.json \
+  --artifact-path datasets/request-adapter/gemma-dsrs-conservative-sonnet5-shuffled-r1-append-only-gepa.json \
   --profile gemma-dsrs-conservative \
   --model-pattern gemma
 ```
@@ -593,11 +594,11 @@ nix develop --command cargo run -- \
   --retries 3
 ```
 
-That run produced 475/500 direct baseline structural passes and 497/500 proxy
-passes. The three proxy regressions were reviewed and added to
-`datasets/request-adapter/gemma-dsrs-conservative-trace-harness-curated.jsonl`;
-the correction-agent failure from one of those cases was added to
-`datasets/corrections.jsonl`.
+That original comparison produced 475/500 direct baseline structural passes
+and 497/500 proxy passes. A later Sonnet-5 append-only replay reached 498/500
+proxy passes. The reviewed regressions and representative recovered cases were
+added to `datasets/request-adapter/gemma-dsrs-conservative-trace-harness-curated.jsonl`;
+matching correction-agent rows were added to `datasets/corrections.jsonl`.
 
 The latest Qwen 3.5 9B follow-up reused the prior 500-scenario Qwen comparison
 baseline instead of rerunning direct OpenRouter. The prior comparison had

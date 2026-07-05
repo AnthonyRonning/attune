@@ -127,10 +127,13 @@ Pi/Hermes trace-harness run against `google/gemma-4-26b-a4b-it` on OpenRouter:
 | Path | Structural passes |
 | --- | ---: |
 | Direct OpenRouter baseline | 475/500 |
-| Attune proxy | 497/500 |
+| Attune proxy, previous promoted default | 497/500 |
+| Attune proxy, Sonnet-5 append-only default | 498/500 |
 
-Attune fixed all 25 direct baseline structural failures. The 3 proxy
-regressions from that run were reviewed and added to the curated GEPA datasets.
+Attune fixed all 25 direct baseline structural failures in the original run.
+The Sonnet-5 append-only follow-up improved the proxy replay by one more case.
+Its remaining two final failures were reviewed; representative direct success
+and recovered-failure traces were added to the curated GEPA datasets.
 
 Qwen is still the highest-priority in-progress profile, but the latest GEPA
 promotions closed a meaningful part of the gap. The original 500-scenario

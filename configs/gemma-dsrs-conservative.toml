@@ -1,8 +1,8 @@
 [[model_profiles]]
 name = "gemma-dsrs-conservative"
 model_patterns = ["gemma"]
-revision = 8
-request_adapter_artifact = "builtin:request-adapter/gemma-dsrs-conservative/sonnet-post50-r2-append-only"
+revision = 9
+request_adapter_artifact = "builtin:request-adapter/gemma-dsrs-conservative/sonnet5-shuffled-r1-append-only"
 tool_mode = "proxy_owned"
 tool_format = "dsrs"
 dsrs_history_format = "append_only"

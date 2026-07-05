@@ -74,8 +74,8 @@ max_tool_calls_without_parallel = 1
 [[model_profiles]]
 name = "gemma-dsrs-conservative"
 model_patterns = ["google/gemma-4-26b-a4b-it", "gemma"]
-revision = 8
-request_adapter_artifact = "builtin:request-adapter/gemma-dsrs-conservative/sonnet-post50-r2-append-only"
+revision = 9
+request_adapter_artifact = "builtin:request-adapter/gemma-dsrs-conservative/sonnet5-shuffled-r1-append-only"
 correction_agent_artifact = "optional-correction-artifact.json"
 tool_mode = "proxy_owned"
 tool_format = "dsrs"
@@ -206,7 +206,7 @@ Artifacts may be:
 - relative paths, resolved from the config file directory
 - absolute paths
 - embedded references, such as
-  `builtin:request-adapter/gemma-dsrs-conservative/sonnet-post50-r2-append-only`
+  `builtin:request-adapter/gemma-dsrs-conservative/sonnet5-shuffled-r1-append-only`
 
 JSON GEPA artifacts are expected to contain an instruction field such as
 `best_instruction`. Plain text files are loaded as the instruction body.
@@ -216,7 +216,7 @@ Current active built-in request-adapter defaults:
 | Profile | Artifact | History format |
 | --- | --- | --- |
 | `qwen-dsrs` | `builtin:request-adapter/qwen-dsrs/sonnet5-shuffled-r1-regenerated-context` | `regenerated_context` |
-| `gemma-dsrs-conservative` | `builtin:request-adapter/gemma-dsrs-conservative/sonnet-post50-r2-append-only` | `append_only` |
+| `gemma-dsrs-conservative` | `builtin:request-adapter/gemma-dsrs-conservative/sonnet5-shuffled-r1-append-only` | `append_only` |
 
 ## Examples
 
