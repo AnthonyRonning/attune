@@ -122,8 +122,13 @@ buffering and repair; it does not yet proxy upstream tokens incrementally.
 
 ## Early Evidence
 
-The strongest fresh comparison result so far is the reviewed 500-scenario
-Pi/Hermes trace-harness run against `google/gemma-4-26b-a4b-it` on OpenRouter:
+These are directional engineering checks, not final benchmark claims. The
+detailed commands, trace-review notes, and curation rules live in
+[`docs/command-reference.md`](docs/command-reference.md) and
+[`eval/trace-harness/README.md`](eval/trace-harness/README.md).
+
+The strongest current result is the reviewed 500-scenario Pi/Hermes run against
+`google/gemma-4-26b-a4b-it` on OpenRouter:
 
 | Path | Structural passes |
 | --- | ---: |
@@ -131,18 +136,9 @@ Pi/Hermes trace-harness run against `google/gemma-4-26b-a4b-it` on OpenRouter:
 | Attune proxy, previous promoted default | 497/500 |
 | Attune proxy, Sonnet-5 append-only default | 498/500 |
 
-Attune fixed all 25 direct baseline structural failures in the original run.
-The Sonnet-5 append-only follow-up improved the proxy replay by one more case.
-Its remaining two final failures were reviewed; representative direct success
-and recovered-failure traces were added to the curated GEPA datasets.
+Attune fixed all 25 direct structural failures in the original Gemma run.
 
-Qwen is still the highest-priority in-progress profile, but the latest GEPA
-promotions closed a meaningful part of the gap. The original 500-scenario
-Pi/Hermes comparison found that direct OpenRouter passed 487/500 structural
-checks while the previous Attune proxy profile passed 457/500. After promoting
-the Qwen-500 regenerated-context artifact and then the Sonnet-5 regenerated
-context artifact, the same 500-scenario file was replayed through the proxy
-without rerunning the direct baseline:
+Qwen remains the highest-priority in-progress profile:
 
 | Qwen 3.5 9B 500-scenario run | Structural passes |
 | --- | ---: |
@@ -152,96 +148,20 @@ without rerunning the direct baseline:
 | Sonnet-5 Qwen append-only profile, not promoted | 469/500 |
 | Promoted Sonnet-5 Qwen regenerated-context profile | 475/500 |
 
-That is an 18-case proxy improvement over the original proxy result on the same
-scenario set, and a 4-case improvement over the previous promoted Qwen default.
-It is still not better than the prior direct baseline. In the promoted replay,
-valid DSR `tool_calls` converted into OpenAI `tool_calls` count as expected
-adapter behavior, not correction-agent repair; the remaining failures are
-mostly tool intent leaking as prose or malformed tool text instead of clean DSRs
-output, plus correction-agent failures where repaired DSRs `tool_calls` JSON
-was still invalid.
+That is an 18-case improvement over the original Qwen proxy result, but it
+still trails the prior direct baseline.
 
-Representative Qwen traces from this replay were promoted into both the Qwen
-request-adapter dataset and the shared correction-agent dataset. These examples
-cover inspected direct successes, recovered malformed DSRs, recovered
-content-only answers, correction-agent tool recoveries, and correction-agent
-failure states where a valid repair was still available. Future GEPA runs can
-learn both to avoid the correction path and to repair it more reliably when
-needed.
+The latest large-model runs show where Attune helps and where it must avoid
+regression:
 
-The latest large-model baseline check used the same 500-scenario Pi/Hermes
-trace-harness file against `moonshotai/kimi-k2.6` and `z-ai/glm-5.2` on
-OpenRouter, ignoring Venice and allowing 420-second request timeouts:
+| Model | Direct native | Unoptimized proxy | Promoted proxy | Promoted no-correction | Correction path | Read |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `moonshotai/kimi-k2.6` | 240/500 | 500/500 | 499/500 | 436/500 | 70 -> 64 | Native provider output failed often; Attune recovered the run, though one promoted final regression remains. |
+| `moonshotai/kimi-k2.7-code` | 489/500 | 497/500 | 499/500 | 421/500 | 147 -> 79 | Native was already strong; Attune still improved final passes and nearly halved correction load. |
+| `z-ai/glm-5.2` | 500/500 | 473/500 | 493/500 | 427/500 | 87 -> 72 | Native tool calling won this eval; GLM needs a non-regression profile or bypass path. |
 
-| Run | Direct OpenRouter baseline | Attune proxy | Read |
-| --- | ---: | ---: | --- |
-| `moonshotai/kimi-k2.6`, Venice ignored | 240/500 | 500/500 | Direct responses often failed structurally; Attune repaired every final response in this run. |
-| `moonshotai/kimi-k2.6`, Venice and WandB ignored | 333/500 | not measured | Removing WandB helped, but direct provider tool calling still failed 167/500 cases. |
-| `moonshotai/kimi-k2.7-code`, Venice ignored | 489/500 | 497/500 | K2.7 Code routed entirely through Together and was much cleaner natively; unoptimized Attune still fixed all 11 direct failures but introduced 3 raw proxy failures. |
-| `z-ai/glm-5.2`, Venice ignored | 500/500 | 473/500 | Native tool calling already passed this dataset; the current Attune profile regressed it. |
-
-The Kimi direct failures were reviewed as real structural failures, dominated
-by empty assistant responses, tool-like text without OpenAI `tool_calls`, and
-premature tool-action prose without a tool call. Most failed direct Kimi calls
-were routed through OpenRouter's WandB provider. A follow-up direct-baseline
-rerun with both Venice and WandB ignored improved to 333/500, but did not make
-native tool calling reliable: the remaining failures shifted mostly to invalid
-or contaminated tool names on other providers, especially DeepInfra. That rerun
-used a local mock proxy endpoint only to preserve the harness's authenticated
-direct-baseline path without paying for a second proxy call, so only its direct
-baseline column is meaningful. The Attune proxy result still shows the existing
-DSRs adapter plus correction-agent path can recover these symptoms even before a
-Kimi-specific GEPA artifact exists.
-
-The K2.7 Code result is a different shape from K2.6: all direct baseline calls
-were routed through Together, and native tool calling was already near-perfect
-at 489/500. The current unoptimized Kimi DSRs profile still improved raw final
-structural passes to 497/500 by fixing all 11 direct failures, but it needed
-147 correction-agent attempts and introduced 3 raw proxy failures. One reviewed
-proxy failure appears to be an eval heuristic false positive on a clarifying
-answer. Of the other two, the unrecovered raw tool-call marker payload matches
-Attune's parser/correction scope; the unavailable `grep` tool case was counted
-by the harness but not promoted into GEPA curation because wrong tool selection
-is outside the current prompt-format thesis.
-
-The GLM result points in the opposite direction: direct native tool calling was
-already structurally perfect on this eval. For GLM, Attune should either
-preserve the native behavior or use a model-specific profile optimized for
-non-regression. Valid DSR `tool_calls` adapted back into OpenAI `tool_calls`
-remain expected adapter behavior in these reports, not correction-agent repair.
-
-A follow-up Sonnet-5/OpenRouter append-only GEPA pass used small curated
-trace-harness datasets for K2.6, K2.7 Code, and GLM 5.2. The resulting
-request-adapter artifacts were promoted into model-specific built-in defaults.
-For this layer, the primary metric is not only final proxy pass count; it is how
-often the proxied request passes before invoking the correction agent. Valid DSR
-tool-call adaptation remains expected adapter behavior, not correction-agent
-repair.
-
-| Model | Direct native | Unoptimized final proxy | Unoptimized no-correction pass | Promoted GEPA final proxy | Promoted GEPA no-correction pass | Correction path | Read |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| `moonshotai/kimi-k2.6` | 240/500 | 500/500 | 430/500 | 499/500 | 436/500 | 70 -> 64 | Request layer improved by 6 cases, while one final regression came from the correction path. |
-| `moonshotai/kimi-k2.7-code` | 489/500 | 497/500 | 351/500 | 499/500 | 421/500 | 147 -> 79 | Request layer improved by 70 cases and correction load nearly halved. |
-| `z-ai/glm-5.2` | 500/500 | 473/500 | 387/500 | 493/500 | 427/500 | 87 -> 72 | Request layer improved by 40 cases, but Attune still trails GLM's perfect native baseline on this eval. |
-
-Artifact inspection found no embedded trace IDs, source IDs, or scenario IDs.
-The warnings were mostly long-instruction and generic DSR-format wording. The
-GLM artifact's exact-matching warning came from instructions to reproduce DSR
-field markers exactly, not from copied benchmark labels. Representative trace
-review found the expected split: clean DSR outputs adapted without correction,
-native marker leaks recovered through the correction agent, and remaining
-failures concentrated in malformed repair-output JSON, lost long-context task
-summary for correction, or eval heuristics that needed narrowing.
-
-The follow-up correction-agent GEPA pass used the same Sonnet-5/OpenRouter
-reflection and judge setup, filtered the shared correction dataset by
-model/profile, and added a correction-agent-only eval so candidates can be
-tested without rerunning the full proxy suite. These correction artifacts are
-not promoted. Under the stricter correction-only evaluator, the built-in
-baseline stayed better or tied: K2.6 was 4/5 strict versus 3/5 for the optimized
-artifact, K2.7 Code was 3/3 for both baseline and optimized artifact, and GLM
-5.2 was 4/5 baseline versus 2/5 optimized. The failed candidates are retained
-as experiment artifacts, not defaults.
+Correction-agent GEPA remains experimental. Strict correction-only replay kept
+the optimized correction artifacts out of the promoted defaults.
 
 ## Try It
 
