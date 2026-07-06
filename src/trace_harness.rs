@@ -884,6 +884,11 @@ fn looks_like_text_tool_call(content: &str) -> bool {
 }
 
 fn looks_like_premature_tool_action(content: &str) -> bool {
+    let full_lower = content.to_ascii_lowercase();
+    if looks_like_waiting_for_user_input(&full_lower) {
+        return false;
+    }
+
     let lower = content
         .split_whitespace()
         .take(40)
@@ -944,6 +949,47 @@ fn action_phrase_has_tool_verb(lower: &str, marker: &str) -> bool {
         "update",
     ];
     tool_action_verbs.iter().any(|verb| tail.starts_with(verb))
+}
+
+fn looks_like_waiting_for_user_input(lower: &str) -> bool {
+    let waiting_markers = [
+        "please provide",
+        "could you please provide",
+        "could you provide",
+        "can you provide",
+        "please share",
+        "could you share",
+        "can you share",
+        "once you provide",
+        "when you provide",
+        "after you provide",
+        "once you share",
+        "when you share",
+        "after you share",
+        "need the file path",
+        "need one thing from you",
+    ];
+    let future_tool_markers = [
+        "i'll run",
+        "i will run",
+        "i'll use",
+        "i will use",
+        "i'll extract",
+        "i will extract",
+        "i'll process",
+        "i will process",
+        "i'll check",
+        "i will check",
+    ];
+
+    waiting_markers.iter().any(|waiting| {
+        lower.find(waiting).is_some_and(|waiting_index| {
+            let after_waiting = &lower[waiting_index..];
+            future_tool_markers
+                .iter()
+                .any(|future| after_waiting.contains(future))
+        })
+    })
 }
 
 fn compare_outcome(baseline_passed: bool, proxy_passed: bool) -> &'static str {
@@ -2048,6 +2094,12 @@ mod tests {
         ));
         assert!(!looks_like_premature_tool_action(
             "I attempted to save the API convention to memory, but memory is disabled. I will keep this information in my current context. Additionally, my search for `.graphql` files found nothing."
+        ));
+        assert!(!looks_like_premature_tool_action(
+            "Great news - Tesseract OCR is installed. Please provide the file path to your whiteboard image; once you provide it, I'll run Tesseract to extract the text."
+        ));
+        assert!(looks_like_premature_tool_action(
+            "I'll run Tesseract to extract the text from the whiteboard image."
         ));
     }
 

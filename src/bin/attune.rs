@@ -6,6 +6,7 @@ use std::{
 use anyhow::Context;
 use attune::{
     config::ProxyConfig,
+    correction_eval::{run_correction_eval, CorrectionEvalConfig},
     dataset::{
         export_dataset, export_request_adapter_dataset, DatasetExportConfig, DatasetExportFilter,
         RequestAdapterDatasetExportConfig,
@@ -205,6 +206,10 @@ enum Command {
         #[arg(long)]
         profile: Option<String>,
         #[arg(long)]
+        dataset_model: Option<String>,
+        #[arg(long)]
+        dataset_profile: Option<String>,
+        #[arg(long)]
         profile_revision: Option<u32>,
         #[arg(long = "target-provider-ignore")]
         target_provider_ignore: Vec<String>,
@@ -344,6 +349,32 @@ enum Command {
         model_patterns: Vec<String>,
         #[arg(long)]
         dry_run: bool,
+    },
+    EvalCorrectionAgent {
+        #[arg(long, default_value = "datasets/corrections.jsonl")]
+        dataset_path: String,
+        #[arg(long)]
+        output_path: Option<String>,
+        #[arg(
+            long,
+            env = "ATTUNE_UPSTREAM_BASE_URL",
+            default_value = "https://openrouter.ai/api/v1"
+        )]
+        base_url: String,
+        #[arg(long)]
+        target_model: String,
+        #[arg(long)]
+        profile: Option<String>,
+        #[arg(long)]
+        correction_agent_artifact: Option<String>,
+        #[arg(long)]
+        dataset_model: Option<String>,
+        #[arg(long)]
+        dataset_profile: Option<String>,
+        #[arg(long)]
+        max_examples: Option<usize>,
+        #[arg(long, env = "ATTUNE_CORRECTION_EVAL_CONCURRENCY", default_value_t = 16)]
+        concurrency: usize,
     },
     TraceHarness {
         #[command(subcommand)]
@@ -609,6 +640,8 @@ async fn main() -> anyhow::Result<()> {
             judge_api_key,
             target_model,
             profile,
+            dataset_model,
+            dataset_profile,
             profile_revision,
             target_provider_ignore,
             artifact_id,
@@ -646,6 +679,8 @@ async fn main() -> anyhow::Result<()> {
                 judge_model,
                 target_model,
                 profile,
+                dataset_model_filter: dataset_model,
+                dataset_profile_filter: dataset_profile,
                 profile_revision,
                 dsrs_history_format: None,
                 target_provider: target_provider_from_ignore(target_provider_ignore),
@@ -715,6 +750,8 @@ async fn main() -> anyhow::Result<()> {
                 judge_model,
                 target_model,
                 profile,
+                dataset_model_filter: None,
+                dataset_profile_filter: None,
                 profile_revision,
                 dsrs_history_format,
                 target_provider: target_provider_from_ignore(target_provider_ignore),
@@ -773,6 +810,43 @@ async fn main() -> anyhow::Result<()> {
                 profile,
                 model_patterns,
                 dry_run,
+            })
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(())
+        }
+        Command::EvalCorrectionAgent {
+            dataset_path,
+            output_path,
+            base_url,
+            target_model,
+            profile,
+            correction_agent_artifact,
+            dataset_model,
+            dataset_profile,
+            max_examples,
+            concurrency,
+        } => {
+            let mut eval_config =
+                load_runtime_config(runtime_config_path.as_deref(), &runtime_overrides).await?;
+            eval_config.upstream.base_url = base_url;
+            eval_config.upstream.api_key = first_non_empty([
+                runtime_overrides.upstream_api_key.clone(),
+                std::env::var("OPENROUTER_API_KEY").ok(),
+                eval_config.upstream.api_key.clone(),
+            ]);
+            let report = run_correction_eval(CorrectionEvalConfig {
+                dataset_path: dataset_path.into(),
+                output_path: output_path.map(Into::into),
+                upstream: eval_config.upstream.clone(),
+                proxy_config: eval_config,
+                target_model,
+                profile,
+                correction_agent_artifact: correction_agent_artifact.map(Into::into),
+                dataset_model_filter: dataset_model,
+                dataset_profile_filter: dataset_profile,
+                max_examples,
+                concurrency,
             })
             .await?;
             println!("{}", serde_json::to_string_pretty(&report)?);
@@ -1097,6 +1171,10 @@ fn gepa_role_api_key(
     explicit: Option<String>,
 ) -> Option<String> {
     let provider_model = model.trim().to_ascii_lowercase();
+    if provider_model.starts_with("codex:") {
+        return None;
+    }
+
     let base_url = base_url.unwrap_or_default().to_ascii_lowercase();
     first_non_empty([
         explicit,
@@ -1116,6 +1194,10 @@ fn gepa_role_api_key(
 }
 
 fn gepa_role_base_url(model: &str, explicit: Option<&str>) -> Option<String> {
+    if model.trim().to_ascii_lowercase().starts_with("codex:") {
+        return None;
+    }
+
     if let Some(explicit) = explicit {
         let explicit = explicit.trim();
         return (!explicit.is_empty()).then(|| explicit.to_string());
@@ -1126,7 +1208,8 @@ fn gepa_role_base_url(model: &str, explicit: Option<&str>) -> Option<String> {
 
 fn gepa_role_uses_openrouter_default(model: &str) -> bool {
     let model = model.trim().to_ascii_lowercase();
-    model.starts_with("openrouter:") || (!model.contains(':') && model.contains('/'))
+    model.starts_with("openrouter:")
+        || (!model.starts_with("codex:") && !model.contains(':') && model.contains('/'))
 }
 
 #[cfg(test)]
@@ -1144,6 +1227,31 @@ mod tests {
     #[test]
     fn gepa_role_base_url_leaves_native_anthropic_models_direct() {
         assert_eq!(gepa_role_base_url("anthropic:claude-sonnet-5", None), None);
+    }
+
+    #[test]
+    fn gepa_role_base_url_leaves_codex_models_direct() {
+        assert_eq!(gepa_role_base_url("codex:gpt-5.5@medium", None), None);
+    }
+
+    #[test]
+    fn gepa_role_base_url_ignores_explicit_value_for_codex_models() {
+        assert_eq!(
+            gepa_role_base_url("codex:gpt-5.5@medium", Some(DEFAULT_GEPA_ROLE_BASE_URL)),
+            None
+        );
+    }
+
+    #[test]
+    fn gepa_role_api_key_leaves_codex_models_to_codex_auth() {
+        assert_eq!(
+            gepa_role_api_key(
+                "codex:gpt-5.5@medium",
+                Some(DEFAULT_GEPA_ROLE_BASE_URL),
+                None
+            ),
+            None
+        );
     }
 
     #[test]

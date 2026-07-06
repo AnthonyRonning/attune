@@ -257,6 +257,8 @@ nix develop --command cargo run -- \
   --judge-model anthropic/claude-sonnet-5 \
   --target-model qwen/qwen3.5-9b \
   --profile qwen-dsrs \
+  --dataset-model qwen/qwen3.5-9b \
+  --dataset-profile qwen-dsrs \
   --profile-revision 3 \
   --artifact-id correction-agent/qwen-dsrs/local-r1 \
   --iterations 3 \
@@ -272,6 +274,10 @@ nix develop --command cargo run -- \
 Rules:
 
 - `--target-model` is the model being improved.
+- `--dataset-model` and `--dataset-profile` filter the correction dataset
+  before GEPA sees it. Use them for model-specific correction artifacts; do not
+  train a per-model correction artifact on mixed model/profile rows unless that
+  is an explicit comparison.
 - `--model` is the GEPA reflection/proposal model.
 - `--judge-model` is the scoring model.
 - Reflection and judge must not be the same model as the target.
@@ -281,6 +287,12 @@ Rules:
   `ANTHROPIC_API_KEY`; pass an empty `--reflection-base-url` or
   `--judge-base-url` if you also have an OpenRouter role-base-url env override
   set.
+- Codex-mediated role model ids such as `codex:gpt-5.5@medium` run
+  `codex exec` for GEPA reflection and/or judge calls using the local Codex
+  login. The suffix after `@` is the Codex reasoning effort; omit it to use
+  `medium`, or set `ATTUNE_CODEX_REASONING_EFFORT`. Codex role ids ignore GEPA
+  role base-url/API-key settings and are for optimizer/judge work only, not raw
+  target-model baselines.
 - `--reflection-temperature` defaults to `1.0` for GEPA prompt exploration.
   Keep `--judge-temperature` at `0.0` unless intentionally testing judge
   variance.
@@ -293,6 +305,33 @@ Rules:
   for candidate artifacts. Without it, GEPA uses the training examples for
   candidate validation, so treat the GEPA score as optimizer telemetry only and
   gate promotion with the trace harness.
+
+Use Codex for reflection and judging while still calling the target model
+through the normal OpenAI-compatible target path:
+
+```sh
+nix develop --command cargo run -- \
+  optimize-prompts \
+  --dataset-path datasets/corrections.jsonl \
+  --output-path datasets/correction-agent/kimi-k27-code-dsrs-codex55-r1.json \
+  --base-url https://openrouter.ai/api/v1 \
+  --target-model moonshotai/kimi-k2.7-code \
+  --profile kimi-k27-code-dsrs \
+  --dataset-model moonshotai/kimi-k2.7-code \
+  --model codex:gpt-5.5@medium \
+  --judge-model codex:gpt-5.5@medium \
+  --iterations 3 \
+  --max-examples 12 \
+  --target-provider-ignore Venice \
+  --max-rollouts 60
+```
+
+`ATTUNE_CODEX_BIN` can point at a non-default Codex executable, and
+`ATTUNE_CODEX_CWD` can force the working directory used by `codex exec`.
+Attune launches Codex with `--ephemeral`, `--ignore-user-config`,
+`--ignore-rules`, `--skip-git-repo-check`, and read-only sandboxing so the
+role call behaves like a text-only optimizer dependency as much as Codex
+allows.
 
 Suggested run tiers:
 
@@ -392,10 +431,38 @@ and parsed prediction. Request-adapter and correction-agent target-model calls
 use Attune's OpenAI-compatible upstream client, preserve the dataset request's
 token controls without adding `max_tokens`, and accept `--target-provider-ignore`
 for OpenRouter provider routing. Target transport/status/decode failures are
-retried and then recorded as unusable scoreable rollouts so long runs can
-continue. Judge HTTP failures, non-JSON judge responses, and invalid judge JSON
-remain fatal and do not write artifacts. Model behavior failures, such as empty
-content with empty tool calls, are still scoreable data.
+retried and then stop the run with a best-so-far checkpoint instead of being
+recorded as `0.0` rollout scores. Judge HTTP failures, non-JSON judge responses,
+and invalid judge JSON also stop the run. Model behavior failures from a
+successful API response, such as empty content with empty tool calls or malformed
+DSRs fields, are still scoreable data.
+
+## Correction-Agent-Only Eval
+
+Use `eval-correction-agent` when the request-adapter/proxy traces are already
+collected and you only want to test correction-agent prompt behavior against
+labeled correction rows. This avoids rerunning the full trace-harness proxy
+suite while iterating on `correction_agent_artifact` candidates.
+
+```sh
+nix develop --command cargo run -- \
+  eval-correction-agent \
+  --dataset-path datasets/corrections.jsonl \
+  --output-path eval/trace-harness/results/kimi-k27-code-correction.local.json \
+  --target-model moonshotai/kimi-k2.7-code \
+  --profile kimi-k27-code-dsrs \
+  --dataset-model moonshotai/kimi-k2.7-code \
+  --dataset-profile kimi-k27-code-dsrs \
+  --correction-agent-artifact datasets/correction-agent/kimi-k27-code-dsrs-sonnet5-r1.json
+```
+
+The evaluator filters rows by `--dataset-model` and `--dataset-profile`, runs
+the target model through the same typed DSRs correction-agent signature, and
+scores normalized `content`, `tool_calls`, and `possible` against the hidden
+`expected_repair` label. For tool-call repairs, an empty expected `content`
+remains optional, but non-empty expected `content` and expected `possible=true`
+are enforced. It is still a live target-model eval, so provider credit/key-limit
+failures block it the same way they block GEPA.
 
 Attune currently patches the pinned DSRs GEPA implementation locally so
 minibatches use GEPA's epoch-shuffled coverage pattern instead of reusing the

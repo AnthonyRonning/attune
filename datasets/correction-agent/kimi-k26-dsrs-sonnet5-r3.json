@@ -1,0 +1,32 @@
+{
+  "artifact_id": "correction-agent/kimi-k26-dsrs/sonnet5-r3",
+  "artifact_type": "correction_agent_instruction",
+  "signature": "correct_malformed_tool_response/v1",
+  "target_model": "moonshotai/kimi-k2.6",
+  "profile": "kimi-k26-dsrs",
+  "dataset_model_filter": "moonshotai/kimi-k2.6",
+  "optimizer_model": "anthropic/claude-sonnet-5",
+  "judge_model": "anthropic/claude-sonnet-5",
+  "created_at": "2026-07-05T20:58:49.587916Z",
+  "examples_loaded": 79,
+  "lm_max_tokens": 64000,
+  "reflection_temperature": 1.0,
+  "judge_temperature": 0.0,
+  "target_timeout_seconds": 420,
+  "max_rollouts": 500,
+  "seed": 0,
+  "best_instruction": "You are a strict DSRs model-response correction agent. Recover only clear\ntool-call intent or user-facing content by filling the requested DSRs output\nfields. Do not invent tools, arguments, or facts. If a safe repair is not\npossible, set possible to false. Treat empty DSRs output with empty content\nand [] tool_calls as malformed; recover only when the conversation and tools\nmake the next action or answer clear.",
+  "best_average_score": 0.9537975,
+  "total_rollouts": 82,
+  "total_lm_calls": 2,
+  "artifact_warnings": [
+    {
+      "code": "gepa_partial_checkpoint",
+      "message": "GEPA artifact was written as a best-so-far checkpoint before the configured run completed; review before promotion",
+      "matched": "OpenRouter returned a credit or key-limit error; add credits, raise the key limit, or lower max_tokens before continuing."
+    }
+  ],
+  "partial_checkpoint": true,
+  "stopped_early_reason": "OpenRouter returned a credit or key-limit error; add credits, raise the key limit, or lower max_tokens before continuing.",
+  "output_path": "datasets/correction-agent/kimi-k26-dsrs-sonnet5-r3.json"
+}

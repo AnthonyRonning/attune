@@ -1,7 +1,8 @@
 use std::{
     collections::HashMap,
+    panic::{self, AssertUnwindSafe},
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
     time::Duration,
 };
 
@@ -309,6 +310,8 @@ pub struct GepaOptimizationConfig {
     pub judge_model: String,
     pub target_model: Option<String>,
     pub profile: Option<String>,
+    pub dataset_model_filter: Option<String>,
+    pub dataset_profile_filter: Option<String>,
     pub profile_revision: Option<u32>,
     pub dsrs_history_format: Option<DsrsHistoryFormat>,
     pub target_provider: Option<ProviderRouting>,
@@ -339,6 +342,10 @@ pub struct GepaOptimizationReport {
     pub signature: String,
     pub target_model: Option<String>,
     pub profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dataset_model_filter: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dataset_profile_filter: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile_revision: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -386,6 +393,8 @@ struct GepaArtifactCheckpointSpec {
     signature: String,
     target_model: Option<String>,
     profile: Option<String>,
+    dataset_model_filter: Option<String>,
+    dataset_profile_filter: Option<String>,
     profile_revision: Option<u32>,
     dsrs_history_format: Option<DsrsHistoryFormat>,
     seed_artifact_path: Option<PathBuf>,
@@ -410,12 +419,18 @@ impl GepaArtifactCheckpointSpec {
             return None;
         }
         let partial_checkpoint = !checkpoint.completed;
+        let stopped_early_reason = checkpoint
+            .stopped_early_reason
+            .as_deref()
+            .map(sanitize_gepa_infrastructure_message);
         Some(GepaOptimizationReport {
             artifact_id: self.artifact_id.clone(),
             artifact_type: self.artifact_type.clone(),
             signature: self.signature.clone(),
             target_model: self.target_model.clone(),
             profile: self.profile.clone(),
+            dataset_model_filter: self.dataset_model_filter.clone(),
+            dataset_profile_filter: self.dataset_profile_filter.clone(),
             profile_revision: self.profile_revision,
             dsrs_history_format: self.dsrs_history_format,
             seed_artifact_path: self.seed_artifact_path.clone(),
@@ -435,14 +450,14 @@ impl GepaArtifactCheckpointSpec {
                 &self.artifact_type,
                 &best_instruction,
                 partial_checkpoint,
-                checkpoint.stopped_early_reason.as_deref(),
+                stopped_early_reason.as_deref(),
             ),
             best_instruction,
             best_average_score: checkpoint.best_candidate.average_score(),
             total_rollouts: checkpoint.total_rollouts,
             total_lm_calls: checkpoint.total_lm_calls,
             partial_checkpoint,
-            stopped_early_reason: checkpoint.stopped_early_reason.clone(),
+            stopped_early_reason,
             output_path: self.output_path.clone(),
         })
     }
@@ -556,15 +571,46 @@ fn gepa_artifact_warnings(
 ) -> Vec<ArtifactWarning> {
     let mut warnings = artifact_instruction_warnings(artifact_type, instruction);
     if partial_checkpoint {
+        let matched = stopped_early_reason
+            .map(sanitize_gepa_infrastructure_message)
+            .unwrap_or_else(|| "run still in progress".to_string());
         warnings.push(ArtifactWarning {
             code: "gepa_partial_checkpoint".to_string(),
             message: "GEPA artifact was written as a best-so-far checkpoint before the configured run completed; review before promotion".to_string(),
-            matched: stopped_early_reason
-                .map(str::to_string)
-                .or_else(|| Some("run still in progress".to_string())),
+            matched: Some(matched),
         });
     }
     warnings
+}
+
+fn sanitize_gepa_infrastructure_message(message: &str) -> String {
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("insufficient credits")
+        || lower.contains("requires more credits")
+        || lower.contains("monthly limit")
+        || lower.contains("\"code\":402")
+        || lower.contains("\"code\":403")
+        || lower.contains("http 402")
+        || lower.contains("http 403")
+    {
+        return "OpenRouter returned a credit or key-limit error; add credits, raise the key limit, or lower max_tokens before continuing.".to_string();
+    }
+
+    truncate_for_feedback(&redact_urls(message))
+}
+
+fn redact_urls(message: &str) -> String {
+    message
+        .split_whitespace()
+        .map(|token| {
+            if token.starts_with("http://") || token.starts_with("https://") {
+                "[redacted-url]"
+            } else {
+                token
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn first_matched_phrase<'a>(haystack_lower: &str, phrases: &'a [&str]) -> Option<&'a str> {
@@ -785,11 +831,6 @@ fn gepa_empty_target_response_error(error: &anyhow::Error) -> bool {
 }
 
 #[cfg(test)]
-fn gepa_scoreable_target_lm_call_error(error: &anyhow::Error) -> bool {
-    gepa_empty_target_response_error(error) || gepa_target_response_decode_error(error)
-}
-
-#[cfg(test)]
 fn gepa_target_response_decode_error(error: &anyhow::Error) -> bool {
     let details = format!("{error:#}");
     details.contains("JsonError")
@@ -850,16 +891,17 @@ async fn call_gepa_target(
             }
             Ok(Ok(response)) => return Ok(response),
             Ok(Err(error)) if attempt < GEPA_TARGET_LM_MAX_ATTEMPTS => {
+                let message = sanitize_gepa_infrastructure_message(&format!("{error:#}"));
                 eprintln!(
                     "GEPA target LM call failed on attempt {attempt}/{GEPA_TARGET_LM_MAX_ATTEMPTS}; retrying: {}",
-                    truncate_for_feedback(&format!("{error:#}"))
+                    message
                 );
                 tokio::time::sleep(gepa_target_retry_delay(attempt)).await;
             }
             Ok(Err(error)) if gepa_scoreable_upstream_error(&error) => {
                 return Err(GepaTargetCallFailure::Scoreable {
                     event: "target LM call failed after retries",
-                    reason: format!("{error:#}"),
+                    reason: sanitize_gepa_infrastructure_message(&format!("{error:#}")),
                 });
             }
             Ok(Err(error)) => return Err(GepaTargetCallFailure::Fatal(error.into())),
@@ -872,12 +914,8 @@ async fn call_gepa_target(
 }
 
 fn gepa_scoreable_upstream_error(error: &UpstreamError) -> bool {
-    match error {
-        UpstreamError::Transport(_) | UpstreamError::Decode { .. } => true,
-        UpstreamError::Status { status, .. } => {
-            matches!(*status, 408 | 409 | 425 | 429) || *status >= 500
-        }
-    }
+    let _ = error;
+    false
 }
 
 fn raw_assistant_output(response: &crate::openai::ChatCompletionResponse) -> String {
@@ -1161,11 +1199,22 @@ impl CorrectionPromptProgram {
                 "assistant message had empty content and empty reasoning".to_string(),
             ));
         }
-        Ok(Prediction::new(
+        let parsed = match catch_unwind_without_panic_hook(AssertUnwindSafe(|| {
             ChatAdapter.parse_response(
                 self.predictor.signature.as_ref(),
-                Message::assistant(raw_output),
-            ),
+                Message::assistant(raw_output.clone()),
+            )
+        })) {
+            Ok(parsed) => parsed,
+            Err(_) => {
+                return Ok(failed_correction_target_prediction(
+                    "target LM returned unparsable DSRs correction output",
+                    "typed DSRs fields could not be parsed by dspy-rs ChatAdapter".to_string(),
+                ));
+            }
+        };
+        Ok(Prediction::new(
+            parsed,
             lm_usage_from_openai_usage(response.usage.as_ref()),
         ))
     }
@@ -1205,6 +1254,23 @@ fn failed_correction_target_prediction(event: &'static str, reason: String) -> P
         ]),
         LmUsage::default(),
     )
+}
+
+fn catch_unwind_without_panic_hook<F, R>(f: F) -> std::thread::Result<R>
+where
+    F: FnOnce() -> R + panic::UnwindSafe,
+{
+    static PANIC_HOOK_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    let _guard = PANIC_HOOK_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let previous_hook = panic::take_hook();
+    panic::set_hook(Box::new(|_| {}));
+    let result = panic::catch_unwind(f);
+    panic::set_hook(previous_hook);
+    result
 }
 
 impl Optimizable for CorrectionPromptProgram {
@@ -1263,14 +1329,21 @@ pub async fn optimize_correction_prompt(
         );
     };
 
-    let rows = read_dataset_rows(&config.dataset_path).await?;
+    let rows = filter_gepa_dataset_rows(
+        read_dataset_rows(&config.dataset_path).await?,
+        config.dataset_model_filter.as_deref(),
+        config.dataset_profile_filter.as_deref(),
+    );
     let rows: Vec<Value> = rows.into_iter().take(config.max_examples).collect();
     let examples = traces_to_gepa_examples(&rows);
     if examples.is_empty() {
         anyhow::bail!("dataset contained no optimization examples");
     }
-    let validation_rows =
-        read_validation_dataset_rows(config.validation_dataset_path.as_ref()).await?;
+    let validation_rows = filter_gepa_dataset_rows(
+        read_validation_dataset_rows(config.validation_dataset_path.as_ref()).await?,
+        config.dataset_model_filter.as_deref(),
+        config.dataset_profile_filter.as_deref(),
+    );
     let validation_examples = optional_examples(traces_to_gepa_examples(&validation_rows));
     let target_model = required_gepa_target_model(&config, "correction-agent GEPA")?;
     ensure_gepa_model_role_separation(
@@ -1320,6 +1393,8 @@ pub async fn optimize_correction_prompt(
         signature: "correct_malformed_tool_response/v1".to_string(),
         target_model: Some(target_model.clone()),
         profile: config.profile.clone(),
+        dataset_model_filter: config.dataset_model_filter.clone(),
+        dataset_profile_filter: config.dataset_profile_filter.clone(),
         profile_revision: config.profile_revision,
         dsrs_history_format: None,
         seed_artifact_path: config.seed_artifact_path.clone(),
@@ -1381,12 +1456,18 @@ pub async fn optimize_correction_prompt(
     if best_instruction.trim().is_empty() {
         anyhow::bail!("GEPA correction-prompt optimization produced an empty best instruction; refusing to write an unusable artifact");
     }
+    let stopped_early_reason = result
+        .stopped_early_reason
+        .as_deref()
+        .map(sanitize_gepa_infrastructure_message);
     let report = GepaOptimizationReport {
         artifact_id,
         artifact_type: artifact_type.clone(),
         signature: "correct_malformed_tool_response/v1".to_string(),
         target_model: Some(target_model),
         profile: config.profile.clone(),
+        dataset_model_filter: config.dataset_model_filter.clone(),
+        dataset_profile_filter: config.dataset_profile_filter.clone(),
         profile_revision: config.profile_revision,
         dsrs_history_format: None,
         seed_artifact_path: config.seed_artifact_path.clone(),
@@ -1405,15 +1486,15 @@ pub async fn optimize_correction_prompt(
         artifact_warnings: gepa_artifact_warnings(
             &artifact_type,
             &best_instruction,
-            result.stopped_early_reason.is_some(),
-            result.stopped_early_reason.as_deref(),
+            stopped_early_reason.is_some(),
+            stopped_early_reason.as_deref(),
         ),
         best_instruction,
         best_average_score: result.best_candidate.average_score(),
         total_rollouts: result.total_rollouts,
         total_lm_calls: result.total_lm_calls,
-        partial_checkpoint: result.stopped_early_reason.is_some(),
-        stopped_early_reason: result.stopped_early_reason.clone(),
+        partial_checkpoint: stopped_early_reason.is_some(),
+        stopped_early_reason,
         output_path: config.output_path.clone(),
     };
     tokio::fs::write(&config.output_path, serde_json::to_vec_pretty(&report)?)
@@ -1504,6 +1585,8 @@ pub async fn optimize_request_adapter_prompt(
         signature: "openai_tool_use_contract_profile_guidance/v1".to_string(),
         target_model: Some(runtime_model.clone()),
         profile: config.profile.clone(),
+        dataset_model_filter: config.dataset_model_filter.clone(),
+        dataset_profile_filter: config.dataset_profile_filter.clone(),
         profile_revision: config.profile_revision,
         dsrs_history_format: config.dsrs_history_format,
         seed_artifact_path: config.seed_artifact_path.clone(),
@@ -1559,12 +1642,18 @@ pub async fn optimize_request_adapter_prompt(
     if best_instruction.trim().is_empty() {
         anyhow::bail!("GEPA request-adapter optimization produced an empty best instruction; refusing to write an unusable artifact");
     }
+    let stopped_early_reason = result
+        .stopped_early_reason
+        .as_deref()
+        .map(sanitize_gepa_infrastructure_message);
     let report = GepaOptimizationReport {
         artifact_id,
         artifact_type: artifact_type.clone(),
         signature: "openai_tool_use_contract_profile_guidance/v1".to_string(),
         target_model: Some(runtime_model),
         profile: config.profile.clone(),
+        dataset_model_filter: config.dataset_model_filter.clone(),
+        dataset_profile_filter: config.dataset_profile_filter.clone(),
         profile_revision: config.profile_revision,
         dsrs_history_format: config.dsrs_history_format,
         seed_artifact_path: config.seed_artifact_path.clone(),
@@ -1583,15 +1672,15 @@ pub async fn optimize_request_adapter_prompt(
         artifact_warnings: gepa_artifact_warnings(
             &artifact_type,
             &best_instruction,
-            result.stopped_early_reason.is_some(),
-            result.stopped_early_reason.as_deref(),
+            stopped_early_reason.is_some(),
+            stopped_early_reason.as_deref(),
         ),
         best_instruction,
         best_average_score: result.best_candidate.average_score(),
         total_rollouts: result.total_rollouts,
         total_lm_calls: result.total_lm_calls,
-        partial_checkpoint: result.stopped_early_reason.is_some(),
-        stopped_early_reason: result.stopped_early_reason.clone(),
+        partial_checkpoint: stopped_early_reason.is_some(),
+        stopped_early_reason,
         output_path: config.output_path.clone(),
     };
     tokio::fs::write(&config.output_path, serde_json::to_vec_pretty(&report)?)
@@ -1747,14 +1836,23 @@ fn known_gepa_lm_max_tokens(model: &str) -> Option<u32> {
 
 fn providerless_model_id(model: &str) -> String {
     let normalized = model.trim().to_ascii_lowercase().replace('.', "-");
-    let normalized = normalized
-        .strip_prefix("openrouter:")
-        .unwrap_or(normalized.as_str());
-    normalized
+    let mut model = normalized.as_str();
+    if let Some(rest) = model.strip_prefix("openrouter:") {
+        model = rest;
+    }
+    if let Some(rest) = model.strip_prefix("codex:") {
+        model = rest;
+    }
+    if let Some(rest) = model
         .strip_prefix("anthropic:")
-        .or_else(|| normalized.strip_prefix("anthropic/"))
-        .unwrap_or(normalized)
-        .to_string()
+        .or_else(|| model.strip_prefix("anthropic/"))
+    {
+        model = rest;
+    }
+    if let Some((model_without_options, _)) = model.split_once('@') {
+        model = model_without_options;
+    }
+    model.to_string()
 }
 
 fn required_gepa_target_model(config: &GepaOptimizationConfig, layer: &str) -> Result<String> {
@@ -1795,11 +1893,7 @@ fn same_model_id(left: &str, right: &str) -> bool {
 }
 
 fn normalized_model_id(model: &str) -> String {
-    model
-        .trim()
-        .to_ascii_lowercase()
-        .replacen(':', "/", 1)
-        .replace('.', "-")
+    providerless_model_id(model).replacen(':', "/", 1)
 }
 
 async fn request_adapter_initial_instruction(
@@ -2028,11 +2122,14 @@ async fn call_gepa_judge_lm(judge_lm: &LM, chat: Chat) -> std::result::Result<St
         match judge_lm.call(chat.clone(), Vec::new()).await {
             Ok(response) => return Ok(response.output.content()),
             Err(error) => {
-                let message = format!("LLM judge call failed: {error}");
+                let message = format!(
+                    "LLM judge call failed: {}",
+                    sanitize_gepa_infrastructure_message(&error.to_string())
+                );
                 if attempt < GEPA_JUDGE_LM_MAX_ATTEMPTS {
                     eprintln!(
                         "GEPA judge LM call failed on attempt {attempt}/{GEPA_JUDGE_LM_MAX_ATTEMPTS}; retrying: {}",
-                        truncate_for_feedback(&message)
+                        message
                     );
                     tokio::time::sleep(gepa_target_retry_delay(attempt)).await;
                 }
@@ -2307,6 +2404,36 @@ async fn read_validation_dataset_rows(path: Option<&PathBuf>) -> Result<Vec<Valu
         return Ok(Vec::new());
     };
     read_dataset_rows(path).await
+}
+
+fn filter_gepa_dataset_rows(
+    rows: Vec<Value>,
+    model_filter: Option<&str>,
+    profile_filter: Option<&str>,
+) -> Vec<Value> {
+    rows.into_iter()
+        .filter(|row| {
+            matches_optional_text_filter(
+                row.get("model").and_then(Value::as_str).unwrap_or_default(),
+                model_filter,
+            ) && matches_optional_text_filter(
+                row.get("profile")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+                profile_filter,
+            )
+        })
+        .collect()
+}
+
+fn matches_optional_text_filter(actual: &str, filter: Option<&str>) -> bool {
+    filter
+        .map(|filter| {
+            actual
+                .to_ascii_lowercase()
+                .contains(&filter.to_ascii_lowercase())
+        })
+        .unwrap_or(true)
 }
 
 fn optional_examples(examples: Vec<Example>) -> Option<Vec<Example>> {
@@ -2847,6 +2974,8 @@ mod tests {
             signature: "openai_tool_use_contract_profile_guidance/v1".to_string(),
             target_model: Some("provider/model".to_string()),
             profile: Some("test-profile".to_string()),
+            dataset_model_filter: None,
+            dataset_profile_filter: None,
             profile_revision: Some(3),
             dsrs_history_format: Some(DsrsHistoryFormat::RegeneratedContext),
             seed_artifact_path: None,
@@ -2889,6 +3018,73 @@ mod tests {
             .artifact_warnings
             .iter()
             .any(|warning| warning.code == "gepa_partial_checkpoint"));
+    }
+
+    #[test]
+    fn gepa_checkpoint_report_sanitizes_provider_stop_reasons() {
+        let spec = GepaArtifactCheckpointSpec {
+            artifact_id: "request-adapter/test/checkpoint".to_string(),
+            artifact_type: "request_adapter_instruction".to_string(),
+            signature: "openai_tool_use_contract_profile_guidance/v1".to_string(),
+            target_model: Some("provider/model".to_string()),
+            profile: Some("test-profile".to_string()),
+            dataset_model_filter: None,
+            dataset_profile_filter: None,
+            profile_revision: Some(3),
+            dsrs_history_format: Some(DsrsHistoryFormat::AppendOnly),
+            seed_artifact_path: None,
+            optimizer_model: "anthropic/claude-sonnet-5".to_string(),
+            judge_model: "anthropic/claude-sonnet-5".to_string(),
+            examples_loaded: 22,
+            validation_dataset_path: None,
+            validation_examples_loaded: 0,
+            lm_max_tokens: 64000,
+            reflection_temperature: 1.0,
+            judge_temperature: 0.0,
+            target_timeout_seconds: 420,
+            max_rollouts: Some(500),
+            seed: 0,
+            output_path: PathBuf::from("checkpoint.json"),
+        };
+        let checkpoint = GEPACheckpoint {
+            best_candidate: dspy_rs::GEPACandidate {
+                id: 7,
+                instruction: "Use robust tool-call structure.".to_string(),
+                module_name: "predictor".to_string(),
+                example_scores: vec![0.7, 0.9],
+                parent_id: Some(0),
+                generation: 7,
+            },
+            generation: 7,
+            total_rollouts: 123,
+            total_lm_calls: 14,
+            completed: false,
+            stopped_early_reason: Some(
+                "ProviderError: This request requires more credits. Visit https://openrouter.ai/workspaces/default/keys/secret-key-id"
+                    .to_string(),
+            ),
+        };
+
+        let report = spec.report(&checkpoint).expect("checkpoint report");
+
+        assert_eq!(
+            report.stopped_early_reason.as_deref(),
+            Some(
+                "OpenRouter returned a credit or key-limit error; add credits, raise the key limit, or lower max_tokens before continuing."
+            )
+        );
+        let serialized = serde_json::to_string(&report).expect("serialize report");
+        assert!(!serialized.contains("secret-key-id"));
+        assert!(!serialized.contains("openrouter.ai/workspaces"));
+    }
+
+    #[test]
+    fn quiet_panic_boundary_catches_expected_parse_panics() {
+        let result = catch_unwind_without_panic_hook(AssertUnwindSafe(|| {
+            panic!("expected parser panic");
+        }));
+
+        assert!(result.is_err());
     }
 
     #[test]
@@ -2978,6 +3174,24 @@ mod tests {
     }
 
     #[test]
+    fn providerless_model_id_strips_codex_reasoning_suffix() {
+        assert_eq!(providerless_model_id("codex:gpt-5.5@medium"), "gpt-5-5");
+    }
+
+    #[test]
+    fn gepa_model_roles_reject_codex_wrapper_for_same_target_model() {
+        let error = ensure_gepa_model_role_separation(
+            "request-adapter GEPA",
+            "codex:gpt-5.5@medium",
+            "anthropic/claude-sonnet-5",
+            "gpt-5.5",
+        )
+        .expect_err("codex wrapper should still identify the same underlying model");
+
+        assert!(error.to_string().contains("reflection/optimizer model"));
+    }
+
+    #[test]
     fn request_adapter_target_empty_response_becomes_scoreable_prediction() {
         let error =
             anyhow::anyhow!("ResponseError: Response contained no message or tool call (empty)");
@@ -3019,7 +3233,6 @@ mod tests {
         let error = anyhow::anyhow!(
             "JsonError: data did not match any variant of untagged enum ApiResponse"
         );
-        assert!(gepa_scoreable_target_lm_call_error(&error));
         assert!(gepa_target_response_decode_error(&error));
 
         let prediction = failed_request_adapter_target_prediction(
@@ -3055,7 +3268,6 @@ mod tests {
         let error = anyhow::anyhow!(
             "JsonError: data did not match any variant of untagged enum ApiResponse"
         );
-        assert!(gepa_scoreable_target_lm_call_error(&error));
 
         let prediction = failed_correction_target_prediction(
             "target LM call failed after retries",
@@ -3072,6 +3284,22 @@ mod tests {
             .get("target_error")
             .and_then(Value::as_str)
             .is_some_and(|error| error.contains("ApiResponse")));
+    }
+
+    #[test]
+    fn gepa_credit_limit_errors_are_not_scoreable_rollouts() {
+        for status in [402, 403, 408, 429, 500, 503] {
+            let error = UpstreamError::Status {
+                status,
+                body: "api error".to_string(),
+                diagnostics: crate::upstream::UpstreamDiagnostics::default(),
+            };
+
+            assert!(
+                !gepa_scoreable_upstream_error(&error),
+                "HTTP {status} should stop GEPA as infrastructure, not score a rollout"
+            );
+        }
     }
 
     #[test]
@@ -3232,6 +3460,8 @@ mod tests {
                 judge_model: DEFAULT_GEPA_JUDGE_MODEL.to_string(),
                 target_model: Some("google/gemma-4-26b-a4b-it".to_string()),
                 profile: Some("gemma-dsrs-conservative".to_string()),
+                dataset_model_filter: None,
+                dataset_profile_filter: None,
                 profile_revision: None,
                 dsrs_history_format: Some(DsrsHistoryFormat::AppendOnly),
                 target_provider: None,
@@ -3280,6 +3510,8 @@ mod tests {
                 judge_model: DEFAULT_GEPA_JUDGE_MODEL.to_string(),
                 target_model: Some("google/gemma-4-26b-a4b-it".to_string()),
                 profile: Some("gemma-dsrs-conservative".to_string()),
+                dataset_model_filter: None,
+                dataset_profile_filter: None,
                 profile_revision: None,
                 dsrs_history_format: Some(DsrsHistoryFormat::AppendOnly),
                 target_provider: None,
@@ -3352,6 +3584,33 @@ mod tests {
         assert_eq!(examples[0].get("parallel_tool_calls", None), json!(true));
         assert!(!examples[0].data.contains_key("expected_output"));
         assert!(!examples[0].data.contains_key("tool_calls"));
+    }
+
+    #[test]
+    fn filters_gepa_dataset_rows_by_model_and_profile() {
+        let rows = vec![
+            json!({
+                "trace_id": "kimi",
+                "model": "moonshotai/kimi-k2.7-code",
+                "profile": "kimi-k27-code-dsrs"
+            }),
+            json!({
+                "trace_id": "glm",
+                "model": "z-ai/glm-5.2",
+                "profile": "glm52-dsrs"
+            }),
+            json!({
+                "trace_id": "qwen",
+                "model": "qwen/qwen3.5-9b",
+                "profile": "qwen-dsrs"
+            }),
+        ];
+
+        let filtered =
+            filter_gepa_dataset_rows(rows, Some("kimi-k2.7-code"), Some("kimi-k27-code-dsrs"));
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0]["trace_id"], json!("kimi"));
     }
 
     #[test]

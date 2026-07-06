@@ -2,6 +2,9 @@
 /traces/
 /datasets/*
 !/datasets/corrections.jsonl
+!/datasets/correction-agent/
+!/datasets/correction-agent/*.json
+/datasets/correction-agent/*.local.json
 !/datasets/request-adapter/
 !/datasets/request-adapter/*.json
 !/datasets/request-adapter/*.jsonl

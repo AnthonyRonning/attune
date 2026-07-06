@@ -478,11 +478,45 @@ fn is_diagnostic_header(name: &str) -> bool {
 
 fn preview(value: &str) -> String {
     const MAX: usize = 512;
-    let mut preview = value.chars().take(MAX).collect::<String>();
-    if value.chars().count() > MAX {
+    let redacted = redact_sensitive_text(value);
+    let mut preview = redacted.chars().take(MAX).collect::<String>();
+    if redacted.chars().count() > MAX {
         preview.push_str("...");
     }
     preview
+}
+
+fn safe_error_body(value: &str) -> String {
+    preview(value)
+}
+
+fn redact_sensitive_text(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut index = 0;
+    while index < value.len() {
+        let remaining = &value[index..];
+        let next_http = remaining.find("http://");
+        let next_https = remaining.find("https://");
+        let Some(next_url) = [next_http, next_https].into_iter().flatten().min() else {
+            output.push_str(remaining);
+            break;
+        };
+        let url_start = index + next_url;
+        output.push_str(&value[index..url_start]);
+        output.push_str("[redacted-url]");
+
+        let after_url = &value[url_start..];
+        let skip = after_url
+            .char_indices()
+            .skip(1)
+            .find_map(|(offset, ch)| {
+                (ch.is_whitespace() || matches!(ch, '"' | '\'' | ')' | ']' | '}' | ',' | ';'))
+                    .then_some(offset)
+            })
+            .unwrap_or(after_url.len());
+        index = url_start + skip;
+    }
+    output
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -511,13 +545,19 @@ impl fmt::Display for UpstreamDiagnostics {
 pub enum UpstreamError {
     #[error("upstream transport error: {0}")]
     Transport(#[from] reqwest::Error),
-    #[error("upstream returned HTTP {status}: {body}{diagnostics}")]
+    #[error(
+        "upstream returned HTTP {status}: {}{diagnostics}",
+        safe_error_body(body)
+    )]
     Status {
         status: u16,
         body: String,
         diagnostics: UpstreamDiagnostics,
     },
-    #[error("failed to decode upstream response: {source}; body: {body}{diagnostics}")]
+    #[error(
+        "failed to decode upstream response: {source}; body: {}{diagnostics}",
+        safe_error_body(body)
+    )]
     Decode {
         source: serde_json::Error,
         body: String,
@@ -613,6 +653,24 @@ mod tests {
             Some("42")
         );
         assert!(!diagnostics.headers.contains_key("authorization"));
+    }
+
+    #[test]
+    fn upstream_previews_redact_provider_urls() {
+        let body = r#"{"error":{"message":"Key limit exceeded. Manage it using https://openrouter.ai/workspaces/default/keys/secret-key-id","code":403}}"#;
+
+        let preview = preview(body);
+        let error = UpstreamError::Status {
+            status: 403,
+            body: body.to_string(),
+            diagnostics: UpstreamDiagnostics::default(),
+        }
+        .to_string();
+
+        assert!(preview.contains("[redacted-url]"));
+        assert!(!preview.contains("secret-key-id"));
+        assert!(!error.contains("secret-key-id"));
+        assert!(!error.contains("openrouter.ai/workspaces"));
     }
 
     #[tokio::test]

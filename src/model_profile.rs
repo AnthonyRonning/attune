@@ -168,10 +168,35 @@ impl ModelProfile {
         }
     }
 
+    pub fn kimi_k26() -> Self {
+        Self::kimi_variant(
+            "kimi-k26-dsrs",
+            vec!["moonshotai/kimi-k2.6".to_string(), "kimi-k2.6".to_string()],
+        )
+    }
+
+    pub fn kimi_k27_code() -> Self {
+        Self::kimi_variant(
+            "kimi-k27-code-dsrs",
+            vec![
+                "moonshotai/kimi-k2.7-code".to_string(),
+                "kimi-k2.7-code".to_string(),
+                "kimi-k27-code".to_string(),
+            ],
+        )
+    }
+
     pub fn kimi() -> Self {
+        Self::kimi_variant(
+            "kimi-dsrs",
+            vec!["kimi".to_string(), "moonshot".to_string()],
+        )
+    }
+
+    fn kimi_variant(name: &str, model_patterns: Vec<String>) -> Self {
         Self {
-            name: "kimi-dsrs".to_string(),
-            model_patterns: vec!["kimi".to_string(), "moonshot".to_string()],
+            name: name.to_string(),
+            model_patterns,
             revision: default_profile_revision(),
             source: builtin_profile_source(),
             request_adapter_artifact: None,
@@ -196,6 +221,31 @@ impl ModelProfile {
         Self {
             name: "glm-dsrs".to_string(),
             model_patterns: vec!["glm".to_string(), "z-ai".to_string()],
+            revision: default_profile_revision(),
+            source: builtin_profile_source(),
+            request_adapter_artifact: None,
+            correction_agent_artifact: None,
+            correction_instruction: None,
+            tool_mode: ToolMode::ProxyOwned,
+            tool_format: ToolFormat::Dsrs,
+            dsrs_history_format: default_dsrs_history_format(),
+            correction_model: None,
+            judge_model: None,
+            provider: None,
+            max_correction_passes: 1,
+            supports_parallel_tool_calls: true,
+            tool_instruction: default_dsrs_instruction(),
+        }
+    }
+
+    pub fn glm52() -> Self {
+        Self {
+            name: "glm52-dsrs".to_string(),
+            model_patterns: vec![
+                "z-ai/glm-5.2".to_string(),
+                "glm-5.2".to_string(),
+                "glm52".to_string(),
+            ],
             revision: default_profile_revision(),
             source: builtin_profile_source(),
             request_adapter_artifact: None,
@@ -309,7 +359,10 @@ pub fn resolve_profile(model: &str, configured: &[ModelProfile]) -> ModelProfile
 pub fn builtin_profiles() -> Vec<ModelProfile> {
     vec![
         ModelProfile::qwen(),
+        ModelProfile::kimi_k27_code(),
+        ModelProfile::kimi_k26(),
         ModelProfile::kimi(),
+        ModelProfile::glm52(),
         ModelProfile::glm(),
         ModelProfile::llama(),
         ModelProfile::gemma(),
@@ -421,6 +474,27 @@ mod tests {
         let profile = resolve_profile("meta-llama/llama-3.2-3b-instruct", &[]);
         assert_eq!(profile.name, "llama-dsrs");
         assert_eq!(profile.tool_format, ToolFormat::Dsrs);
+    }
+
+    #[test]
+    fn kimi_models_resolve_to_model_specific_profiles_before_generic_kimi() {
+        let k26 = resolve_profile("moonshotai/kimi-k2.6", &[]);
+        assert_eq!(k26.name, "kimi-k26-dsrs");
+
+        let k27 = resolve_profile("moonshotai/kimi-k2.7-code", &[]);
+        assert_eq!(k27.name, "kimi-k27-code-dsrs");
+
+        let generic = resolve_profile("moonshotai/kimi-future", &[]);
+        assert_eq!(generic.name, "kimi-dsrs");
+    }
+
+    #[test]
+    fn glm52_resolves_to_model_specific_profile_before_generic_glm() {
+        let profile = resolve_profile("z-ai/glm-5.2", &[]);
+        assert_eq!(profile.name, "glm52-dsrs");
+
+        let generic = resolve_profile("z-ai/glm-next", &[]);
+        assert_eq!(generic.name, "glm-dsrs");
     }
 
     #[test]

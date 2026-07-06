@@ -162,6 +162,9 @@ Reviewed request-adapter examples live under `datasets/request-adapter/`. The cu
 
 ```text
 datasets/request-adapter/gemma-dsrs-conservative-trace-harness-curated.jsonl
+datasets/request-adapter/glm-dsrs-trace-harness-curated.jsonl
+datasets/request-adapter/kimi-k26-dsrs-trace-harness-curated.jsonl
+datasets/request-adapter/kimi-k27-code-dsrs-trace-harness-curated.jsonl
 datasets/request-adapter/qwen-dsrs-trace-harness-curated.jsonl
 ```
 
@@ -180,6 +183,26 @@ passes. Six recovered Qwen traces from that replay were added to
 `datasets/request-adapter/qwen-dsrs-trace-harness-curated.jsonl`, and the same
 six correction-agent tool-recovery traces were added to
 `datasets/corrections.jsonl`.
+
+The Kimi K2.6, Kimi K2.7 Code, and GLM 5.2 curated files are intentionally
+small. They include inspected successes and structural failures from the
+large-model 500-scenario runs, while excluding wrong-tool-selection examples
+that are outside the prompt-format and parser/correction thesis. These files
+were used for a Sonnet-5 append-only request-adapter GEPA pass; the resulting
+artifacts were replayed and promoted into model-specific built-in defaults.
+When comparing those runs, track both final proxy pass count and no-correction
+pass count. The latter is the cleaner request-adapter metric because correction
+agent variance can move the final number independently of the prompt under test.
+
+A follow-up correction-agent GEPA pass used the shared
+`datasets/corrections.jsonl` file filtered by model/profile, then replayed only
+those labeled correction rows with `eval-correction-agent`. The K2.6, K2.7
+Code, and GLM 5.2 correction artifacts were not promoted: K2.6 regressed from
+4/5 strict baseline to 3/5, K2.7 Code tied the 3/3 strict baseline but its GEPA
+run was partial, and GLM regressed from 4/5 strict baseline to 2/5. Keep using
+strict correction-only evals when judging correction-agent prompt changes; the
+looser historical metric counted some tool-call matches as passes even when
+`possible` or required `content` was wrong.
 
 For the latest Gemma request-adapter GEPA run, combine the curated harness rows with the existing hand-labeled and trace-faithful datasets:
 

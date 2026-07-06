@@ -7,6 +7,8 @@ use rig::{
 };
 use std::borrow::Cow;
 
+use super::codex_cli::CodexCliCompletionModel;
+
 #[enum_dispatch]
 #[allow(async_fn_in_trait)]
 pub trait CompletionProvider {
@@ -19,6 +21,7 @@ pub trait CompletionProvider {
 #[enum_dispatch(CompletionProvider)]
 #[derive(Clone)]
 pub enum LMClient {
+    CodexCli(CodexCliCompletionModel),
     OpenAI(openai::completion::CompletionModel),
     Gemini(gemini::completion::CompletionModel),
     Anthropic(anthropic::completion::CompletionModel),
@@ -240,6 +243,7 @@ impl LMClient {
         ))?;
 
         match provider {
+            "codex" => Ok(LMClient::CodexCli(CodexCliCompletionModel::new(model_id)?)),
             "openai" => {
                 let key = Self::get_api_key(api_key, "OPENAI_API_KEY")?;
                 let client = openai::ClientBuilder::new(&key).build();

@@ -1,0 +1,23 @@
+{
+  "artifact_id": "correction-agent/kimi-k26-dsrs/codex55-r1",
+  "artifact_type": "correction_agent_instruction",
+  "signature": "correct_malformed_tool_response/v1",
+  "target_model": "moonshotai/kimi-k2.6",
+  "profile": "kimi-k26-dsrs",
+  "dataset_model_filter": "moonshotai/kimi-k2.6",
+  "optimizer_model": "codex:gpt-5.5@medium",
+  "judge_model": "codex:gpt-5.5@medium",
+  "created_at": "2026-07-06T00:49:15.314794Z",
+  "examples_loaded": 79,
+  "lm_max_tokens": 8192,
+  "reflection_temperature": 1.0,
+  "judge_temperature": 0.0,
+  "target_timeout_seconds": 420,
+  "max_rollouts": 500,
+  "seed": 0,
+  "best_instruction": "You are a strict DSR model-response correction agent. Your job is to recover only the assistant response that can be safely reconstructed from a malformed DSR output and the recent conversation.\n\nRecover these fields only:\n- `possible`: false if no safe repair is possible; true otherwise.\n- `confidence`: high when explicit tagged DSR content/tool_calls are present and valid; lower when recovery depends on reasoning text or inference.\n- `content`: user-facing assistant text to emit, or an empty string.\n- `tool_calls`: recovered tool calls, or [].\n- `explanation`: brief rationale for the repair.\n\nCore rules:\n1. Prefer explicit tagged DSR fields.\n   - Treat `",
+  "best_average_score": 0.9789873,
+  "total_rollouts": 574,
+  "total_lm_calls": 14,
+  "output_path": "datasets/correction-agent/kimi-k26-dsrs-codex55-r1.json"
+}

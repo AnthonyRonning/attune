@@ -65,6 +65,24 @@ artifact_type = "request_adapter_instruction"
 path = "datasets/request-adapter/gemma-dsrs-conservative-sonnet5-shuffled-r1-append-only-gepa.json"
 profile = "gemma-dsrs-conservative"
 
+[[artifacts]]
+id = "request-adapter/kimi-k26-dsrs/sonnet5-large-r1-append-only"
+artifact_type = "request_adapter_instruction"
+path = "datasets/request-adapter/kimi-k26-dsrs-sonnet5-large-r1-append-only-gepa.json"
+profile = "kimi-k26-dsrs"
+
+[[artifacts]]
+id = "request-adapter/kimi-k27-code-dsrs/sonnet5-large-r1-append-only"
+artifact_type = "request_adapter_instruction"
+path = "datasets/request-adapter/kimi-k27-code-dsrs-sonnet5-large-r1-append-only-gepa.json"
+profile = "kimi-k27-code-dsrs"
+
+[[artifacts]]
+id = "request-adapter/glm52-dsrs/sonnet5-large-r1-append-only"
+artifact_type = "request_adapter_instruction"
+path = "datasets/request-adapter/glm-dsrs-sonnet5-large-r1-append-only-gepa.json"
+profile = "glm52-dsrs"
+
 [[profiles]]
 name = "gemma-dsrs-conservative"
 revision = 9
@@ -78,3 +96,24 @@ model_patterns = ["qwen", "qwq"]
 revision = 6
 request_adapter_artifact = "request-adapter/qwen-dsrs/sonnet5-shuffled-r1-regenerated-context"
 dsrs_history_format = "regenerated_context"
+
+[[profiles]]
+name = "kimi-k26-dsrs"
+model_patterns = ["moonshotai/kimi-k2.6", "kimi-k2.6"]
+revision = 2
+request_adapter_artifact = "request-adapter/kimi-k26-dsrs/sonnet5-large-r1-append-only"
+dsrs_history_format = "append_only"
+
+[[profiles]]
+name = "kimi-k27-code-dsrs"
+model_patterns = ["moonshotai/kimi-k2.7-code", "kimi-k2.7-code", "kimi-k27-code"]
+revision = 2
+request_adapter_artifact = "request-adapter/kimi-k27-code-dsrs/sonnet5-large-r1-append-only"
+dsrs_history_format = "append_only"
+
+[[profiles]]
+name = "glm52-dsrs"
+model_patterns = ["z-ai/glm-5.2", "glm-5.2", "glm52"]
+revision = 2
+request_adapter_artifact = "request-adapter/glm52-dsrs/sonnet5-large-r1-append-only"
+dsrs_history_format = "append_only"
